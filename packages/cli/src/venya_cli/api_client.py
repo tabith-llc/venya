@@ -417,7 +417,24 @@ class APIClient:
         server_url: str | None = None,
         access_token: str | None = None,
         config_file: Path | None = None,
+        allow_missing_admin_pair: bool = False,
     ) -> None:
+        """Build the API client.
+
+        `allow_missing_admin_pair` (#667) exempts the pair EXISTENCE check only,
+        for one caller: `venya admin cert renew` names VENYA_ADMIN_CERT/KEY as
+        the OUTPUT paths it writes, so the constructor cannot demand files that
+        only this command can create — a fresh workstation could otherwise never
+        mint its first admin certificate. The exemption is keyed on the resolved
+        subcommand at the single dispatch site that knows argv (`run_command`),
+        is default OFF, and touches NOTHING else: the paired-set checks, the
+        loose-key mode warning, `has_admin_mtls` semantics and every transport
+        behavior are byte-identical when the pair exists. `cmd_admin_cert_renew`
+        keeps its own guards and they still run first: named output paths, a
+        login-session bearer (no cert presentation — RF-8b), and the #547a
+        passphrase. A missing pair also stages nothing for presentation below,
+        so an exempt client never half-presents files that are not there.
+        """
         self.config = Config(config_file=config_file)
         if server_url:
             # #398: the constructor URL is the one-shot flag/env override —
@@ -438,10 +455,13 @@ class APIClient:
                 "VENYA_ADMIN_KEY is set but VENYA_ADMIN_CERT is not. Both are required for admin mTLS."
             )
 
-        # True when both admin-mTLS env vars are set. The file-existence check
-        # below raises if either path is invalid, so a constructed client with
-        # has_admin_mtls=True always has a usable cert. run_command's headless
-        # gate reads this to exempt `admin` from interactive FIDO2.
+        # True when both admin-mTLS env vars are set. Outside the one #667
+        # exemption below, the file-existence check raises if either path is
+        # invalid, so a constructed client with has_admin_mtls=True always has a
+        # usable cert. run_command's headless gate reads this to exempt `admin`
+        # from interactive FIDO2 — and that gate already excludes `admin cert
+        # renew` (RF-8b), so the exempt-with-missing-pair state never waves a
+        # ceremony through. Semantics unchanged; only the guarantee is scoped.
         self.has_admin_mtls = bool(cert_path and key_path)
 
         http_kwargs: dict[str, Any] = {
@@ -451,7 +471,7 @@ class APIClient:
         }
         if cert_path and key_path:
             for p, var in ((cert_path, "VENYA_ADMIN_CERT"), (key_path, "VENYA_ADMIN_KEY")):
-                if not os.path.isfile(p):
+                if not os.path.isfile(p) and not allow_missing_admin_pair:
                     raise APIClientError(
                         f"{var} points at {p!r}, which does not exist. "
                         "Do not copy the core's admin pair here — it names the core, not a "
@@ -477,8 +497,14 @@ class APIClient:
         # cli-admin-mtls-verify-cert-conflict, option (a)): httpx2 >= 2.12
         # rejects a string verify= combined with cert=, so both directions
         # unify into one ssl.SSLContext handed over as verify=.
-        self._admin_certfile = cert_path if (cert_path and key_path) else None
-        self._admin_keyfile = key_path if (cert_path and key_path) else None
+        # Present the pair only when the bytes are actually there. The existence
+        # check above made that a guarantee for every command; the one exempt
+        # case (#667 renew, paths not yet written) must stage NOTHING, so an
+        # earlier dial in the process (the /health advisory) never half-presents
+        # a missing file. When the pair exists, this is byte-identical to before.
+        pair_present = bool(cert_path and key_path and os.path.isfile(cert_path) and os.path.isfile(key_path))
+        self._admin_certfile = cert_path if pair_present else None
+        self._admin_keyfile = key_path if pair_present else None
         # RF-8b: the ONE narrow, default-OFF escape from presenting the admin client
         # credential. `admin cert renew` flips this (see `use_session_only_transport`)
         # because the mint route is session-shaped by ruling — RF-6 §2.2 makes the
