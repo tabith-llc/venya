@@ -335,22 +335,31 @@ class TestAdminIssueToken:
 
 
 class TestAdminRevokeToken:
-    """Tests for venya admin revoke-token command."""
+    """Tests for venya admin revoke-token command (#666).
 
-    def test_revoke_token_success(self):
-        """Revoke token succeeds and prints confirmation."""
+    Every response body here is the shape the route ACTUALLY returns, captured against
+    the shipped bytes: ``AdminTokenRevokeResponse`` is ``{"token_id": int, "revoked": bool}``
+    (`packages/server/src/server/routes/admin.py`, `admin_revoke_token`), and a id the route
+    did not touch answers **200 with ``revoked: false``**, not 404 and not 400. The two older
+    cells in this class mocked ``{"deleted": True}`` and a 400-on-already-revoked, and neither
+    shape exists in the server — which is why the false success shipped green: a test that
+    pins a fiction can never catch the fiction.
+    """
+
+    def test_revoke_token_success(self, capsys):
+        """Confirmed revocation exits 0 and names the user plane."""
         client, config_file = _make_client()
         mock_http = MagicMock()
         mock_response = _make_mock_response(
             status_code=200,
-            json_data={"deleted": True},
+            json_data={"revoked": True, "token_id": 1},
         )
         mock_response.raise_for_status.return_value = None
         mock_http.request.return_value = mock_response
         client._http = mock_http
 
         args = MagicMock()
-        args.token_id = "tok_001"
+        args.token_id = "1"
         args.json = False
 
         result = cmd_admin_revoke_token(client, args)
@@ -358,12 +367,128 @@ class TestAdminRevokeToken:
 
         call_args = mock_http.request.call_args
         assert call_args[0][0] == "DELETE"
-        assert call_args[0][1] == "/api/v1/admin/enrollment-tokens/tok_001"
+        assert call_args[0][1] == "/api/v1/admin/enrollment-tokens/1"
+        # The confirmation names WHICH plane it acted on: user and executor enrollment
+        # tokens are separate tables sharing one integer id space (#666 ACT 1, case f).
+        out = capsys.readouterr().out
+        assert "User enrollment token '1' revoked." in out
+        client.close()
+        config_file.unlink()
+
+    def test_revoke_token_200_not_revoked_is_a_refusal(self, capsys):
+        """#666 the bug: 200 + revoked:false is a NO-OP, so the CLI must not report success.
+
+        This is the shape the server returns for an id it did not touch. Transport success
+        is not semantic success — the body decides.
+        """
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=200,
+            json_data={"revoked": False, "token_id": 999999},
+        )
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.token_id = "999999"
+        args.json = False
+
+        result = cmd_admin_revoke_token(client, args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Nothing was revoked" in captured.err
+        assert "999999" in captured.err
+        assert "revoked." not in captured.out
+        client.close()
+        config_file.unlink()
+
+    def test_revoke_token_executor_plane_id_is_a_refusal(self, capsys):
+        """An executor-class id answers revoked:false on this user-scoped route — refused, and
+        the repair text says the true thing (no executor revoke verb exists; TTL expires it)."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=200,
+            json_data={"revoked": False, "token_id": 1},
+        )
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.token_id = "1"
+        args.json = False
+
+        result = cmd_admin_revoke_token(client, args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Nothing was revoked" in captured.err
+        assert "Executor enrollment tokens have no revoke command" in captured.err
+        assert "revoked." not in captured.out
+        client.close()
+        config_file.unlink()
+
+    def test_revoke_token_200_already_revoked_is_a_refusal(self, capsys):
+        """Already-revoked (the captured real shape: 200 + revoked:false) exits 1.
+
+        Corrected from a cell that mocked 400 "Token is already revoked" — the shipped route
+        never emits that (#666 ACT 1 case d).
+        """
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=200,
+            json_data={"revoked": False, "token_id": 2},
+        )
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.token_id = "2"
+        args.json = False
+
+        result = cmd_admin_revoke_token(client, args)
+        assert result == 1
+        assert "Nothing was revoked" in capsys.readouterr().err
+        client.close()
+        config_file.unlink()
+
+    def test_revoke_token_200_without_the_flag_is_a_refusal(self, capsys):
+        """A 200 whose body carries no confirmation at all (empty or shape-drifted) is a failure.
+
+        The guard is on the VALUE being exactly True, so an absent key cannot read as success.
+        """
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(status_code=200, json_data={})
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.token_id = "7"
+        args.json = False
+
+        result = cmd_admin_revoke_token(client, args)
+        assert result == 1
+        assert "Nothing was revoked" in capsys.readouterr().err
         client.close()
         config_file.unlink()
 
     def test_revoke_token_404_not_found(self):
-        """Revoke non-existent token returns 404."""
+        """Non-2xx is a transport failure and exits 1.
+
+        NOTE: the shipped route does not answer 404 for an absent id (it answers 200 +
+        revoked:false — see the cell above). This cell holds the CLI's error path for a
+        non-2xx answer from ANY front of house (proxy, authz rejection, future change),
+        which is a real thing a CLI must handle; it is no longer a claim about what
+        admin_revoke_token returns for a miss.
+        """
         client, config_file = _make_client()
         mock_http = MagicMock()
         mock_response = _make_mock_response(
@@ -385,22 +510,23 @@ class TestAdminRevokeToken:
         client.close()
         config_file.unlink()
 
-    def test_revoke_token_400_already_revoked(self):
-        """Revoke already-revoked token returns 400."""
+    def test_revoke_token_422_non_numeric_id(self, capsys):
+        """A non-numeric token id is refused by FastAPI (422) and exits 1 — measured face,
+        the only pre-existing path that already reported honestly (#666 ACT 1 case e)."""
         client, config_file = _make_client()
         mock_http = MagicMock()
         mock_response = _make_mock_response(
-            status_code=400,
-            json_data={"detail": "Token is already revoked"},
+            status_code=422,
+            json_data={"detail": [{"type": "int_parsing", "loc": ["path", "token_id"]}]},
         )
         mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
-            "bad request", request=MagicMock(), response=mock_response
+            "unprocessable", request=MagicMock(), response=mock_response
         )
         mock_http.request.return_value = mock_response
         client._http = mock_http
 
         args = MagicMock()
-        args.token_id = "tok_old"
+        args.token_id = "not-an-int"
         args.json = False
 
         result = cmd_admin_revoke_token(client, args)
