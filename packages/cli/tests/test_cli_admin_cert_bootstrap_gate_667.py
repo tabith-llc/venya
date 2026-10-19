@@ -31,7 +31,6 @@ every cell.
 """
 
 import datetime
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -112,11 +111,18 @@ def _never_dial():
     return patch("venya_cli.api_client.httpx2.Client", side_effect=AssertionError("a transport was built"))
 
 
-def _fresh_ws(tmp_path: Path, *, token: bool = True) -> tuple[dict[str, str], Path, Path]:
+def _fresh_ws(tmp_path: Path, monkeypatch, *, token: bool = True) -> tuple[dict[str, str], Path, Path]:
     """A FRESH workstation: a config with (or without) a session bearer, an anchor CA,
     and the admin pair pointed at paths that DO NOT EXIST — the exact #667 state.
 
-    Returns (env-shaping paths, out_crt, out_key). The out paths are never created
+    Env is shaped through monkeypatch.setenv, never raw os.environ writes: a direct
+    write is NOT undone at teardown (delenv of an ABSENT var records no undo), which
+    leaked these dead paths into a later file's real-APIClient cell and poisoned
+    tests/test_cli_dial_seam_https_521_site1.py — found by the full-suite run, not
+    by the targeted one. The tuple's first slot stays an empty dict for call-site
+    symmetry.
+
+    Returns (unused-paths-dict, out_crt, out_key). The out paths are never created
     here; that is the point of the leg.
     """
     cfg = tmp_path / "config.json"
@@ -127,10 +133,10 @@ def _fresh_ws(tmp_path: Path, *, token: bool = True) -> tuple[dict[str, str], Pa
     anchor.write_bytes(_minted_cert())  # any readable PEM satisfies the anchor read
     out_crt, out_key = tmp_path / "fresh-admin.crt", tmp_path / "fresh-admin.key"
     assert not out_crt.exists() and not out_key.exists()
-    os.environ["VENYA_CONFIG"] = str(cfg)
-    os.environ["SSL_CERT_FILE"] = str(anchor)
-    os.environ["VENYA_ADMIN_CERT"] = str(out_crt)
-    os.environ["VENYA_ADMIN_KEY"] = str(out_key)
+    monkeypatch.setenv("VENYA_CONFIG", str(cfg))
+    monkeypatch.setenv("SSL_CERT_FILE", str(anchor))
+    monkeypatch.setenv("VENYA_ADMIN_CERT", str(out_crt))
+    monkeypatch.setenv("VENYA_ADMIN_KEY", str(out_key))
     return {}, out_crt, out_key
 
 
@@ -168,8 +174,8 @@ class TestFreshWorkstationCanRunRenew:
     """The positive half: `run_command` constructs the REAL client with the pair
     absent and the mint proceeds — no `which does not exist` anywhere."""
 
-    def test_renew_constructs_and_mints_with_pair_absent(self, tmp_path, capsys):
-        _out, out_crt, out_key = _fresh_ws(tmp_path)
+    def test_renew_constructs_and_mints_with_pair_absent(self, tmp_path, monkeypatch, capsys):
+        _out, out_crt, out_key = _fresh_ws(tmp_path, monkeypatch)
         stub = _StubTransport()
         with (
             _dialing(stub),
@@ -188,9 +194,9 @@ class TestEveryOtherGateStillRefuses:
     """The negative halves — the leg proper. The exemption is keyed to ONE
     resolved subcommand; everything else must refuse byte-identically."""
 
-    def test_admin_cert_status_still_refuses_missing_pair(self, tmp_path, capsys):
+    def test_admin_cert_status_still_refuses_missing_pair(self, tmp_path, monkeypatch, capsys):
         """Same missing-pair state, subcommand `status`: the gate is NOT widened."""
-        _out, _crt, _key = _fresh_ws(tmp_path)
+        _out, _crt, _key = _fresh_ws(tmp_path, monkeypatch)
         with _never_dial():
             rc = run_command(_ns("status"))
         err = capsys.readouterr().err
@@ -201,10 +207,10 @@ class TestEveryOtherGateStillRefuses:
         assert "readable" in err.lower() or "does not exist" in err
 
     @pytest.mark.parametrize("admin_command", ["executor-enroll", "create-user"])
-    def test_other_admin_verbs_still_refuse_missing_pair(self, tmp_path, admin_command):
+    def test_other_admin_verbs_still_refuse_missing_pair(self, tmp_path, monkeypatch, admin_command):
         """Constructor-level proof at the dispatch site: any other admin verb
         takes no flag, so the shipped existence refusal fires verbatim."""
-        _out, _crt, _out_key = _fresh_ws(tmp_path)
+        _out, _crt, _out_key = _fresh_ws(tmp_path, monkeypatch)
         ns = SimpleNamespace(
             command="admin",
             admin_command=admin_command,
@@ -220,7 +226,7 @@ class TestEveryOtherGateStillRefuses:
     def test_renew_still_refuses_missing_output_path(self, tmp_path, monkeypatch, capsys):
         """Guard order kept: no output path named -> the 'nowhere to write'
         refusal, rc=1, even though the constructor now lets the client exist."""
-        _out, _crt, _key = _fresh_ws(tmp_path)
+        _out, _crt, _key = _fresh_ws(tmp_path, monkeypatch)
         monkeypatch.delenv("VENYA_ADMIN_CERT")
         monkeypatch.delenv("VENYA_ADMIN_KEY")
         with _never_dial(), patch("venya_cli.commands._elevate") as elevate:
@@ -230,12 +236,12 @@ class TestEveryOtherGateStillRefuses:
         assert "nowhere to write" in err
         elevate.assert_not_called()
 
-    def test_renew_still_refuses_without_session_bearer(self, tmp_path, capsys):
+    def test_renew_still_refuses_without_session_bearer(self, tmp_path, monkeypatch, capsys):
         """Guard order kept: the mint is session-shaped (RF-8b). With no bearer
         the ceremony branch runs, yields no token, and the handler's own
         'needs a login session' refusal lands rc=1 — `_never_dial` proves no
         transport was ever built."""
-        _out, _crt, _key = _fresh_ws(tmp_path, token=False)
+        _out, _crt, _key = _fresh_ws(tmp_path, monkeypatch, token=False)
         with (
             _never_dial(),
             patch("venya_cli.api_client.APIClient.authenticate", return_value=None),
@@ -250,7 +256,7 @@ class TestEveryOtherGateStillRefuses:
     def test_renew_still_refuses_without_passphrase(self, tmp_path, monkeypatch, capsys):
         """#547a kept first: no passphrase -> refusal, rc=1, NOTHING written."""
         monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE")
-        _out, out_crt, out_key = _fresh_ws(tmp_path)
+        _out, out_crt, out_key = _fresh_ws(tmp_path, monkeypatch)
         with _never_dial(), patch("venya_cli.commands._elevate") as elevate:
             rc = run_command(_ns())
         err = capsys.readouterr().err
