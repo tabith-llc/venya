@@ -10,6 +10,15 @@ those bytes._
 
 ## [0.1.0beta1] - 2026-10-15
 
+- **The pre-beta alpha line is withdrawn by owner order (2026-10-18).** The
+  `v0.1.0alpha*` and `v0.1.0-alpha.*` releases are retired: new installs and upgrade
+  recipes pin a beta tag (`v0.1.0beta1` is the name the cut creates), never an alpha
+  tag. Removing the tag refs and their GitHub releases is a SEPARATE owner act (a
+  squash deletes commits, not tags; and a tag is not its release), so an alpha name may
+  still resolve until that runs. The
+  alpha sections below stay exactly as written either way — the product did ship those
+  builds, and a record that names them is history, not an error.
+
 - **The executor's revocation poll is answered from a freshness-bounded snapshot
   (#603, AC2 step 2).** A core republishes the revoked-serial and revoked-identity
   population every 10 s and answers `GET /api/v1/executors/certs/revocation-list` from

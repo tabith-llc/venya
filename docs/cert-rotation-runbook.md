@@ -61,10 +61,15 @@ in name only and a third number nearby is not a lifetime at all:
 The clock starts at the cut-over because the age-out is about the **handoff**: an
 install made with an installer that still told you to copy the pair mints a
 credential that lives 90 days from *that* install. So the published date is a floor,
-not a guarantee, and one fact about the cut-over matters to it: `2b70210` landed on
-the development branch, and the newest published tag at this file's base
-(`v0.1.0alpha16`, 2026-09-27) still prints the old copy instruction. Until a release
-carries the new banner, an operator installing today still mints an old-shape pair,
+not a guarantee, and one fact about the cut-over matters to it: the banner change
+(`2b70210`, subject "installer: the admin banner points at the ceremony, not a copied
+key") landed on the development branch — that branch has since been rewritten, so read
+it by subject rather than trusting the number — and when this file was written the
+newest published tag (`v0.1.0alpha16`, 2026-09-27) still printed the old copy
+instruction. That alpha line is withdrawn by owner order (2026-10-18), so the sentence
+above is a dated reading of a release being retired, and `v0.1.0beta1` is the first
+release to be published that carries the new banner. Until an operator installs from a
+release that carries it, an install still mints an old-shape pair,
 and that install's own closure date is its install day plus 90 days — readable, not
 guessable, on the core that holds it:
 

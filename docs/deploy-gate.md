@@ -9,7 +9,9 @@ paths and each has a different guarantee:
 
 `create-tarball-and-serve.sh --ref <git-ref>` builds every served byte from
 `git archive` of the ref. The working tree is never consulted, so no dirty
-state can reach a published asset. This landed with v0.1.0-alpha.6; use it
+state can reach a published asset. This landed on the pre-beta alpha line
+(`v0.1.0-alpha.6`) — that line is withdrawn by owner order (2026-10-18), so cite it as
+how the guarantee was proven, not as a tag to build from; use it
 for anything that leaves the dev fleet.
 
 ## Dev-deploy path (procedural — this doc)

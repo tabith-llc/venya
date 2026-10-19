@@ -156,8 +156,12 @@ $env:VENYA_SKIP_PROMPT = "yes"
 
 *Serving note:* `create-tarball-and-serve.sh` serves both `.ps1` files when the
 built ref contains them, and omits them (with a `WARN`, removing any stale copy)
-for older refs. They are GitHub release assets since `v0.1.0-alpha.10` (the
-15-asset manifest; pre-Windows tags legitimately carry 13).
+for older refs. They are GitHub release assets from the 15-asset manifest on
+(`v0.1.0-alpha.10`; pre-Windows tags legitimately carry 13). That manifest sits on the
+pre-beta alpha line, which the owner withdrew on 2026-10-18 — the removal of the tags
+and their releases is a separate owner act, so an alpha asset may still resolve until
+it runs. For a current install use the beta tag (`v0.1.0beta1`, created when the cut
+lands).
 
 ### Uninstallers
 
@@ -199,11 +203,15 @@ The piped install one-liners below work because the install scripts self-fetch `
 
 ### Deterministic rebuild from a published tag
 
-Release tarballs from `v0.1.0-alpha.6` onward are `git archive` outputs — **byte-reproducible from any clone of the tag**. Anyone can verify a published asset:
+Release tarballs are `git archive` outputs — **byte-reproducible from any clone of
+the tag**. That property arrived with `v0.1.0-alpha.6`, on the pre-beta alpha line the
+owner withdrew on 2026-10-18, so treat the alpha names as the dated record of how the
+recipe was proven and pin the example below to a tag you know resolves. Anyone can
+verify a published asset:
 
 ```bash
 git clone git@github.com:tabith-llc/venya.git && cd venya
-TAG=v0.1.0-alpha.6   # any release tag ≥ alpha.6
+TAG=v0.1.0beta1   # the release tag you are rebuilding from (created when the cut lands)
 cd /tmp
 git -C venya archive --format=tar --prefix=./ "$TAG" | gzip -n > venya-core-install.tar.gz
 git -C venya archive --format=tar --prefix=./ "$TAG" packages/cli packages/mcp | gzip -n > venya-cli-install.tar.gz
@@ -213,7 +221,9 @@ curl -fsSLO $BASE/venya-cli-install.tar.gz.sha256
 sha256sum -c venya-core-install.tar.gz.sha256 venya-cli-install.tar.gz.sha256
 ```
 
-Notes: the executor tarball is byte-identical to the core tarball by design (whole-tree archive; component choice happens at install time). Byte-stability requires `gzip -n` (strips the timestamp) and the same git major version. `--prefix=./` is load-bearing: the installers extract with `tar --strip-components=1`, which consumes the `./` component — an unprefixed archive loses every top-level file (the v0.1.0-alpha.5 defect; its assets match the recipe without `--prefix=./`). Local `git archive` output carries no `pax_global_header` entry (that record appears only in GitHub-generated tarballs).
+Notes: the executor tarball is byte-identical to the core tarball by design (whole-tree archive; component choice happens at install time). Byte-stability requires `gzip -n` (strips the timestamp) and the same git major version. `--prefix=./` is load-bearing: the installers extract with `tar --strip-components=1`, which consumes the `./` component — an unprefixed archive loses every top-level file; that is how `v0.1.0-alpha.5` shipped
+(a dated record on the withdrawn pre-beta alpha line: its assets match the recipe
+without `--prefix=./`). Local `git archive` output carries no `pax_global_header` entry (that record appears only in GitHub-generated tarballs).
 
 ### Install from a local build mirror (override the GitHub defaults)
 
