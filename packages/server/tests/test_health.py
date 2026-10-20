@@ -191,3 +191,38 @@ class TestReadinessCheck:
         data = resp.json()
         assert data["status"] == "degraded"
         assert data["checks"]["database"] == "not_ready"
+
+    def test_ready_db_error_guard_is_the_class_form_discriminator(self):
+        """#603 AC2: names what ``test_ready_db_error`` above protects by coincidence.
+
+        The readiness probe picks its connection pool on the backend's CLASS
+        (``getattr(type(backend), "get_liveness_session", None)``), the same
+        discriminator the executor-mTLS middleware uses. Weaken that to the INSTANCE
+        and this mock supply answers it: the probe then reads a reserved session that
+        never fails, so ``/ready`` reports ``ok`` on the database this cell declares
+        DOWN. That reddens ``test_ready_db_error`` today, but its name says "DB error",
+        so the protection reads as an accident and a future simplification of the mock
+        supply can delete it without anyone noticing. This cell is named for it.
+
+        Placed beside the supply it guards, on purpose — it is not a duplicate of
+        ``tests/test_ready_liveness_pool_603.py``, which asserts the same rule from the
+        healthy side. The supply a seat edits lives here.
+        """
+        backend = MagicMock()
+        # The trap, stated as a fact about the supply rather than inferred from a
+        # failing peer: the INSTANCE carries any attribute a mock is asked for,
+        # the CLASS does not.
+        assert callable(getattr(backend, "get_liveness_session", None)) is True
+        assert callable(getattr(type(backend), "get_liveness_session", None)) is False
+
+        db = MagicMock()
+        db.execute.side_effect = Exception("Connection refused")
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/ready")
+
+        assert resp.json()["checks"]["database"] == "not_ready"
+        backend.get_session.assert_called_once()
+        backend.get_liveness_session.assert_not_called()
