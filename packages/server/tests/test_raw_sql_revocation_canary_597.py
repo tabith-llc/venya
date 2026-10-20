@@ -51,7 +51,7 @@ from datetime import UTC, datetime
 import pytest
 from core.iam.models import Base
 from server import revocation_snapshot as rs
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -117,6 +117,18 @@ def _read_serials(SessionLocal) -> list[str]:
 
 def _make_session(tmp_path, name: str):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        # #634: a SQLite engine is FK-blind unless every connection opts in. This file
+        # creates the whole schema via Base.metadata.create_all, so it is an engine-builder
+        # the interlock counts — enforcement is installed here rather than exempted, and
+        # ``executor_cert_revocations`` carries no FK today, so this costs nothing and is
+        # the half that stays correct if a FK is ever added to the population tables.
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
     Base.metadata.create_all(engine)
     return engine, sessionmaker(bind=engine)
 
