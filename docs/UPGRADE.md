@@ -232,16 +232,21 @@ pre-upgrade database, reinstall the older version.**
 1. Restore the `pre-upgrade-…sql.gz` dump from `/var/backups/venya/` into the
    `venya` database. The dump is plain `pg_dump | gzip`. What a database dump
    is and is not (it is half of a paired secret set) is covered by
-   [BACKUPS.md](BACKUPS.md) — read its "pairings" section before restoring;
-   its restore procedure carries that document's own honest caveat: it is
-   alpha-documented and not yet validated by a full restore drill.
+   [BACKUPS.md](BACKUPS.md) — read its "pairings" section before restoring.
+   That document's own restore procedure is validated by the physical drill
+   recorded at the top of it (2026-09-30); the caveats it carries are marked
+   at the steps they govern, including the CA-key custody path, whose
+   round-trip is still awaiting live-core verification.
 2. Reinstall the older version with the **current** installer: pin `TAG` and
    `VENYA_TARBALL` to the older tag and pass `VENYA_ALLOW_DOWNGRADE=yes`
    (schema-stays warning applies — your restored dump carries the old schema,
    which is exactly why step 1 must come first).
 
-The drill verified the dumps themselves (`gzip -t` OK, pg_dump header read on
-each) but did not run a restore drill.
+The upgrade drill named above verified the dumps themselves (`gzip -t` OK,
+pg_dump header read on each) but did not run a restore drill — that is the
+2026-09-30 drill recorded in [BACKUPS.md](BACKUPS.md), and it exercised that
+document's own backup→wipe→reinstall→restore path, not a rollback from a
+pre-upgrade dump.
 
 **What a failed upgrade can leave.** The version-guard refusal happens before
 extraction — that path is zero-mutation (proven). Failures AFTER that point
