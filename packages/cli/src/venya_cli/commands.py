@@ -1088,8 +1088,15 @@ def cmd_admin_remove_executor(client: APIClient, args: Any) -> int:
     stderr with a nonzero exit (user-remove precedent).
     """
     try:
-        client.delete(f"/api/v1/admin/executors/{quote(args.executor_id, safe='')}")
-        print(f"Executor '{args.executor_id}' removed (current certificate revoked).")
+        result = client.delete(f"/api/v1/admin/executors/{quote(args.executor_id, safe='')}")
+        # The route reports which serial it revoked, and that is None when the row
+        # carried no certificate record at all — so the parenthetical says what the
+        # answer supports rather than asserting a revocation that may not have happened.
+        revoked_serial = (result or {}).get("revoked_serial")
+        if revoked_serial:
+            print(f"Executor '{args.executor_id}' removed (current certificate revoked: {revoked_serial}).")
+        else:
+            print(f"Executor '{args.executor_id}' removed (no certificate record to revoke).")
         return 0
     except APIClientError as e:
         print(f"Remove failed: {e}", file=sys.stderr)
@@ -3884,12 +3891,20 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
             json={"serial": serial.casefold()} if serial else None,
         )
         revoked = result.get("revoked", False) if result else False
+        # The core answers 200 with revoked=false when the serial it was given is
+        # ALREADY revoked (identity form: the executor row already carries
+        # revoked_at). Transport success is not semantic success, so the headline
+        # follows the flag the summary line already prints (#666 precedent).
         if serial:
-            print("Certificate serial revoked (identity NOT revoked).")
+            print(
+                "Certificate serial revoked (identity NOT revoked)."
+                if revoked
+                else "Certificate serial was already revoked (no change)."
+            )
             print(f"  Executor ID:  {executor_id}")
             print(f"  Serial:       {serial.casefold()}")
         else:
-            print("Certificate revoked.")
+            print("Certificate revoked." if revoked else "Executor identity was already revoked (no change).")
             print(f"  Executor ID:  {executor_id}")
         if not serial and revoked:
             print("  Identity:     REVOKED (terminal — re-enrollment requires a NEW executor_id)")
