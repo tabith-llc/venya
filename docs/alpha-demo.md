@@ -91,8 +91,11 @@ without the operator or the LLM ever touching the target's credentials:
 Sandbox notes for the extended demo: commands run in an sbx microVM with
 deny-by-default egress (allowlist on the executor); trusted-path validation
 requires commands to resolve into trusted directories (absolute paths like
-`/bin/cat`, `/usr/bin/ssh`; bare names are PATH-resolved) — shell builtins
-are rejected by design; the sandbox template must contain the tools you
+`/bin/cat`, `/usr/bin/ssh`; bare names are PATH-resolved) — whatever does
+not resolve is refused as "command not in trusted paths"; there is no
+builtin table, so the rule is RESOLUTION, not shell-ness (`echo`, `true`,
+`test`, `printf` have real binaries and PASS; `cd`, `export`, `source`,
+`eval` have none and are refused). The sandbox template must contain the tools you
 invoke (`sshpass` etc.).
 
 **Secret-handling rule for agents and operators:** reference secrets ONLY
@@ -119,7 +122,8 @@ and its exact output, start to finish — see
 ## Troubleshooting
 
 - `422` on step 1: check the JSON body carries `key_version_id` (required).
-- `503` on step 3: builtins/unresolvable commands — use absolute trusted
+- `503` on step 3: unresolvable command tokens — builtins with no binary
+  behind them (`cd`, `export`, `source`, `eval`) — use absolute trusted
   paths. A leading `--` separator on `venya run` is consumed by the CLI and
   is safe to pass (as the step-3 example does).
 - **First run times out** ("read operation timed out") on a freshly
