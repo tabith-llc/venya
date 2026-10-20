@@ -229,7 +229,21 @@ def require_role(permission: str):
         backend: Backend = Depends(get_backend),
     ) -> dict:
         # "none" — any authenticated caller passes without role checks.
-        # Used temporarily for heartbeat endpoint (hardened to mTLS identity in Phase 3).
+        # ZERO PRODUCTION CALLERS TODAY, and the wording this line carried was stale:
+        # the heartbeat route it pointed at was the alpha ``POST /executors/{id}/heartbeat``,
+        # REMOVED with sec-endpoint-ratelimit-hardening #7 (guard cell:
+        # ``test_executor_server.py::test_dead_alpha_id_heartbeat_route_removed`` → 404),
+        # so there was never a "Phase 3" hardening of THIS tier to wait for. The live beat
+        # is ``POST /api/v1/heartbeat``, which does not use ``require_role`` at all: it is
+        # executor-mTLS gated in ``middleware/auth.py`` and binds body ``executor_id`` to
+        # the verified cert CN route-side (``routes/executors.py`` ``heartbeat``).
+        #
+        # Its pass-through of a REVOKED-but-verified executor is DELIBERATE and is NOT this
+        # gate's doing — the middleware runs that path with ``reject_revoked=False`` under
+        # owner ruling B1 (2026-09-20), so the 200 ``{revoked: true}`` RESPONSE is the fast
+        # cooperative-stop channel. Do not "harden" it to ``reject_revoked=True`` or to
+        # 401/403: that kills the ruled channel (guard:
+        # ``test_heartbeat_revoked_still_200_cooperative_channel_b1``).
         if permission == "none":
             return user_info
 

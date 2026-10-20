@@ -1287,7 +1287,6 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     echo "  an encrypted admin key for admin mTLS is the open read-side work (#565 Part"
     echo "  B). Until that lands, the headless admin pattern on this core is the"
     echo "  machine-plane pair above. With neither credential, admin endpoints answer 403."
-    echo "  To disable: set VENYA_ADMIN_MTLS_ENABLED=false and reinstall."
     echo "==============================================================="
     echo ""
 fi
