@@ -51,6 +51,21 @@ repos:
         language: system
         stages: [commit-msg]
 
+      # Refs #447: the httpx2 cap is a workspace-wide ruling, but only this census can see all
+      # five declaring members. It sits BEFORE the lock-comparing hooks on purpose: a cap-stripped
+      # member manifest would otherwise meet `requirements-pinned`/`pip-audit` first, and their own
+      # dictated remedy (`uv lock`) quiets both while leaving the uncapped declaration in place —
+      # this census is stdlib-only (`tomllib` + `pathlib`), never invokes `uv`, and cannot re-lock
+      # (the #627 class). The same rule has a second door: packages/cli/tests/
+      # test_httpx2_upper_bound_447.py imports this script, which is what covers `--no-verify`
+      # and a fresh clone with no hooks installed (measured: 0 non-sample hooks).
+      - id: httpx2-bound-census
+        name: httpx2 bound census (workspace-wide, #447)
+        entry: python3 scripts/check_httpx2_bound_census.py
+        language: system
+        pass_filenames: false
+        files: "^packages/[^/]+/pyproject\\.toml$"
+
       - id: uv-lock
         name: uv-lock (check)
         entry: uv lock --check
