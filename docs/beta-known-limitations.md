@@ -616,6 +616,42 @@ an open one.
 number, applied at the installer prompt and at every reader together, with the documented
 test values re-checked against it in the same change.
 
+### The secret-length bounds are proven at unit and source level and have never been observed at a real terminal prompt
+
+Status: known limitation in beta · Target: the owner-present fleet window (`AC8`) · Tracked as: #675
+(open, HIGH — its code half is merged to `dev`; this entry discloses the missing physical half)
+
+**Who is affected:** anyone who types a server encryption passphrase at an installer prompt and
+wants the printed bound to be the bound that actually governs, at the terminal, not only in tests.
+
+**What the limitation is:** the ruled length bounds on the passphrase plane — the enforced floor
+(`MIN_PASSPHRASE_CODE_POINTS`, in `packages/core/src/core/engine/backend.py`) and the stated
+ceiling (`MAX_PASSPHRASE_CODE_POINTS`, a documented permit and deliberately never a refusal door,
+as that file's own comment states) — are proven by unit and source cells and have **never been
+observed at a real TTY prompt**. The enforcement and disclosure sites exist and are source-verified
+across both planes: the core DB-key-material door refuses a below-floor passphrase via
+`is_passphrase_below_floor` in `packages/core/src/core/engine/backend.py`; the CA plane keeps its
+own floor (`MIN_PASSPHRASE_CODE_POINTS` and `_passphrase_is_below_floor` in
+`packages/server/src/server/ca.py`); the CLI states the same pair as its own named constants in
+`packages/cli/src/venya_cli/commands.py`; and the installer-side floor and prompt live in
+`install-venya-core.sh` (`DB_PASSPHRASE_FLOOR`). The declarations are guarded against drift by
+`packages/core/tests/test_passphrase_length_declarations_agree_675.py`, the prompt disclosure by
+`packages/cli/tests/test_prompt_length_disclosure_675.py`, the installer blank-entry face by
+`packages/server/tests/test_installer_db_passphrase_blank_570.py`, and the installer floor gate by
+`packages/core/tests/test_installer_db_passphrase_floor_gate_615.py`. The physical confirmation
+cell — an operator-facing served install driven to those prompts by hand — is `#675`'s `AC8`, it is
+gated on an owner-present fleet session, and it has not run.
+
+**What is NOT claimed here:** that the bounds are unproven in code. They are not — the enforcement
+sites above exist and are source-verified, and the shipped cells cover the floor, the per-character
+(counting) rule, and the declaration-agreement census. What is not claimed beyond that is only this:
+the at-terminal operator experience has **no physical capture yet**. This entry also does not touch
+the separate password-plane rule stated by the entry **"The two password variables carry no length
+rule at all"** in this document, and it does not revisit the ruling that the ceiling stays a permit.
+
+**What changes at beta+:** the `AC8` run lands in the owner's fleet window and the physical face is
+captured; this entry is **deleted** at that point, not softened.
+
 ### The operator can disable TLS verification by explicit configuration; the product never does it to make a connection succeed
 
 Status: known limitation in beta · Target: none — it is a ruled development hatch, not a defect ·
