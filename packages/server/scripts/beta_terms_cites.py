@@ -101,7 +101,7 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     f"{D}:1899": (D, "relay_client_ids is empty", 1, "pin"),
     f"{D}:1357": (D, "CA certificate expired", 1, "pin"),
     # ---- installers and CA
-    f"{HC}:1020": (HC, "-CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key", 1, "pin"),
+    f"{HC}:1020": (HC, "-CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key", 2, "pin"),
     f"{HC}:1022": (HC, '-CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365', 1, "pin"),
     f"{HC}:1013": (HC, '-subj "/O=Venya/CN=${CORE_HOSTNAME}-relay"', 1, "pin"),
     f"{HC}:1005": (HC, '-out "$RELAY_DIR/relay-client.key"', 1, "pin"),

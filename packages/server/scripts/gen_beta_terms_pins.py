@@ -397,34 +397,60 @@ def manifest_key_problems(module_src: str, mod=None) -> list[str]:
     return out
 
 
-def rekey_manifest(newkey: dict[str, str]) -> str:
+def rekey_manifest(newkey: dict[str, str], values: dict[str, tuple]) -> str:
     """Rewrite the manifest's KEYS to the post-pin coordinates, preserving the file's structure.
 
-    Only the digits at the end of each key literal change, spliced on the key's OWN line (a key never
-    spans lines, even where its value does), so the section comments and the house `f"{CONST}:N"` form
-    survive. The caller writes the result atomically beside the page.
+    Each key node is replaced across its own source span (a key never wraps, even where its value
+    does), so an abbreviated spelling like `executors.py:699` becomes the FULL path the re-pinned page
+    prints — which is what `parse_cites()` looks the token up by. Splicing only the trailing digits,
+    which the first version of this function did, left nine abbreviated keys pointing at tokens the
+    page no longer printed: the manifest looked re-keyed and was not.
+
+    Comments and value formatting survive because nothing outside the key span is touched. When two
+    keys collapse onto one coordinate, the later entry is deleted only if the values are identical;
+    a differing pair is a clobber and the caller refuses before anything is written.
     """
     src = MANIFEST_PY.read_text(encoding="utf-8")
     mod = _load_manifest()
     node = _manifest_dict_node(ast.parse(src))
     if node is None:
         raise ValueError("re-key refused: no MANIFEST literal")
-    moves = [(k.lineno, eval(compile(ast.Expression(k), "<k>", "eval"), vars(mod))) for k in node.keys]
+    pairs = list(zip(node.keys, node.values))
+    plan = []  # (key_node, value_node, old_key, new_key)
+    for k, v in pairs:
+        key = eval(compile(ast.Expression(k), "<k>", "eval"), vars(mod))
+        plan.append((k, v, key, newkey.get(key, key)))
+    # Which new keys are shared, and whether sharing is safe (identical values) or a clobber.
+    by_new: dict[str, list] = {}
+    for _k, _v, old, new in plan:
+        by_new.setdefault(new, []).append(old)
+    drop: set[str] = set()
+    for new, olds in by_new.items():
+        if len(olds) > 1:
+            vals = {tuple(values[o]) for o in olds}
+            if len(vals) > 1:
+                raise ValueError(f"re-key refused: {new} would hold {len(vals)} different meanings {olds}")
+            drop.update(olds[1:])  # identical values: keep the first, delete the rest
     lines = src.split("\n")
-    done = 0
-    for lineno, key in moves:
-        new = newkey.get(key)
-        if not new or key == new:
-            continue
-        old_tail = key.rsplit(":", 1)[1]
-        new_tail = new.rsplit(":", 1)[1]
+    # Right-to-left within a line so earlier columns stay valid; whole-entry deletes applied after.
+    edits = sorted(
+        [
+            (k.lineno, k.col_offset, k.end_col_offset, f"{new!r}")
+            for k, _v, old, new in plan
+            if new != old and old not in drop
+        ],
+        key=lambda e: (e[0], e[1]),
+        reverse=True,
+    )
+    for lineno, c0, c1, text in edits:
         i = lineno - 1
-        needle = f'{old_tail}"'
-        if needle not in lines[i]:
-            raise ValueError(f"re-key refused: {key} not found on its own key line {lineno}")
-        lines[i] = lines[i].replace(needle, f'{new_tail}"', 1)
-        done += 1
-    print(f"re-key: {done} manifest keys moved")
+        lines[i] = lines[i][:c0] + text + lines[i][c1:]
+    deleted = 0
+    for k, v, old, _new in sorted(plan, key=lambda t: t[0].lineno, reverse=True):
+        if old in drop:
+            del lines[k.lineno - 1 : v.end_lineno]
+            deleted += 1
+    print(f"re-key: {len(edits)} manifest keys moved, {deleted} identical-value duplicates dropped")
     return "\n".join(lines)
 
 
@@ -485,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 width = c.end - c.start
                 plan[c.printed] = f"{c.path}:{now}" if width == 0 else f"{c.path}:{now}-{now + width}"
-            new_manifest = rekey_manifest(plan)
+            new_manifest = rekey_manifest(plan, dict(_load_manifest().MANIFEST))
             # Prove the pair is consistent BEFORE publishing either file.
             probe = ast.parse(new_manifest)
             pk = _manifest_dict_node(probe)
