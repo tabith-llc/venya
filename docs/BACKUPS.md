@@ -101,6 +101,44 @@ Net: back up **#1 + #2 + #3 + #4 together, every time.** A DB dump without `.env
 `venya-core.env` is encrypted noise. `/etc/venya/admin/` is deliberately **not** a fifth artifact —
 see the exclusion row below.
 
+### The relay credential registry — backed up inside #1, and it is revocation state
+
+The core presents its own relay **client** certificate when it dials an executor's `:8443`
+listener (CN `<core-hostname>-relay`, minted by the core installer with `openssl`). #597 gave that
+credential a registry: one row per credential in the **`core_relay_credentials`** table, written at
+core boot by `server/relay_registry.py` (the function `ingest_relay_credential`, which reads the facts
+off the certificate the process actually presents) or explicitly by
+`venya admin core-relay-cert register --cert-file <path>`.
+
+Two consequences a backup plan has to carry:
+
+- **The registry lives in artifact #1, so it is backed up with the database dump and nowhere else.**
+  The certificate file itself is in the *regenerable* list above — a re-mint replaces it and losing it
+  costs nothing but a re-enrolment. The **revocation record** is the row: `revoked_at` is a column on
+  that row, and revoking is `venya admin core-relay-cert revoke` (by `--serial` or `--cert-file`).
+  There is **no delete and no un-revoke** — a revoked row is **retained as the record**, and
+  `register_relay_credential` never clears `revoked_at` on a row it re-sees, so rebooting a core cannot
+  un-revoke itself. Restore the database and you restore exactly that history, intact.
+- **A stale dump un-revokes.** Because revocation state is ordinary table state, restoring a dump taken
+  *before* a revoke brings that credential back as live — the new row has `revoked_at` NULL and the
+  executor's door admits it. That is true of every revocation table in this product
+  (`executor_cert_revocations`, `admin_cert_revocations`, and this one), not only the relay registry.
+  **After any restore, re-check the registry before you trust it:**
+
+  ```bash
+  venya admin core-relay-cert list --json   # revoked must still read true for everything you killed
+  ```
+
+  Mechanism read at the shipped schema and the two writers above, not from a physical restore drill —
+  the 2026-09-30 drill did not exercise a revoked row. Treat it as a check to run, not a bug to assume.
+
+**The boundary of that record, stated so nobody over-reads it:** the revoke takes effect at the
+executor's connection **acceptance**, ahead of the `relay_client_ids` CN check, and only on **new**
+connections — a relay call already in flight is not terminated. It is **not** a handshake-layer CRL
+refusal, and there is no un-revoke path. `FIREWALL.md` and
+`cert-rotation-runbook.md` § *Revoking the core's relay client credential (#597)* state the same
+boundary; the registry row, not a CRL, is what makes the credential nameable at that door.
+
 ### The machine-plane admin pair is excluded from the backup set
 
 **`/etc/venya/admin/admin.key` (delivered mode `0600`) and `/etc/venya/admin/admin.crt` (`0644`) are
