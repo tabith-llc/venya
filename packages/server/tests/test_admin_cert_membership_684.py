@@ -92,10 +92,27 @@ def _mint_admin_credential(cn="venya-core-3", serial=None):
 
 @pytest.fixture()
 def env(tmp_path):
-    """Real SQLite + the admin routes, auth overridden. Returns (client, SessionLocal)."""
-    engine = __import__("sqlalchemy").create_engine(f"sqlite:///{tmp_path / '684.db'}")
+    """Real SQLite + the admin routes, auth overridden. Returns (client, SessionLocal).
+
+    The engine ENFORCES foreign keys, through the shipped connect-listener shape
+    (``test_secret_delete_fk.py``), because #634's whole point is that a SQLite engine
+    without ``PRAGMA foreign_keys=ON`` consults declared constraints NEVER and a cell can
+    pass on rows no real database would accept. This file's rows are parented (a user, a
+    role, a member) exactly so that enforcement cannot be what makes them fail.
+    """
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(f"sqlite:///{tmp_path / '684.db'}")
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
     Base.metadata.create_all(engine)
-    SessionLocal = __import__("sqlalchemy").orm.sessionmaker(bind=engine)
+    SessionLocal = sessionmaker(bind=engine)
 
     seed = SessionLocal()
     seed.add(User(user_id="test-admin", auth_mode="password"))
