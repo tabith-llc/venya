@@ -116,9 +116,11 @@ unauthenticated transport.
     Execution sessions are ephemeral. File injection is the default
     consumption shape; a secret's `usage` metadata selects alternatives
     (`ssh-password`, `ssh-key`, `http-netrc`, `http-header-file`,
-    `mysql-defaults`, `ipmi-passfile`, `askpass` for sudo/git, `env:NAME`,
-    custom names) — every shape is mediated through the same per-session
-    tmpfs staging, never through the caller's context.
+    `mysql-defaults`, `ipmi-passfile`, `askpass` for sudo/git, `sudo-stdin`,
+    `env:NAME`, custom names) — every shape is mediated through the same per-session
+    tmpfs staging, never through the caller's context. The shipped built-in set is
+    `BUILTIN_SHAPES` in `packages/server/src/server/routes/secrets.py` — read it there
+    rather than trusting this list, which is prose and can lag.
  4. **Filter.** Masking runs in two stages: the executor's Rust filter
     (Stage 1) replaces any occurrence of secret material with
     `[REDACTED:...]`, then the server-side **definitive** filter (Stage 2,
@@ -184,21 +186,30 @@ design at install — fail-closed; seed it via `VENYA_EGRESS_ALLOW` or edit it
 directly; the configured DNS resolver is always permitted); a compromised
 command cannot phone home.
 The executor service runs under a seccomp profile, `PrivateTmp`, and no
-`CAP_IPC_LOCK` (mlock is confined to the core by design and enforced by
-tests in both packages). The daemon user has KVM access for sandboxing;
+`CAP_IPC_LOCK` (mlock is confined to the core by design; the pair that pins it is
+`packages/core/tests/test_capability_isolation.py` and
+`packages/cli/tests/test_capability_isolation.py` — core and CLI, not core and
+executor). The daemon user has KVM access for sandboxing;
 sandbox SSH tooling requires commands to resolve into trusted directories
-(absolute paths, or bare names resolved via PATH; shell builtins and
-unresolvable tokens are rejected by design — 503).
+(absolute paths, or bare names resolved via PATH). There is no builtin table in the
+validator: what refuses is whatever does NOT resolve into a trusted directory —
+that catches builtins with no file behind them (`cd`, `export`, `source`, `eval`) and
+passes the ones that do exist as binaries (`echo`, `true`, `test`). Unresolvable and
+non-trusted tokens are rejected — 503.
 
 ## Data stores
 
 - **PostgreSQL** (core only): users, credentials (WebAuthn), sessions,
   secrets (ciphertext), roles, executors, enrollment tokens (hashed),
   execution sessions, audit events. All timestamps are timezone-aware UTC.
-- **Filesystem state:** `/opt/venya/.env` is the sole runtime config on the
-  core (pydantic settings; nested keys as `VENYA_<SECTION>__<KEY>`);
-  executors use `/etc/venya/executor.toml`. There is no TOML config on the
-  core.
+- **Filesystem state:** `/opt/venya/.env` is the runtime **settings** file on the
+  core (pydantic settings; nested keys as `VENYA_<SECTION>__<KEY>`). It is not the only
+  file the service reads: the CA key passphrases arrive through a separate root-only
+  systemd `EnvironmentFile`, `/etc/venya/venya-core.env` (0640 `root:venya`), which
+  pydantic never sees — it lands in `os.environ` — and the metrics port is set the same
+  way, by a unit `Environment=` line; a name placed in `.env` instead is read by nobody.
+  See `deployment-config.md`. Executors use `/etc/venya/executor.toml`. There is no TOML
+  config on the core.
 
 ## Deployment shape
 

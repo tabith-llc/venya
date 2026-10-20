@@ -10,6 +10,15 @@
 
 ## 0. Key material inventory — what rotates, and where it lives
 
+**Break-glass: recovering a CA passphrase.** If you arrived here from the end of an
+installer run, this section is the index, not the procedure. A CA passphrase is *stored*
+in the root-only EnvironmentFile named in the two CA rows below; the recovery procedure is
+§5 (root CA backup and restore, break-glass), and the one place this runbook shows reading
+the stored passphrase back is §7 step 0. Neither the banner nor this page prints that read
+as a copyable line — recovering a secret is an operator act performed on the host, not an
+installer echo. If the EnvironmentFile itself is gone, §5's encrypted-export and Shamir
+paths are the custody route, and they do not depend on that file.
+
 | Material | Location | Validity / rotation | Notes |
 |---|---|---|---|
 | Root CA keypair | core: `/var/lib/venya/ca/ca.key` (0600), `ca.crt` | manual break-glass only (§5) | key ENCRYPTED at rest since fix `4218ec1` (ticket `root-ca-key-plaintext-at-rest`, CLOSED 2026-09-20); passphrase `VENYA_CA_KEY_PASSPHRASE` in `/etc/venya/venya-core.env` (0640 root:venya), reused on re-run — an explicit wrong value fails loudly at decrypt |
@@ -98,19 +107,25 @@ Re-anchor this section on the release that first ships the new banner.
   deployment's value rather than assuming the default.
 
 nginx terminates TLS on :443 and proxies to the backend over the inner-mTLS
-channel: uvicorn serves TLS on the loopback bind only and nginx presents the
-relay client certificate (`install-venya-core.sh`, the nginx site config block
-with `proxy_pass https://127.0.0.1:8080`). The port is unreachable from other
-hosts; all verification curls below go through `https://<core-host>/…`.
+channel: uvicorn serves TLS on the loopback bind only and nginx authenticates to it
+with the **inner keypair** — `proxy_ssl_certificate /etc/venya/tls/inner.crt`, both
+`location` blocks of the generated site config (`install-venya-core.sh`). That leaf is
+minted per run with `CN=<core-hostname>-inner` and `extendedKeyUsage=serverAuth,clientAuth`,
+because the same keypair is uvicorn's server certificate and nginx's client certificate on
+this one channel; its SAN names the loopback path only, and no application-layer identity is
+taken from it. The **relay** client certificate is a different credential — see the
+section below. The port is unreachable from other hosts; all verification curls below go
+through `https://<core-host>/…`.
 
 ## Revoking the core's relay client credential (#597)
 
-The same relay client certificate is used in two places, and they are not the same
-exposure: nginx presents it on the **loopback** inner-mTLS hop above, and the core
-presents it when it **dials an executor's :8443** listener
+The relay client certificate is the core's credential at one door — it is what the core
+presents when it **dials an executor's :8443** listener
 (`routes/executors.py`, inside `execute_command_on_executor` — the dial URL is
-`https://<executor-hostname>:8443/execute`). Losing the second one means a stolen
-credential can keep relaying commands, so it now has a revocation path.
+`https://<executor-hostname>:8443/execute`). The loopback hop above does NOT use it; that
+hop carries the inner keypair, so revoking a relay credential never disturbs
+nginx→uvicorn. Losing this one means a stolen credential can keep relaying commands, so it
+now has a revocation path.
 
 It did not used to. The credential is minted by `install-venya-core.sh` with `openssl`
 and historically entered no table, so there was nothing to revoke it *in* — a
@@ -157,7 +172,8 @@ executor door.
 
 ## 1. Executor certificate auto-rotation (design + deployment caveat)
 
-Design (daemon `CertManager`, `packages/executor/src/executor/daemon.py:239-323`):
+Design (daemon `CertificateManager`, `packages/executor/src/executor/daemon.py` — the
+class, with `needs_rotation()` and `rotate()` on it):
 
 1. Every main-loop iteration (~30 s) checks `needs_rotation()`: cert expires within
    `rotate_before_days` (default 3), or is already expired.
@@ -298,7 +314,8 @@ registration with a bootstrap token:
 ```bash
 # 1. On the core (that is where the machine-plane admin pair lives — §0.1):
 venya admin executor-enroll <executor-id> --output-dir /secure/enroll
-#    (token TTL default 1800 s, single-use, stored hashed — server config.py:131-136)
+#    (token TTL default 1800 s, single-use, stored hashed — server config.py,
+#     `ExecutorEnrollmentConfig.token_ttl_seconds`)
 
 # 2. Transfer /secure/enroll to the executor host, then re-run the executor installer:
 curl -fsSL <origin>/install-venya-executor.sh | sudo \
@@ -465,10 +482,12 @@ Fresh installs seed one active `v1` key version (migration
 ## 7. Full root-CA rotation (compromise) — the honest procedure
 
 There is NO in-place CA-rotation command. The supported mechanism is the installer's
-create-if-absent behavior: the CA is generated only when `/var/lib/venya/ca/ca.key` is
-absent (`install-venya-core.sh`, the `if not ca_key_path.exists()` branch through the
-`CA already exists - preserved` print), while the server TLS cert, relay cert, system
-trust, well-known copy, and nginx client-CA bundle are rebuilt on EVERY run
+create-if-absent behavior: the CA is generated only when BOTH `ca.key` and `ca.crt` are
+absent from `/var/lib/venya/ca` — `key_exists`/`cert_exists` gate each branch and
+`if key_exists and cert_exists: print('CA already exists - preserved')`,
+`install-venya-core.sh`; a key that survives without its certificate gets the certificate
+RE-ISSUED from the incumbent key, never a new key, while the server TLS cert, relay cert,
+system trust, well-known copy, and nginx client-CA bundle are rebuilt on EVERY run
 (the server-TLS, relay/inner, trust-store, well-known, and bundle blocks that follow).
 Rotating the root CA therefore means: remove it, re-run the installer,
 then re-enroll every executor.

@@ -33,12 +33,16 @@ You operate infrastructure through Venya. Four MCP tools: `list_executors`,
    Never construct secret paths yourself; never inline a secret value.
 3. **`[REDACTED:<id>]` in output is the system working**, not an error.
    Never decode, work around, or re-request it.
-4. **Commands:** use absolute binary paths (`/usr/bin/ssh`, `/bin/cat`);
-   shell builtins are rejected (503) by design. Hostnames resolve only if
-   the operator allowlisted them as hostnames — otherwise use IP addresses.
-5. **The first run after an executor install can take ~60 s** (sandbox
-   template pull) while still succeeding server-side. Check the result
-   before retrying; warm runs are seconds-scale.
+4. **Commands:** use absolute binary paths (`/usr/bin/ssh`, `/bin/cat`).
+   A command name that does not resolve on the executor's PATH into a trusted
+   directory is refused (503) — that catches most shell builtins (`cd`, `export`,
+   `source`, `eval`), but NOT ones that have a real binary of the same name
+   (`echo`, `true`, `test` pass). Never rely on shell syntax. Hostnames resolve
+   only if the operator allowlisted them as hostnames — otherwise use IP addresses.
+5. **Runs are seconds-scale on a properly installed executor** — the installer
+   pre-pulls the sandbox template. If a FIRST run looks slow or times out
+   client-side, check its result before retrying; it may already have succeeded
+   server-side.
 6. **On 401 / expired session:** ask your human to re-authenticate
    (`venya login`, physical key touch). You cannot and must not renew
    authorization yourself.
@@ -84,5 +88,6 @@ NAMES only. Generic sandbox mechanics do not belong here; they live in
 
 *Honesty note: every claim in the block is source-matched to the shipped
 tool surface (the pinning interlock lives in
-`packages/mcp/tests/test_agent_prompts_doc.py`); the ~60 s cold-start figure
-is the observed template-pull time on a fresh executor.*
+`packages/mcp/tests/test_agent_prompts_doc.py`); the command-resolution rule
+above is the MEASURED behavior of the shipped validator — refusal is by
+PATH-resolution into a trusted directory, not by a builtin table.*
