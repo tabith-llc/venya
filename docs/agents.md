@@ -33,15 +33,12 @@ to that human.
    error. Do not try to decode, work around, or re-request them.
 3. **Commands must resolve into trusted directories** — use absolute binary
    paths (`/bin/cat`, `/usr/bin/ssh`, `/usr/bin/apt-get`). Bare names are
-   PATH-resolved (`shutil.which`) and accepted only if they land in a trusted
-   dir; anything that does not resolve is refused (503). There is no shell-builtin
-   table in the validator, so the honest rule is about RESOLUTION, not about
-   builtins: a builtin with a real binary of the same name on the executor's PATH
-   (`echo`, `true`, `test`, `printf`, `pwd`) is a normal command and is ACCEPTED,
-   while builtins with no file behind them (`cd`, `export`, `source`, `.`, `exec`,
-   `eval`, `set`, `ulimit`, `read`, `type`, `wait`, `alias`) do not resolve and are
-   refused — and nothing runs a shell anyway, so a refused builtin is refused as
-   "command not in trusted paths", never as a builtin check.
+   PATH-resolved and accepted only if they land in a trusted dir; whatever does
+   not resolve is refused (503). There is no builtin table, so the rule is
+   RESOLUTION, not shell-ness: `echo`, `true`, `test`, `printf` have real
+   binaries and PASS, while `cd`, `export`, `source`, `eval`, `set` have none and
+   are refused as "command not in trusted paths". No shell runs your command, so
+   shell syntax is never available to you.
 4. With the `venya` CLI, a leading `--` separator on `venya run` is consumed
    (not sent to the executor); venya's own flags (`--secret`,
    `--executor-id`) must come BEFORE the command — everything after the
