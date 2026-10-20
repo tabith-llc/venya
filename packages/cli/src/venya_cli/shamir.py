@@ -35,7 +35,7 @@ _V2_MAGIC = b"V2"
 _CHECKSUM_LEN = 4
 
 
-def _checksum(secret: bytes) -> bytes:
+def _checksum(secret: bytes | memoryview) -> bytes:
     return hashlib.sha256(secret).digest()[:_CHECKSUM_LEN]
 
 
@@ -88,11 +88,14 @@ def _lagrange_interpolate(shares: list[tuple[int, int]], x: int) -> int:
     return result
 
 
-def split(secret: bytes, threshold: int, shares: int) -> list[bytes]:
+def split(secret: bytes | memoryview, threshold: int, shares: int) -> list[bytes]:
     """Split a secret into shares using Shamir's Secret Sharing.
 
     Args:
-        secret: The secret bytes to split.
+        secret: The secret bytes to split. Accepts a read-only ``memoryview`` so a
+            caller holding the secret in a :class:`SecretHolder` (#538/#674) can
+            feed this without copying plaintext into a fresh ``bytes``; the payload
+            built below is this function's own copy and is not erased here.
         threshold: Minimum shares needed to reconstruct (K).
         shares: Total number of shares to create (N).
 
