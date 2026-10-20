@@ -597,6 +597,44 @@ an open one.
 number, applied at the installer prompt and at every reader together, with the documented
 test values re-checked against it in the same change.
 
+### The operator can disable TLS verification by explicit configuration; the product never does it to make a connection succeed
+
+Status: known limitation in beta · Target: none — it is a ruled development hatch, not a defect ·
+Tracked as: no row of its own. The `verify=False` strike against the MCP client was closed on the
+owner's read of the shipped tree (2026-10-19) without becoming a defect row, and he ruled this
+entry as the disclosure for the hatch instead.
+
+**Who is affected:** anyone who has copied `VENYA_TLS_VERIFY=false` out of a development note, and
+anyone auditing a workstation, an executor or an MCP server that dials a core.
+
+**What the limitation is:** the switch exists, it is honoured, and it is off unless you turn it on.
+Four readers take it: `register_executor` in `packages/cli/src/venya_cli/api_client.py`, the
+certificate-renewal dial in `packages/cli/src/venya_cli/commands.py`, the register and heartbeat
+dials in `packages/executor/src/executor/daemon.py`, and `_bootstrap_tls_verify` in
+`packages/mcp/src/venya_mcp/client.py`. Each one steps around verification only on the literal
+`false`, and each says so out loud — a logged or printed warning naming the knob. Unset, empty or
+`true` all verify; the two registration readers additionally refuse any other value outright rather
+than guessing at it. Nothing in the product sets it for you, and no dial reaches `false` because a
+handshake failed.
+
+**What the knob never reaches.** Its ruled meaning is *distrust this certificate over https*, never
+*no TLS*, and the four readers above are the whole of its reach. The scheme guard
+`_require_https_server_url` — the gate behind `venya setup`, `venya config set-server` and the
+register and renewal POSTs — does not consult it, so it cannot re-open plaintext. The CLI's own
+`executor_heartbeat` command carries no branch that skips verification at all. And on the MCP side a
+resolved anchor wins first: with `VENYA_CA_CERT` set the knob is never read, and with no anchor
+resolving and the knob not `false` it raises rather than dialing unverified — the anchor-or-refuse
+shape the #530 / #533 / #536 / #540 work built into the CLI dials is the same shape here.
+
+**What is NOT claimed here:** that this entry covers the first CA fetch. Trust-on-first-use on the
+`/.well-known/venya-ca.crt` fetch is a separate, judged bootstrap tradeoff and it is documented in
+[installation.md](installation.md) (the two CA-trust paths); it is not this knob and not softened by
+this entry.
+
+**What changes at beta+:** nothing is scheduled. Retiring the knob would be a ruling about the
+development fleet, not a fix, and the verifying path it steps around is the path every production
+dial takes.
+
 ---
 
 ## Installing and upgrading
