@@ -1,8 +1,8 @@
 # Venya Firewall & Network Requirements
 
-> **ALPHA DOCUMENTATION — UNTESTED.** This guide describes the venya alpha and has
+> **BETA DOCUMENTATION — UNTESTED.** This guide describes the venya beta and has
 > **not** been validated end-to-end against a hardened production deployment. The ports,
-> paths, and directions below are derived from the alpha source tree (installer templates,
+> paths, and directions below are derived from the beta source tree (installer templates,
 > the relay listener, and `docs/architecture.md`) and may change. Verify every rule in your
 > own environment before relying on it. Where this document and a live `nginx -T` /
 > `ss -ltnp` on your host disagree, the host wins — re-derive, do not trust this page.
