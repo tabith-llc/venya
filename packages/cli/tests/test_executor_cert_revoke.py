@@ -337,3 +337,110 @@ class TestAdminRevokeExecutorDelegation:
             result = cmd_admin_revoke_executor(mock_client, args)
 
             assert result == 1
+
+
+class TestRevokeSurfaceDoesNotOverClaim:
+    """#666's rule applied to the rest of the revoke surface (leg 260 sweep).
+
+    The core answers 200 with ``revoked: false`` when the serial or identity it was
+    given is ALREADY revoked, and ``revoked_serial: null`` on a remove whose row
+    carried no certificate record. Both arms must read differently from a real
+    revocation — a headline that asserts completion on either answer is the defect
+    this class exists to keep impossible to reintroduce silently.
+    """
+
+    def test_serial_form_already_revoked_is_not_reported_as_revoked(self, tmp_path, capsys):
+        """Server: revoked=false on the serial arm -> the wording says already revoked."""
+        mock_client = MagicMock()
+        mock_client.post.return_value = {"revoked": False, "executor_id": "jump-1"}
+
+        args = MagicMock()
+        args.serial = "ABCD1234"
+        args.executor_id = "jump-1"
+        args.cert_path = str(tmp_path / "executor.crt")
+
+        from venya_cli.commands import executor_cert_revoke
+
+        result = executor_cert_revoke(args, client=mock_client)
+
+        captured = capsys.readouterr()
+        # The paired positive (test_revoke_serial_form_passes_body) asserts the
+        # revoked sentence; this asserts the opposite answer gets the opposite words.
+        assert "Certificate serial revoked" not in captured.out, captured.out
+        assert "already revoked" in captured.out, captured.out
+        assert result == 0  # the call succeeded; it simply changed nothing
+
+    def test_identity_form_already_revoked_is_not_reported_as_revoked(self, tmp_path, capsys):
+        mock_client = MagicMock()
+        mock_client.post.return_value = {"revoked": False, "executor_id": "jump-1"}
+
+        args = MagicMock()
+        args.serial = None
+        args.executor_id = "jump-1"
+        args.cert_path = str(tmp_path / "executor.crt")
+
+        from venya_cli.commands import executor_cert_revoke
+
+        executor_cert_revoke(args, client=mock_client)
+
+        captured = capsys.readouterr()
+        assert "Certificate revoked." not in captured.out, captured.out
+        assert "already revoked" in captured.out, captured.out
+        assert "Revoked:      No" in captured.out, captured.out
+
+    def test_identity_genuine_success_still_reports_revoked(self, tmp_path, capsys):
+        """The other half of the pair: a confirmed revocation is still a success line.
+
+        Without this cell the negative arm could be satisfied by suppressing every
+        success message, which would be the same reporting failure in the other
+        direction.
+        """
+        mock_client = MagicMock()
+        mock_client.post.return_value = {"revoked": True, "executor_id": "jump-1"}
+
+        args = MagicMock()
+        args.serial = None
+        args.executor_id = "jump-1"
+        args.cert_path = str(tmp_path / "executor.crt")
+
+        from venya_cli.commands import executor_cert_revoke
+
+        executor_cert_revoke(args, client=mock_client)
+
+        captured = capsys.readouterr()
+        assert "Certificate revoked." in captured.out, captured.out
+        assert "Identity:     REVOKED" in captured.out, captured.out
+        assert "already revoked" not in captured.out, captured.out
+
+    def test_remove_without_cert_record_says_so(self, capsys):
+        """revoked_serial is None when the row had no certificate to revoke."""
+        mock_client = MagicMock()
+        mock_client.delete.return_value = {"removed": True, "executor_id": "e-1", "revoked_serial": None}
+
+        args = MagicMock()
+        args.executor_id = "e-1"
+
+        from venya_cli.commands import cmd_admin_remove_executor
+
+        assert cmd_admin_remove_executor(mock_client, args) == 0
+        captured = capsys.readouterr()
+        assert "current certificate revoked" not in captured.out, captured.out
+        assert "no certificate record to revoke" in captured.out, captured.out
+
+    def test_remove_with_cert_record_names_the_serial(self, capsys):
+        """Paired positive: a real revocation is reported, and reported specifically."""
+        mock_client = MagicMock()
+        mock_client.delete.return_value = {
+            "removed": True,
+            "executor_id": "e-2",
+            "revoked_serial": "DEADBEEF",
+        }
+
+        args = MagicMock()
+        args.executor_id = "e-2"
+
+        from venya_cli.commands import cmd_admin_remove_executor
+
+        assert cmd_admin_remove_executor(mock_client, args) == 0
+        captured = capsys.readouterr()
+        assert "current certificate revoked: DEADBEEF" in captured.out, captured.out
