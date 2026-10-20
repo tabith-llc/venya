@@ -410,7 +410,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or apply for beta access.
 | [Making Venya Easier to Use](docs/ease-of-use.md) | Deliberate relaxations: the scp worked recipe, per-knob gain/loss catalog, the never-relax list |
 | [Deployment Sizing Guide](docs/deployment-sizing.md) | How many executors you need + measured CPU/RAM/disk/throughput figures |
 | [Cert & Key Rotation Runbook](docs/cert-rotation-runbook.md) | Rotation procedures for every certificate and key, source-cited |
-| [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(alpha, untested)* |
+| [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(beta, untested)* |
 | [Backup & Restore](docs/BACKUPS.md) | What to back up, the crypto pairings, restore + backup security — *(restore procedure validated by physical drill, 2026-09-30, on 0.1.0alpha16; record at the top of the doc)* |
 | [FAQ](docs/faq.md) | Frequently asked questions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
