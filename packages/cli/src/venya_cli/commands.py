@@ -2799,6 +2799,38 @@ def cmd_exec_group(client: APIClient, args: Any) -> int:
         return 1
 
 
+def _canonical_serial_text(value: Any) -> str:
+    """Render a serial in the ONE canonical form the revoke verbs match on (refs #682, #481).
+
+    Deliberately RE-TYPED, not imported: ``test_capability_isolation.test_no_core_imports_in_source``
+    bars ``venya_cli`` sources from ``core.*``, and ``core.utils.cert_serial``'s own docstring records
+    that standing exception for the CLI's serial writer. The body mirrors ``parse_serial`` +
+    ``canonical_serial`` on every input the guard crosses, and a cell in
+    ``packages/cli/tests/test_executor_list_serial_width_682.py`` asserts that parity against the
+    SHIPPED function, so this copy cannot drift silently: lowercase hex, zero-padded to a MINIMUM of
+    16 digits — a floor, never a mask, and never re-padded to an openssl byte width — while a value
+    that is not a hex serial comes back as its own casefolded text, which is what no real serial ever
+    renders as. Absent/empty keeps the empty cell it printed before; that is the ONE deliberate
+    difference from ``canonical_serial(None)`` (which casefolds to ``"none"``), because a display
+    column must not invent a word where the store held nothing.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        return format(value, "016x") if value >= 0 else str(value).strip().casefold()
+    text = str(value).strip()
+    if not text:
+        return ""
+    body = text[2:] if text[:2].lower() == "0x" else text
+    if text.startswith("-"):
+        return text.casefold()
+    try:
+        parsed = int(body, 16)
+    except ValueError:
+        return text.casefold()
+    return format(parsed, "016x")
+
+
 def executor_list(client: APIClient, args: Any) -> int:
     """List registered executors with their heartbeat-reported build versions.
 
@@ -2828,7 +2860,14 @@ def executor_list(client: APIClient, args: Any) -> int:
             rows.append(
                 [
                     e.get("executor_id", ""),
-                    (e.get("serial_number") or "")[:16],
+                    # #682 / #481: print the WHOLE canonical serial, never a slice. A 16-char
+                    # truncation is an operator-visible short form of a serial that is 40 hex on
+                    # the wire, and a truncated value pasted into `revoke` silently names the wrong
+                    # certificate. `venya-cli` is barred from importing core.utils.cert_serial
+                    # (test_capability_isolation), so the canonical writer is re-typed here in the
+                    # SAME form the revoke-side mint print already emits: `format(serial, "016x")` —
+                    # a MINIMUM width, so a 40-hex serial keeps all 40 characters.
+                    _canonical_serial_text(e.get("serial_number")),
                     e.get("not_after") or "-",
                     e.get("version") or "unknown (pre-B daemon)",
                 ]
