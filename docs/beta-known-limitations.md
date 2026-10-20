@@ -145,7 +145,7 @@ the poll interval the daemon already runs.
 core does carry live revocations, so nothing is missing in order to revoke something. What is
 missing is a run that saw that door refuse, and on the present fixture no reachable trigger produces
 one: the dial target is taken from the enrolled `executor_url`, so a stand-in listener cannot be
-dialed. This entry names that half as unobserved, and nothing on it claims the dial was seen refusing.
+dialed. This entry names that half as unobserved and does not claim the dial was ever seen refusing.
 
 **Who is affected in the shipped posture.** Reachability, not theory. The listener binds
 `:8443` (`RELAY_PORT`, `packages/executor/src/executor/relay_listener.py:46`) on the executor
@@ -273,15 +273,21 @@ could not be written against today's product. Both halves became false at `1033c
 nameable now, the door refuses it, and the cell is written
 (`test_revoked_peer_is_refused_at_the_real_door_before_any_request`,
 `packages/executor/tests/test_relay_peer_revocation_597.py`). What remains un-run is the **physical**
-certificate on a served fleet, which needs a guest — see the #597 entry for the three shapes that are
-still limited. #586's acceptance criterion 1 depends on that physical proof, not on the registry.
+certificate **at the core's dial**: the served-fleet revoke-then-refuse at the **listener door** has now
+been produced in BOTH populations (the executor-serial arm twice, the core-relay registry arm once), so
+the missing observation is the dial-side refusal, and on the present fixture no reachable non-terminal
+trigger produces one — see the #597 entry for the three shapes that are
+still limited. #586's acceptance criterion 1 depends on that
+physical proof, not on the registry.
 
 ### A core's own relay credential is revocable — the entry this page carried said it was not, and that is corrected here
 
 Status: **no longer a limitation on the revocation path** · Remedy landed at `1033c2d` (live face
 `1033c2d006e170817cabc100b49a909ad35c7eb5`) · Tracked as: #597 (row **stays open**, and honestly so —
-its remaining AC is the **physical** revoke-then-refuse on a served fleet, which needs a guest and
-has never been produced; that is a different obligation from the one this entry disclosed)
+its remaining physical observation is the revoke-then-refuse seen at the **core's dial** on a served
+pair; the physical revoke-then-refuse at the **listener door** has now been produced on a served
+fleet, in both populations, and this entry does not claim the dial half was seen; that is a different
+obligation from the one this entry disclosed)
 
 **Why this entry is here instead of deleted.** The page's rule is that an entry comes **out** when its
 fix lands. The fix landed, so the old entry — *"A core's own relay credential cannot be revoked"* —
@@ -343,12 +349,16 @@ carries no `VERIFY_CRL` flag at all — re-derive with the call shapes
 at this tip. Do **not** re-derive with the bare word: `git grep -i crl -- packages/executor/src` now
 returns the #586 Gap A docstring, which names the flag in order to **disclaim** it — a seat counting
 that hit would read a shipped CRL consult where there is none. The freshness of this door is the
-~30-second poll, not a handshake-time fetch. And **no physical revoke-then-refuse has ever been
-observed on a served fleet** — what exists is unit-level
+~30-second poll, not a handshake-time fetch. And a **physical** revoke-then-refuse **has** now been
+observed on a served fleet **at the listener door** — in both populations, the executor-serial arm twice
+and the core-relay registry arm once — while the refusal at the **core's dial** has never been observed,
+because no non-terminal trigger is reachable on a served pair. What sits beside those runs in the tree
+is unit-level
 (`packages/executor/tests/test_relay_peer_revocation_597.py` for the relay population and
 `packages/executor/tests/test_relay_peer_executor_serial_586.py` for the executor population, each
 driving a real loopback handshake at the accept point but running no daemon). Unit-green is not a
-fleet result, and that is why this row and #586 both stay open.
+fleet result, and the fleet result this surface now has covers the listener only — that is why this row
+and #586 both stay open.
 
 **Workaround for the never-ingested shape:** boot the core once after the migration before trying to
 retire a relay credential, so the ingest has a chance to write the row. If the serial you hold is
