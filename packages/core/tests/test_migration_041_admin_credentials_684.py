@@ -49,6 +49,7 @@ from alembic.operations import Operations
 from core.iam.models import AdminCredential
 from core.utils.cert_serial import serial_match_key
 from sqlalchemy import create_engine
+from sqlalchemy import event as sa_event
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -81,8 +82,21 @@ def _load_migration():
 
 
 def _pre_041_engine(tmp_path):
-    """A scratch DB at the 040 face: the registry relation absent, version stamped 040."""
+    """A scratch DB at the 040 face: the registry relation absent, version stamped 040.
+
+    Foreign keys are switched ON at connect time (the #634 rule — a SQLite engine without
+    the pragma declares constraints and enforces none, so a cell can pass on rows no real
+    database would accept). 041 has no FKs itself, so the listener costs nothing here and
+    keeps this file out of the #634 blind-site baseline instead of growing it.
+    """
     engine = create_engine(f"sqlite:///{tmp_path / 'pre041.db'}")
+
+    @sa_event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
     with engine.begin() as conn:
         conn.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
         conn.exec_driver_sql("INSERT INTO alembic_version VALUES ('040')")
@@ -223,106 +237,113 @@ def _scalar(conn, sql, *params):
     not os.environ.get(_PG_URL_ENV),
     reason=f"needs a scratch PostgreSQL in {_PG_URL_ENV} (not available on this venue)",
 )
-def test_pg_render_of_041_applies_and_reverses_on_the_real_engine():
-    """The DDL a real install executes is the PG render — so render it, apply it, reverse it."""
-    url = os.environ[_PG_URL_ENV]
-    # NullPool: every block below gets its own connection, so the scratch search_path set
-    # inside one cannot leak into the next (a pooled re-use would inherit it silently).
-    engine = create_engine(url, connect_args=_PG_DEADLINE, poolclass=NullPool)
-    schema = f"t684_{uuid.uuid4().hex[:10]}"
+class TestAdminCredentialRegistry041Postgresql:
+    """PostgreSQL half of migration 041 — the dialect a real install runs.
 
-    def scoped(begin=False):
-        """A connection whose session search_path is the scratch schema (bound, not spliced)."""
-        cm = engine.begin() if begin else engine.connect()
-        conn = cm.__enter__()
-        conn.exec_driver_sql("select set_config('search_path', %s, false)", (schema,))
-        return cm, conn
+    Class-named per the #614 R1 interlock: every file that names VENYA_TEST_PG_URL must
+    declare a *Postgresql class, because that is what the scan walks.
+    """
 
-    up_ddl = _render(command.upgrade, url, "040:041")
-    down_ddl = _render(command.downgrade, url, "041:040")
-    assert any("CREATE TABLE admin_credentials" in s for s in up_ddl), "040:041 rendered no table"
-    assert any("DROP TABLE admin_credentials" in s for s in down_ddl), "041:040 rendered no drop"
-    try:
-        cm, conn = scoped()
+    def test_pg_render_of_041_applies_and_reverses_on_the_real_engine(self):
+        """The DDL a real install executes is the PG render — so render it, apply it, reverse it."""
+        url = os.environ[_PG_URL_ENV]
+        # NullPool: every block below gets its own connection, so the scratch search_path set
+        # inside one cannot leak into the next (a pooled re-use would inherit it silently).
+        engine = create_engine(url, connect_args=_PG_DEADLINE, poolclass=NullPool)
+        schema = f"t684_{uuid.uuid4().hex[:10]}"
+
+        def scoped(begin=False):
+            """A connection whose session search_path is the scratch schema (bound, not spliced)."""
+            cm = engine.begin() if begin else engine.connect()
+            conn = cm.__enter__()
+            conn.exec_driver_sql("select set_config('search_path', %s, false)", (schema,))
+            return cm, conn
+
+        up_ddl = _render(command.upgrade, url, "040:041")
+        down_ddl = _render(command.downgrade, url, "041:040")
+        assert any("CREATE TABLE admin_credentials" in s for s in up_ddl), "040:041 rendered no table"
+        assert any("DROP TABLE admin_credentials" in s for s in down_ddl), "041:040 rendered no drop"
         try:
-            conn.exec_driver_sql(f"CREATE SCHEMA {schema}")
-            for stmt in up_ddl:
-                conn.exec_driver_sql(stmt)
-            assert (
-                _scalar(conn, "select to_regclass('admin_credentials')") is not None
-            ), "PG rejected the rendered 041 DDL"
-            cols = {
-                r[0]: r[1]
-                for r in conn.exec_driver_sql(
-                    "select column_name, data_type from information_schema.columns "
-                    "where table_schema=current_schema() and table_name='admin_credentials'"
-                )
-            }
-            assert set(cols) == _MODEL_COLUMNS, "PG schema disagrees with the model"
-            assert cols["id"] == "integer", "041 did not render SERIAL identity on PostgreSQL"
-            for ts in ("issued_at", "not_after", "registered_at"):
-                assert cols[ts] == "timestamp with time zone", f"{ts} reached PG without a timezone"
-            cons = {
-                r[0]
-                for r in conn.exec_driver_sql(
-                    "select con.conname from pg_constraint con join pg_namespace n on n.oid=con.connamespace "
-                    "where n.nspname=current_schema() and con.conrelid='admin_credentials'::regclass"
-                )
-            }
-            assert "uq_admin_credentials_serial_number" in cons
-            idx = {
-                r[0]
-                for r in conn.exec_driver_sql(
-                    "select indexname from pg_indexes where schemaname=current_schema() and tablename='admin_credentials'"
-                )
-            }
-            assert {"ix_admin_credentials_source", "uq_admin_credentials_serial_number"} <= idx
-            conn.commit()
-        finally:
-            cm.__exit__(None, None, None)
+            cm, conn = scoped()
+            try:
+                conn.exec_driver_sql(f"CREATE SCHEMA {schema}")
+                for stmt in up_ddl:
+                    conn.exec_driver_sql(stmt)
+                assert (
+                    _scalar(conn, "select to_regclass('admin_credentials')") is not None
+                ), "PG rejected the rendered 041 DDL"
+                cols = {
+                    r[0]: r[1]
+                    for r in conn.exec_driver_sql(
+                        "select column_name, data_type from information_schema.columns "
+                        "where table_schema=current_schema() and table_name='admin_credentials'"
+                    )
+                }
+                assert set(cols) == _MODEL_COLUMNS, "PG schema disagrees with the model"
+                assert cols["id"] == "integer", "041 did not render SERIAL identity on PostgreSQL"
+                for ts in ("issued_at", "not_after", "registered_at"):
+                    assert cols[ts] == "timestamp with time zone", f"{ts} reached PG without a timezone"
+                cons = {
+                    r[0]
+                    for r in conn.exec_driver_sql(
+                        "select con.conname from pg_constraint con join pg_namespace n on n.oid=con.connamespace "
+                        "where n.nspname=current_schema() and con.conrelid='admin_credentials'::regclass"
+                    )
+                }
+                assert "uq_admin_credentials_serial_number" in cons
+                idx = {
+                    r[0]
+                    for r in conn.exec_driver_sql(
+                        "select indexname from pg_indexes where schemaname=current_schema() and tablename='admin_credentials'"
+                    )
+                }
+                assert {"ix_admin_credentials_source", "uq_admin_credentials_serial_number"} <= idx
+                conn.commit()
+            finally:
+                cm.__exit__(None, None, None)
 
-        # the database, not a writer, refuses a duplicate serial
-        ins = "INSERT INTO admin_credentials (serial_number, common_name, source, registered_at) VALUES (%s, 'CN=pg-cell', 'boot', now())"
-        cm, conn = scoped(begin=True)
-        try:
-            conn.exec_driver_sql(ins, ("00000000000000ff",))
-            with pytest.raises(IntegrityError):
+            # the database, not a writer, refuses a duplicate serial
+            ins = "INSERT INTO admin_credentials (serial_number, common_name, source, registered_at) VALUES (%s, 'CN=pg-cell', 'boot', now())"
+            cm, conn = scoped(begin=True)
+            try:
                 conn.exec_driver_sql(ins, ("00000000000000ff",))
-        finally:
-            cm.__exit__(None, None, None)
+                with pytest.raises(IntegrityError):
+                    conn.exec_driver_sql(ins, ("00000000000000ff",))
+            finally:
+                cm.__exit__(None, None, None)
 
-        # and the membership read the fix depends on matches legacy spellings ON PG.
-        # The key comes from the SHIPPED matcher, never a hand-rolled normalisation.
-        cm, conn = scoped(begin=True)
-        try:
-            conn.exec_driver_sql(ins, ("100A",))
-            for probe, expected in (("100A", 1), ("000000000000100a", 1), ("0x100A", 1), (4106, 1), ("1002", 0)):
-                n = conn.exec_driver_sql(
-                    "select count(*) from admin_credentials where ltrim(upper(serial_number),'0') = %s",
-                    (serial_match_key(probe),),
-                ).scalar()
-                assert n == expected, f"serial spelling {probe!r} matched {n}, expected {expected}"
-            conn.rollback()  # probe rows are this cell's, not the venue's
-        finally:
-            cm.__exit__(None, None, None)
+            # and the membership read the fix depends on matches legacy spellings ON PG.
+            # The key comes from the SHIPPED matcher, never a hand-rolled normalisation.
+            cm, conn = scoped(begin=True)
+            try:
+                conn.exec_driver_sql(ins, ("100A",))
+                for probe, expected in (("100A", 1), ("000000000000100a", 1), ("0x100A", 1), (4106, 1), ("1002", 0)):
+                    n = conn.exec_driver_sql(
+                        "select count(*) from admin_credentials where ltrim(upper(serial_number),'0') = %s",
+                        (serial_match_key(probe),),
+                    ).scalar()
+                    assert n == expected, f"serial spelling {probe!r} matched {n}, expected {expected}"
+                conn.rollback()  # probe rows are this cell's, not the venue's
+            finally:
+                cm.__exit__(None, None, None)
 
-        # the rendered down-migration reverses the rendered up-migration
-        cm, conn = scoped(begin=True)
-        try:
-            for stmt in down_ddl:
-                conn.exec_driver_sql(stmt)
-            assert (
-                _scalar(conn, "select to_regclass('admin_credentials')") is None
-            ), "041's downgrade did not drop the table on PostgreSQL"
-            conn.rollback()  # leave the venue's public schema and data exactly as found
+            # the rendered down-migration reverses the rendered up-migration
+            cm, conn = scoped(begin=True)
+            try:
+                for stmt in down_ddl:
+                    conn.exec_driver_sql(stmt)
+                assert (
+                    _scalar(conn, "select to_regclass('admin_credentials')") is None
+                ), "041's downgrade did not drop the table on PostgreSQL"
+                conn.rollback()  # leave the venue's public schema and data exactly as found
+            finally:
+                cm.__exit__(None, None, None)
         finally:
-            cm.__exit__(None, None, None)
-    finally:
-        cm, conn = scoped()
-        try:
-            conn.exec_driver_sql(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
-            conn.exec_driver_sql("select set_config('search_path', 'public', false)")
-            conn.commit()
-        finally:
-            cm.__exit__(None, None, None)
-        engine.dispose()
+            cm, conn = scoped()
+            try:
+                conn.exec_driver_sql(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+                conn.exec_driver_sql("select set_config('search_path', 'public', false)")
+                conn.commit()
+            finally:
+                cm.__exit__(None, None, None)
+            engine.dispose()
