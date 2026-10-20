@@ -487,15 +487,40 @@ class TestAdminRevokeForms:
         s.close()
 
     def test_serial_form_crls_without_identity(self, env):
-        """a722 acceptance shape: credential killed, identity untouched."""
+        """#685 re-pair of the a722 cell.
+
+        This cell used to POST a serial no credential holds (`…0AAA` against a record row of
+        `…1000`) and assert `200 / revoked=True` plus a stored row "attributed" to `exec-a` —
+        that expectation WAS the defect, pinned as expected behavior. The refusal half belongs
+        here now; the a722 intent the cell was written to prove (credential killed, identity
+        untouched) moved to `test_serial_form_recorded_serial_leaves_identity_alone`, which uses
+        the serial the credential actually holds. Nothing deleted, nothing loosened: one
+        expectation inverted to the ruled truth table and the positive re-landed next door.
+        """
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
         resp = client.post("/api/v1/admin/executors/exec-a/revoke", json={"serial": "0000000000000AAA"})
-        assert resp.status_code == 200 and resp.json()["revoked"] is True
+        assert resp.status_code == 404
+        assert "0000000000000aaa" in resp.json()["detail"]  # names WHAT was unknown, in the ONE form
         s = SessionLocal()
         row = s.query(ExecutorCertRevocation).filter_by(serial_number="0000000000000aaa").first()
-        assert row is not None and row.executor_id == "exec-a"  # attributed
+        assert row is None  # refused BEFORE the insert — no phantom published to daemons or the CRL
+        assert s.query(AuditEvent).filter_by(event_type="executor_cert_revoked").first() is None
+        assert s.query(Executor).filter_by(id="exec-a").first().revoked_at is None  # identity untouched
+        s.close()
+
+    def test_serial_form_recorded_serial_leaves_identity_alone(self, env):
+        """The a722 acceptance shape, re-landed on a serial the credential actually holds:
+        credential killed, identity untouched."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = client.post("/api/v1/admin/executors/exec-a/revoke", json={"serial": "0000000000001000"})
+        assert resp.status_code == 200 and resp.json()["revoked"] is True
+        s = SessionLocal()
+        row = s.query(ExecutorCertRevocation).filter_by(serial_number="0000000000001000").first()
+        assert row is not None and row.executor_id == "exec-a"  # attributed to a real holder
         assert s.query(Executor).filter_by(id="exec-a").first().revoked_at is None  # identity untouched
         s.close()
 
@@ -507,11 +532,18 @@ class TestAdminRevokeForms:
         assert resp.status_code == 400
 
     def test_serial_form_idempotent(self, env):
+        """#685: the repeat face is unchanged, but the fixture now repeats a REAL revocation.
+
+        It used to POST `…0aaa` twice against a record row of `…1000`, so the first call was the
+        blind insert and the second was "idempotent" only because the defect had just written the
+        row. Same assertion, same semantics proven — a serial the store vouches for, revoked twice,
+        answers `revoked=False` the second time with exactly one row.
+        """
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal)
-        client.post("/api/v1/admin/executors/exec-a/revoke", json={"serial": "0000000000000aaa"})
-        resp2 = client.post("/api/v1/admin/executors/exec-a/revoke", json={"serial": "0000000000000aaa"})
+        client.post("/api/v1/admin/executors/exec-a/revoke", json={"serial": "0000000000001000"})
+        resp2 = client.post("/api/v1/admin/executors/exec-a/revoke", json={"serial": "0000000000001000"})
         assert resp2.json()["revoked"] is False
 
 

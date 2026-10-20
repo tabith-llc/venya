@@ -1485,6 +1485,38 @@ async def admin_revoke_executor(
             )
             db.commit()
             return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=serial_arg)
+        # #685: consult the credential population BEFORE writing, the way the identity
+        # arm already does at the bottom of this route. Until this check the serial arm's
+        # only lookup was the idempotency query above, so a serial no certificate holds
+        # was accepted with 200 + a stored row, and a path executor_id present in no table
+        # was accepted too — the row was attributed to nothing and revoked nothing.
+        #
+        # Ordered AFTER the idempotency check on purpose. A predecessor serial auto-revoked
+        # at rotation (F6) has no ExecutorCert row any more — `routes/executors.py` rewrites
+        # the one record row to the new serial — so a gate in front would turn a legitimate
+        # repeat into a refusal and change idempotency semantics that #301/#481 pinned.
+        # A known-and-already-revoked serial therefore stays 200 revoked=False, unchanged.
+        #
+        # The population this binds to is `ExecutorCert`, not the `executors` status table:
+        # that is what the identity arm checks, what registration writes, and what survives
+        # a status-row gap, so a live credential stays revocable while a fabricated one is not.
+        cert = db.query(ExecutorCert).filter(serial_match_clause(ExecutorCert.serial_number, serial_arg)).first()
+        if cert is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Executor certificate not found for serial: {serial_arg}",
+            )
+        if cert.executor_id != executor_id:
+            # The serial is real but belongs to a different executor than the path names.
+            # Writing this row would attribute another credential's revocation to an
+            # executor that never held it — the same attribution defect, other direction.
+            # The sentence names the PAIRING as the unknown thing, not the executor: this
+            # executor may exist perfectly well, and a 404 reading "Executor not found"
+            # would tell the operator something false about a row that is there.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Serial {serial_arg} is not a certificate of executor {executor_id}",
+            )
         db.add(
             ExecutorCertRevocation(
                 serial_number=serial_arg,
