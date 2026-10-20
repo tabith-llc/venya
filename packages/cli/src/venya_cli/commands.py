@@ -3820,10 +3820,10 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
         # revoking the executor identity. Incident-response tool.
         try:
             int(serial, 16)
-            if not 1 <= len(serial) <= 16:
+            if not 1 <= len(serial) <= 64:
                 raise ValueError("bad length")
         except (ValueError, TypeError):
-            print(f"Error: --serial must be hex, 1-16 chars (got {serial!r})", file=sys.stderr)
+            print(f"Error: --serial must be hex, 1-64 chars (got {serial!r})", file=sys.stderr)
             return 1
 
     # Resolve executor_id: explicit arg > local cert CN
@@ -5327,13 +5327,14 @@ def cmd_admin_revoke_admin_cert(client: APIClient, args: Any) -> int:
         print("Error: server URL required. Pass --server-url or set VENYA_SERVER_URL", file=sys.stderr)
         return 1
 
-    # Validate serial format (must be valid hex, up to 16 chars)
+    # Validate serial format (must be valid hex, up to 64 chars — the width the serial_number
+    # columns store; #481 made 16 a write MINIMUM, never a ceiling)
     try:
         int(serial, 16)
-        if len(serial) > 16:
+        if len(serial) > 64:
             raise ValueError("Serial too long")
     except ValueError as e:
-        print(f"Error: invalid serial format — must be hex string (up to 16 chars): {e}", file=sys.stderr)
+        print(f"Error: invalid serial format — must be hex string (up to 64 chars): {e}", file=sys.stderr)
         return 1
 
     url = server_url.rstrip("/")
@@ -5419,10 +5420,10 @@ def cmd_admin_core_relay_cert(client: APIClient, args: Any) -> int:
                 return 1
             try:
                 int(serial, 16)
-                if len(serial) > 16:
+                if len(serial) > 64:
                     raise ValueError("serial too long")
             except ValueError as e:
-                print(f"Error: invalid serial format — must be hex string (up to 16 chars): {e}", file=sys.stderr)
+                print(f"Error: invalid serial format — must be hex string (up to 64 chars): {e}", file=sys.stderr)
                 return 1
             reason = getattr(args, "reason", "unspecified")
             result = client.post(f"{base}/revoke", json={"serial": serial, "reason": reason})

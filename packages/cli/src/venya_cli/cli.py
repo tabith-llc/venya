@@ -298,7 +298,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--serial",
         default=None,
         help=(
-            "Hex serial of the relay credential to revoke (up to 16 chars, any case/padding). "
+            "Hex serial of the relay credential to revoke (up to 64 chars, any case/padding). "
             "Give this OR --cert-file. A serial the registry does not name is REFUSED, not accepted."
         ),
     )
@@ -321,7 +321,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--serial",
         default=None,
         help=(
-            "Revoke ONLY this certificate serial (hex, up to 16 chars) without revoking "
+            "Revoke ONLY this certificate serial (hex, up to 64 chars) without revoking "
             "the executor identity — for orphaned/predecessor credentials. Omit for the "
             "identity form (terminal: re-enrollment then requires a NEW executor_id)."
         ),
