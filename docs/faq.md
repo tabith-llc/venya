@@ -104,7 +104,7 @@ Python 3.14 is pinned and provisioned automatically — you do not install it.
 Not in beta1 — air-gapped installation is marked **coming soon**, and no
 scheduled release carries it yet. Beta1's installers fetch toolchains and
 packages at install time, so a beta1 install needs internet. A local
-mirror procedure exists for alpha sites — contact info@tabith.com.
+mirror procedure exists for beta sites — contact info@tabith.com.
 
 **Does Venya install anything on my target hosts?**
 Nothing. Targets are reached over SSH from executors, exactly as an operator
@@ -112,19 +112,19 @@ would.
 
 **How does it scale?**
 Executors scale horizontally (independent daemons, own certificates). The
-core is single-node in alpha; HA (replication of PostgreSQL + CA material)
+core is single-node; HA (replication of PostgreSQL + CA material)
 is a beta track item.
 
 **Is there Docker?**
 Executors use Docker Sandboxes (sbx) microVMs for command isolation —
 installed by the executor installer. The core itself is a systemd service,
-not a container, in alpha.
+not a container.
 
-## Alpha status
+## Beta status
 
-**What is known-broken or rough in alpha?**
+**What is known-broken or rough in beta?**
 The honest list: documentation and packaging are still maturing; the offline
-story is manual. APIs and config formats may change between alpha releases —
+story is manual. APIs and config formats may change between beta releases —
 the CHANGELOG carries user-facing notes per release. (Older note, resolved:
 fresh installs once had no active key version and `venya store` needed an
 explicit `--key-version v1`; installs now seed an active `v1` at migration

@@ -220,7 +220,7 @@ builtins as a class. Unresolvable and non-trusted tokens are rejected — 503.
 
 ## Deployment shape
 
-Single-core deployments are the alpha norm; the core is stateless apart from
+Single-core deployments are the norm for beta; the core is stateless apart from
 PostgreSQL and its CA material, so HA is a replication problem (tracked for
 beta). Executors scale horizontally — each is an independent daemon with its
 own certificate. Targets are untouched: Venya installs nothing on them;
