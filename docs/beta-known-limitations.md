@@ -783,8 +783,8 @@ predecessor history (the original "Fully offline installation method" row, `stat
 **What the limitation is:** a beta1 install needs an outbound network path on the installing
 host — the installers fetch a Python 3.14 toolchain and package dependencies at install time
 (see [installation.md](installation.md), "Air-gapped networks"). Customers on air-gapped
-networks are served by a future release, marked **coming soon**; the interim answer for an
-alpha site is the local-mirror procedure behind info@tabith.com, which exists but is not
+networks are served by a future release, marked **coming soon**; the interim answer for a
+beta site is the local-mirror procedure behind info@tabith.com, which exists but is not
 packaged.
 
 **What is NOT claimed here:** not that the capability is abandoned — it is a critical-class
