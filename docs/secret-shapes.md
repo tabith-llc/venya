@@ -107,9 +107,18 @@ The server enforces at store time (`routes/secrets.py:_validate_shape_metadata`)
   secret path (the `sudo-stdin` delivery pair). Everything else — pipes,
   semicolons, backticks, substitution syntax, braces — is refused before the
   sandbox starts.
-- **Trusted paths.** Commands must resolve to trusted directories (absolute
-  paths or bare PATH names; builtins and unresolvable tokens are refused —
-  architecture.md §Sandbox and egress).
+- **Trusted paths.** What the gate computes is RESOLUTION into a trusted
+  directory (`DEFAULT_TRUSTED_PATHS`: `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`),
+  not shell-ness: an absolute path qualifies only inside one of those, and a bare
+  name is PATH-resolved first, so a name that resolves outside them is refused as
+  well. `echo`, `true`, `test`, `printf` and `pwd` are shell builtins that have
+  real binaries in a trusted directory and therefore PASS, while `cd`, `export`,
+  `source` and `eval` have no file to resolve and are refused — and so is any
+  non-builtin that fails the same test. The validator keeps no builtin table, so
+  builtins are not a refused class; a refusal from this gate reads
+  `Command not in trusted paths: '<name>'`. See architecture.md §Sandbox and
+  egress for the same statement (the metacharacter and dangerous-pattern gates
+  above are separate gates with their own reasons).
 - **Egress allowlist.** Destinations are fleet-controlled
   (`/etc/venya/egress-allowlist.txt`, deny-by-default). A shape whose example
   points at an unlisted host simply fails at connect time; a shape cannot
