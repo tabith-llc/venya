@@ -678,7 +678,10 @@ only, not a security boundary.
   requires commands to resolve into trusted directories (`/usr/bin`,
   `/usr/sbin`, `/bin`, `/sbin`) — absolute paths like `/bin/echo` always
   qualify; bare names are resolved via PATH and accepted if they land in a
-  trusted dir; shell builtins are rejected by design. A leading `--`
+  trusted dir; whatever does not resolve is refused as "command not in
+  trusted paths" — there is no builtin table, so the rule is RESOLUTION, not
+  shell-ness: `echo`, `true`, `test`, `printf` have real binaries and PASS,
+  while `cd`, `export`, `source`, `eval` have none and are refused. A leading `--`
   separator on `venya run` is consumed by the CLI (not sent to the
   executor) and is safe to pass.
 - `Host key verification failed` / TLS failures between components: the CA
