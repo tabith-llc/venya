@@ -31,12 +31,14 @@ and only pointed at:
 ### The relay checks revocation on the core's dial; the executor's listener refuses a revoked peer from the registry and the revocation list, and consults no CRL at all
 
 Status: known limitation in beta · Target: no date set · Tracked as: #676 (open, HIGH — this entry
-is its documented half; the row names the narrow gap: one of the two accept-gate populations has
-never been seen refused on a served fleet), discharging the physical half of #597 AC6(b), and #586
+is its documented half; the row names the narrow gap: the listener door has now been seen refusing a
+revoked peer on a served fleet, and the core's own dial-side refusal never has — that is the residue),
+discharging the physical half of #597 AC6(b), and #586
 (open on its **physical** half only — the dial landed, and the listener door now names a revoked
 peer in BOTH populations: the core-relay registry via #597 and the executor-serial list via Gap A
-at `c7a4075`. One of the two physical observations is now produced — the executor-serial door was
-refused on a served fleet, twice — and the registry-arm capture has not been; that is the residue)
+at `c7a4075`. Both listener populations have now been refused on a served fleet: the executor-serial
+arm twice, and the core-relay registry arm once. What has never been seen refused is the core's dial,
+and this entry does not claim it was)
 
 **What is enforced today.** One door: the DIAL, which is the core connecting OUT to an
 executor. The relay context is built by `_build_relay_ssl_context`
@@ -127,12 +129,23 @@ the same poll branch that answers the executor's own revocation question). **So 
 `VERIFY_CRL_CHECK_LEAF` bolted onto the listener would still enforce nothing new** — a green test
 could be written for the flag and the refusals it claims to add are already made, by a route that
 does not need a distribution point the default install never advertises. The honest residue here is
-not a missing mechanism but a missing **observation**: a physical revoke-then-refuse has now been
-**observed at one door** — the executor-serial arm, refused on a served fleet twice, with the
-journal line captured and the paired negatives counted (an admitted credential still transacted;
-the self-arm and cooperation arms read zero; the listener stayed up) — while the refusal keyed on
-the **core-relay registry** has never been observed, and that second arm needs a throwaway subject
-of a different class, so it is not covered by the run that produced the first.
+not a missing mechanism but a missing **observation**, and the missing observation sits at ONE door,
+not two. A physical revoke-then-refuse **has** now been observed on a served fleet at the **listener
+door**, in both of its populations: the executor-serial arm refused twice, with the journal line
+captured and the paired negatives counted (an admitted credential still transacted; the self-arm and
+cooperation arms read zero; the listener stayed up), and the core-relay registry arm refused once,
+where the durable record is an audit row naming registry membership as the reason rather than a
+journal line, and the paired same-tick probe shows a non-revoked sibling leaf admitted while the
+revoked one is refused with no application byte back. Propagation at that door was measured across
+the poll interval the daemon already runs.
+
+**What has never been observed is the refusal at the core's dial.** The code is real —
+`_build_relay_ssl_context` sets `VERIFY_CRL_CHECK_LEAF` on the peer leaf and
+`_ensure_dial_crl_store` mints the list per dial, and the refusal sentence exists — and a served
+core does carry live revocations, so nothing is missing in order to revoke something. What is
+missing is a run that saw that door refuse, and on the present fixture no reachable trigger produces
+one: the dial target is taken from the enrolled `executor_url`, so a stand-in listener cannot be
+dialed. This entry names that half as unobserved, and nothing on it claims the dial was seen refusing.
 
 **Who is affected in the shipped posture.** Reachability, not theory. The listener binds
 `:8443` (`RELAY_PORT`, `packages/executor/src/executor/relay_listener.py:46`) on the executor
@@ -161,28 +174,32 @@ matches that boundary: a refusal happens after the handshake and before any requ
 taken later, inside the handler — so a refusal at accept can only ever deny new work.
 
 **The proof that is half-run.** The physical revoke-then-refuse has now been executed on a served
-fleet at the **executor-serial door** — twice, with the refusal journalled by name and zero
-application bytes back — and it has **never been executed against the core-relay registry arm**.
+fleet at the **listener door**, in both populations — the executor-serial arm twice, with the refusal
+journalled by name and zero application bytes back, and the core-relay registry arm once, recorded by
+audit row and by the same-tick admitted/refused pair — and it has **never been executed at the core's
+dial**.
 What exists in the tree beside those runs is unit-level: the dial
 half is pinned by `packages/server/tests/test_relay_dial_crl_586.py`, which mints a real CA,
 real leaves, a real CRL and a real loopback handshake but runs **no venya daemon on either
 side** (its own module docstring, `packages/server/tests/test_relay_dial_crl_586.py:21-24`);
 the listener accept gate is pinned by
 `packages/executor/tests/test_relay_revocation_gate_586.py`. A unit that refuses a leaf in a
-loopback handshake is not a revocation feature proved on a customer deployment. **The merged
-dial half must not be read as "revocation works at the handshake"** — it is one of two doors,
-and the unrun physical proof covers neither. **What the listener door does have now is a registry
+loopback handshake is not a revocation feature proved on a customer deployment. **The merged dial half must not be read as "revocation works at the handshake"** — it is one of two
+doors, and the door whose physical refusal has never been observed is that same dial, so the unrun
+proof is not covered by any run that was. **What the listener door does have now is a registry
 match, not a list consult: `peer_revocation_refusal`
 (`packages/executor/src/executor/relay_listener.py`) refuses a revoked core-relay serial after the
-handshake and before any request byte, and its own physical proof is unrun too.**
+handshake and before any request byte, and that refusal has now been observed on a served fleet.**
 
 **Plan — what is NOT planned.** This entry does not promise a listener CRL consult, and a reader
 should not read one into it. What the row is still open on is no longer a mechanism: the dial landed,
 the #597 registry match landed, and the executor-serial peer ask (#586 Gap A) landed at `c7a4075`, so
 the two-door remedy this row describes is **built in both populations**. **What remains is the
-physical certificate** — a revoke-then-refuse observed on a served fleet **at the registry arm**,
-which needs a guest and has never been produced (the executor-serial arm has now been produced
-twice, and that half of this sentence used to name both doors). Unit-green is necessary and not
+physical certificate** — a revoke-then-refuse seen at the **core's dial** on a served pair. Both
+listener arms have now been produced (the executor-serial arm twice, the core-relay registry arm once),
+and that half of this sentence used to name the registry arm as the missing one. The dial half is not
+produced because no non-terminal trigger is reachable on a served pair, not because a revocation could
+not be made. Unit-green is necessary and not
 sufficient, and #586 stays open past beta on that half, not on a missing consult.
 
 One alternative exists and is **the owner's call, not this page's plan, and not a scheduled
