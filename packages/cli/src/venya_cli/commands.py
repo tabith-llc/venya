@@ -4225,7 +4225,7 @@ def _decrypt_ca_backup(data: bytes, passphrase: str) -> bytes:
     return padded[:-pad]
 
 
-def _validate_ca_key_pem(data: bytes) -> bytes:
+def _validate_ca_key_pem[T: (bytes, memoryview)](data: T) -> T:
     """Fail closed unless `data` parses as a PLAINTEXT PEM private key.
 
     Compensating control for the unauthenticated legacy CBC reader: a wrong
@@ -4401,14 +4401,27 @@ def cmd_admin_split_ca_key(args: Any) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    threshold = args.threshold
-    num_shares = args.shares
+    # #674: the unwrapped root-CA plaintext lives in the one buffer this command
+    # owns from here, and is erased on every exit path — including the threshold
+    # refusal below. `del` drops the producer's names; it does not erase the
+    # producer's copy (#538's stated limit).
+    with SecretHolder(plaintext_key) as holder:
+        del plaintext_key, raw_at_rest
 
-    if threshold > num_shares:
-        print("Error: threshold cannot exceed number of shares", file=sys.stderr)
-        return 1
+        threshold = args.threshold
+        num_shares = args.shares
 
-    shares = split(plaintext_key, threshold=threshold, shares=num_shares)
+        if threshold > num_shares:
+            print("Error: threshold cannot exceed number of shares", file=sys.stderr)
+            return 1
+
+        # The scoped read-only view is what the splitter is fed — no plaintext
+        # bytes copy leaves the holder here. shamir builds its own payload
+        # internally; that copy is the residual named in the #674 report, not a
+        # thing this call site can erase.
+        with holder.view() as key_material:
+            shares = split(key_material, threshold=threshold, shares=num_shares)
+
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     ensure_secret_dir(output_dir)
 
@@ -4534,18 +4547,29 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
         print(f"Unknown restore mode: {mode}", file=sys.stderr)
         return 1
 
-    try:
-        reconstructed = _validate_ca_key_pem(reconstructed)  # entry-path validator, site 3
-        # Re-encrypt into the at-rest envelope before writing (#297): target-
-        # format preserving, probe-verified against the current encrypted
-        # file (wrong server passphrase -> LOUD, ZERO writes, byte-identity),
-        # plaintext never persisted where the envelope is expected.
-        at_rest_bytes = restore_at_rest_bytes(ca_key_path, reconstructed)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    # #674: the reconstructed root-CA plaintext from EITHER arm is handed to the
+    # one buffer this command owns, and that copy is erased on every exit path —
+    # including the validator refusal and the wrong-server-passphrase refusal.
+    # As in export (#538), dropping the producer's name does not erase the
+    # producer's copy; the holder's claim is about its OWN copy only.
+    # The at-rest write happens INSIDE the view because restore_at_rest_bytes can
+    # hand back its input unchanged (the legacy plaintext-target branch), so the
+    # bytes the writer needs may still be the holder's own buffer.
+    with SecretHolder(reconstructed) as holder:
+        del reconstructed
 
-    atomic_write_key(ca_key_path, at_rest_bytes)
+        try:
+            with holder.view() as key_material:
+                validated = _validate_ca_key_pem(key_material)  # entry-path validator, site 3
+                # Re-encrypt into the at-rest envelope before writing (#297): target-
+                # format preserving, probe-verified against the current encrypted
+                # file (wrong server passphrase -> LOUD, ZERO writes, byte-identity),
+                # plaintext never persisted where the envelope is expected.
+                at_rest_bytes = restore_at_rest_bytes(ca_key_path, validated)
+                atomic_write_key(ca_key_path, at_rest_bytes)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     print(f"CA key restored to {ca_key_path}")
     print("WARNING: All existing executor certificates signed by this CA are now valid again.")
