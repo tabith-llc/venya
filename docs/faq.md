@@ -101,8 +101,9 @@ so ceremonies are typed at the machine's own console).
 Python 3.14 is pinned and provisioned automatically — you do not install it.
 
 **Can Venya run air-gapped?**
-Not turnkey yet. Full offline installation is a tracked beta goal; the
-installers currently fetch toolchains and packages at install time. A local
+Not in beta1 — air-gapped installation is marked **coming soon**, and no
+scheduled release carries it yet. Beta1's installers fetch toolchains and
+packages at install time, so a beta1 install needs internet. A local
 mirror procedure exists for alpha sites — contact info@tabith.com.
 
 **Does Venya install anything on my target hosts?**
