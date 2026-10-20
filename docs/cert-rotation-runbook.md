@@ -165,10 +165,31 @@ executor door.
    and the refusal lands on **new** connections only — a relay call already in flight is
    not terminated. That boundary is the owner's ruling and is not a knob.
 
-5. **Revocation is terminal.** There is no un-revoke; the credential's row keeps its
+5. **Where the refusal actually lands, and what that proves.** The peer check runs in the
+   listener's connection-accept path (`packages/executor/src/executor/relay_listener.py`, the
+   `peer_revocation_refusal` function, called from `_RelayHTTPServer.get_request`), so it fires
+   **before** the application-layer `relay_client_ids` CN test in `ExecuteHandler.do_POST`. Measured, not inferred: one scratch credential, same leaf and same key on the same
+   two listeners, only the registry row changed — before the revoke it drew `403 … peer CN … not
+   allowed` (188 bytes, the CN layer answering), after the revoke it drew **zero application bytes
+   and no HTTP status**, with the journal line `Relay :8443 refused a new connection … 403 REVOKED
+   — the peer's core relay credential is revoked (registry membership, #597)`. Capture:
+   `wave33-specs-20261020/ultra-676-door2B-capture-s150c-report.md`. **Scope of that proof — read
+   this before you tell a customer the credential is dead end-to-end: it is the LISTENER door only.**
+   The other arm, the core's own **dial-out** verification when it presents a revoked executor leaf
+   (`routes/executors.py`, the CRL block inside `_build_relay_ssl_context`, which sets
+   `verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF`),
+   is code-present and unit-asserted, and **has not been observed as a core-side journal line on a
+   served fleet.** If you need that guarantee for a decommission, run the arm you can see: revoke at
+   the registry and confirm the refusal in the **executor's** journal, which is where the evidence lives.
+
+6. **Revocation is terminal.** There is no un-revoke; the credential's row keeps its
    `revoked_at` across a reboot, and re-minting the file (a fresh installer run) creates a
-   row for the NEW serial and leaves the revoked one revoked. Re-enrolment means a new
-   credential, same law as an executor identity.
+   row for the NEW serial and leaves the revoked one revoked. **The revoked row is the
+   record — nothing deletes it, and there is no delete verb to reach for.** Keep it: it is
+   the only thing that says this serial was killed and why (`revoke_reason`). The same
+   row is also what a backup restores, so a **stale** database dump un-revokes a revoked
+   credential — see `BACKUPS.md` § *The relay credential registry* for the post-restore
+   check. Re-enrolment means a new credential, same law as an executor identity.
 
 ## 1. Executor certificate auto-rotation (design + deployment caveat)
 
