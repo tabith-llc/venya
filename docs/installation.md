@@ -622,8 +622,11 @@ so they work offline and after the serving origin is gone.
 
 ## Air-gapped networks
 
-Full offline installation is a tracked beta goal, not yet turnkey: the
-installers fetch Python toolchains and package dependencies at install time.
+Offline installation — installers that fetch nothing at install time, for
+customers on air-gapped networks — is **coming soon**: it is **not part of
+beta1**, and no scheduled release carries it yet. Beta1's installers fetch
+Python toolchains and package dependencies at install time, so a beta1
+install requires internet.
 For air-gapped alpha sites, contact info@tabith.com — a local mirror
 procedure exists but is not yet packaged.
 
