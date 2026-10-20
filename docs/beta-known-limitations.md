@@ -454,6 +454,25 @@ renewed pair fixes the proxy refusal and serves the admin commands on that condi
 from here carries the marker the accepted way, so the limit ages out credential by credential
 as they are renewed — one re-mint per affected credential, not a fleet-wide action.
 
+### Bootstrap is trust-on-first-use: whoever completes the key ceremony first on a newly initialized core becomes its administrator
+
+Status: known limitation in beta · Target: none — it is a ruled bootstrap design, disclosed not
+slated · Tracked as: GitLab **#668**, closed on the owner's DOCUMENT ruling (2026-10-19); this entry
+is that ruling's text.
+
+**Who is affected:** anyone who initializes a core on a network where another party can reach the
+`/init` + ceremony path first.
+
+**What the limitation is:** Bootstrap is trust-on-first-use: whoever completes the key ceremony first on a newly initialized core becomes its administrator — no prior act reserves the role, and there is no second claimant once the ceremony is done.
+Initialize a new core on a network you control before you expose it.
+This is a separate trust anchor from the first CA fetch disclaimed
+elsewhere in this document: there, trust pins to a fetched certificate; here, trust pins to
+whoever arrives first with the ceremony complete. The safe-initialization procedure lives in
+[installation.md](installation.md) §2.
+
+**What changes at beta+:** nothing is scheduled; the disclosure is the posture. If a reservation
+capability is ever ruled, this entry is replaced by its own row rather than softened.
+
 ### The root certificate authority expires on a fixed day, ten years out, and nothing warns before it
 
 Status: known limitation in beta · Target: no date set · Tracked as: `features/root-ca-ten-year-expiry-alarm-and-reroot.md` (s132 filing — warn-before-expiry and rotate-in-place, a capability item on a defects-only board, so it correctly has no GitLab row) · and GitLab **#661** (`root-ca-validity-duplicated-installer-literal-vs-constant`, `severity/medium`), which is the one *shipped* defect in this area: the same lifetime number is written at four mint sites with no interlock
@@ -629,7 +648,9 @@ shape the #530 / #533 / #536 / #540 work built into the CLI dials is the same sh
 **What is NOT claimed here:** that this entry covers the first CA fetch. Trust-on-first-use on the
 `/.well-known/venya-ca.crt` fetch is a separate, judged bootstrap tradeoff and it is documented in
 [installation.md](installation.md) (the two CA-trust paths); it is not this knob and not softened by
-this entry.
+this entry. And the other trust anchor this page disclaims — the bootstrap ceremony one — is the
+separate entry **"Bootstrap is trust-on-first-use"** in this document; "separate" there means that
+named entry, not an abstraction.
 
 **What changes at beta+:** nothing is scheduled. Retiring the knob would be a ruling about the
 development fleet, not a fix, and the verifying path it steps around is the path every production
