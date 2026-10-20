@@ -797,7 +797,10 @@ class TestMigrationAndModelAgree:
         assert specs["040"] == "039", f"040 does not chain to the tip it was cut at: {specs['040']}"
         parents = [p for p in specs.values() if p]
         heads = [r for r in specs if r not in parents]
-        assert heads == ["040"], f"the version tree has more than one head: {heads}"
+        # ADVANCED by the #684 leg, exactly as the 037-era head cell documents: the
+        # invariant is ONE head, and the identifier is the acknowledgement that a
+        # migration landed. 040 -> 041 (#684 admin credential registry).
+        assert heads == ["041"], f"the version tree has more than one head: {heads}"
 
 
 def core_alembic_dir() -> str:

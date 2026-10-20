@@ -233,6 +233,45 @@ def _verify_forwarded_cert(request: Request, cert: x509.Certificate, ca_certs: l
     return False
 
 
+def _register_observed_admin_credential(backend: Any, cert: Any, presented_serial: str) -> None:
+    """Record a just-VERIFIED admin credential in the #684 population. Best-effort.
+
+    Two deliberate properties, each because the wrong version of this would be worse than
+    the defect it prevents:
+
+    * **Never denies.** The caller has already passed chain, plane, allowlist and
+      revocation; a registry fault is logged and the request continues. Turning an
+      authorized request into an error because a bookkeeping write failed would be a new
+      outage, not a fix.
+    * **Never infers or clears a revocation.** This writes registration facts only, and
+      the table has no ``revoked_at`` column to write. A revoked certificate cannot reach
+      here at all — the ``revoked is not None`` arm refused it upstream — so nothing here
+      can un-revoke anything, and ``AdminCertRevocation`` stays the single revocation
+      authority the CRL builder reads.
+
+    ``register_admin_credential`` is an insert-or-``present`` no-op keyed on the canonical
+    serial, so repeats cost one indexed lookup and create no duplicate row. Admin routes are
+    operator-driven and low-volume, so that is the whole cost; no cache is added.
+    """
+    try:
+        from ..admin_registry import SOURCE_OBSERVED_ADMISSION, facts_from_certificate, register_admin_credential
+
+        session = backend.get_session()
+        try:
+            register_admin_credential(session, facts_from_certificate(cert), SOURCE_OBSERVED_ADMISSION)
+            session.commit()
+        finally:
+            session.close()
+    except Exception as exc:  # never a denial, never silent
+        logger.warning(
+            "Admin credential registry: could not record the admitted credential %s (%s) — that "
+            "credential may not be revocable until it is enrolled at "
+            "POST /api/v1/admin/certs/register (#684).",
+            presented_serial,
+            exc,
+        )
+
+
 class SessionMiddleware(BaseHTTPMiddleware):
     """Validates session tokens and manages token rotation.
 
@@ -613,6 +652,23 @@ class SessionMiddleware(BaseHTTPMiddleware):
         # authorization BYPASS on the human plane, and that lives in
         # require_admin — plus the plane itself, so a dependency can tell the
         # two shapes apart without re-reading the certificate.
+        #
+        # #684 POPULATION, at the enforcement point: a credential that has just been
+        # CRYPTOGRAPHICALLY VERIFIED and admitted is, by definition, a credential this
+        # core vouches for, so it belongs in ``admin_credentials`` — and the revoke verb
+        # can only refuse the unknown if the known is recorded. This is what makes the
+        # operator's own working credential revocable on a core that never set
+        # ``VENYA_ADMIN_CERT`` and never called the mint or register route: the boot
+        # reader needs a path, the mint needs a ceremony, the register needs a PEM, and
+        # this needs only the certificate the caller is already presenting.
+        #
+        # Best-effort and NON-FATAL by construction: a registry write failure must never
+        # turn an authorized request into a denial (the enforcement decision above already
+        # passed), and it is logged, not swallowed. ``register_admin_credential`` is an
+        # insert-or-``present`` no-op keyed on the canonical serial, so the steady state
+        # costs one indexed lookup per admission and rewrites nothing.
+        _register_observed_admin_credential(backend, cert, presented_serial)
+
         request.state.admin_cert_plane = plane
         request.state.auth_user = {"caller": "admin", "user_id": identity, "plane": plane}
         return None

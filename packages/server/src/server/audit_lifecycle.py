@@ -68,6 +68,11 @@ ADMIN_CERT_ISSUED = "admin_cert_issued"
 # matching the ADMIN_CERT_ISSUED/ADMIN_CERT_REVOKED pair shape.
 CORE_RELAY_CERT_REGISTERED = "core_relay_cert_registered"
 CORE_RELAY_CERT_REVOKED = "core_relay_cert_revoked"
+# #684: the admin plane got its own credential POPULATION (admin_credentials), and this is
+# the explicit-register side of it — the remedy a default-deny revoke names when a serial is
+# in no table yet. Field table mirrors CORE_RELAY_CERT_REGISTERED exactly: serial, CN, and
+# whether this call created the row. Never a key, a PEM, or a public key.
+ADMIN_CERT_REGISTERED = "admin_cert_registered"
 USER_REENROLLED = "user_reenrolled"
 CORE_RESET_REFUSED = "core_reset_refused"  # #511: a reset the in-transaction guard stopped
 ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit event name, not a password
@@ -147,6 +152,7 @@ def audit_lifecycle(
         ADMIN_CERT_ISSUED,
         CORE_RELAY_CERT_REGISTERED,
         CORE_RELAY_CERT_REVOKED,
+        ADMIN_CERT_REGISTERED,
         USER_REENROLLED,
         CORE_RESET_REFUSED,
         ENROLLMENT_TOKEN_ISSUED,
