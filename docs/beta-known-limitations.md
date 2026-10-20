@@ -567,6 +567,36 @@ else on this page.
 **What changes at beta+:** the open half of #565 closes the remaining writers, and the ruled
 exemption above changes only when the work that replaces the core-held key lands.
 
+### The two password variables carry no length rule at all
+
+Status: known limitation in beta · Target: none until the owner rules a number · Tracked as: #675
+
+**Who is affected:** anyone setting `VENYA_DB_PASSWORD` (the PostgreSQL password the core
+database authenticates with) or `VENYA_PASSWORD` on a served install.
+
+**What the limitation is:** neither variable has a length rule anywhere in shipped source.
+The installer prompt for the database password runs through `venya_read_secret_confirm`,
+which retries only on an empty entry and on a mismatch between the two entries — there is
+no length test of any kind — and no shipped reader measures the value's length either. A
+one-character database password is accepted, stored, and used by a real deployment. The
+15-character floor documented on [`db.passphrase`](#dbpassphrase-production-only) and
+enforced by the core at boot governs the **server encryption passphrase**
+(`VENYA_DB_PASSPHRASE`) and the key-protection passphrases; it does not reach these two
+variables, and the installer prompts for them carry no bound either.
+
+**What is NOT claimed here:** that a floor is missing by oversight and any number will do.
+The owner ruled the passphrase floor at 15 characters on the passphrase plane and has not
+ruled a number for the password plane. A leg inventing one is a worse defect than the
+silence it fixes — the documented development-test values for these two variables are
+shorter than 15 characters, so an unruled floor would make the installer refuse its own
+documented inputs. The rule is therefore **stated as absent**, in this entry and in the
+prompt text proposed in #675, which is a closed outcome under that row's AC2 rather than
+an open one.
+
+**What changes at beta+:** a floor on either variable lands only with an owner-ruled
+number, applied at the installer prompt and at every reader together, with the documented
+test values re-checked against it in the same change.
+
 ---
 
 ## Installing and upgrading
