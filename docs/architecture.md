@@ -191,11 +191,18 @@ The executor service runs under a seccomp profile, `PrivateTmp`, and no
 `packages/cli/tests/test_capability_isolation.py` — core and CLI, not core and
 executor). The daemon user has KVM access for sandboxing;
 sandbox SSH tooling requires commands to resolve into trusted directories
-(absolute paths, or bare names resolved via PATH). There is no builtin table in the
-validator: what refuses is whatever does NOT resolve into a trusted directory —
-that catches builtins with no file behind them (`cd`, `export`, `source`, `eval`) and
-passes the ones that do exist as binaries (`echo`, `true`, `test`). Unresolvable and
-non-trusted tokens are rejected — 503.
+(`DEFAULT_TRUSTED_PATHS`: `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`) — absolute paths
+qualify only inside those directories, and bare names are PATH-resolved first, so a name
+that resolves outside them is refused too. What the gate computes is RESOLUTION into a
+trusted directory, not shell-ness: `echo`, `true`, `test`, `printf` and `pwd` are shell
+builtins that have real binaries in a trusted dir and therefore PASS, while `cd`,
+`export`, `source`, `eval`, `set` and `read` have no file to resolve and are refused — and
+so is any non-builtin that fails the same test, including one that resolves cleanly but
+outside the trusted set. A refusal from THIS gate reads `Command not in trusted paths:
+'<name>'` (other gates have their own reasons — the dangerous-pattern block and the empty
+command check fire before it); the
+validator keeps no builtin table to consult, so nothing in the product reasons about
+builtins as a class. Unresolvable and non-trusted tokens are rejected — 503.
 
 ## Data stores
 
