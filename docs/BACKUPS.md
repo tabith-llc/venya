@@ -33,7 +33,7 @@ directory, which this document did not previously list. Each row names the pin t
 |---|---|---|---|---|
 | `/var/lib/venya/ca/` | **`0700`** | `venya:venya` | `chmod 700 /var/lib/venya/ca` in `venya_create_directories` (`venya-common.sh`), plus `os.chmod(str(ca_dir), 0o700)` in the CA-generation step (`install-venya-core.sh`) | **yes, unconditionally** — neither pin is inside the admin-mTLS block |
 | `/var/lib/venya/ca/admin-ca/` | **`0700`** | `venya:venya` | `install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"` (`install-venya-core.sh`) | every admin-mTLS run — `install -d` re-applies the mode to an existing directory. Skipped when admin mTLS is off. |
-| `/etc/venya/admin/` | **`0700`** | `venya:venya` | `install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"` (`install-venya-core.sh`); inside it the mint writes `admin.crt` `0644` and `admin.key` `0600` | every admin-mTLS run. Skipped when admin mTLS is off. |
+| `/etc/venya/admin/` | **`0700`** | `venya:venya` | `install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"` (`install-venya-core.sh`); inside it the mint writes `admin.crt` `0644` and `admin.key` `0600` — that pair is **excluded from the backup set**, see "The machine-plane admin pair is excluded from the backup set" below | every admin-mTLS run. Skipped when admin mTLS is off. |
 | `/opt/venya/.env` | `0600` | `venya:venya` | item 2 above (`chmod 600`) | every run |
 | `/etc/venya/venya-core.env` | `0640` | `root:venya` | item 3 above (`chmod 0640`) | every run |
 
@@ -98,9 +98,36 @@ re-issue them from the restored CAs — see step 5 of "Restore".
   previously-issued recovery codes stop working.
 
 Net: back up **#1 + #2 + #3 + #4 together, every time.** A DB dump without `.env` and
-`venya-core.env` is encrypted noise. `/etc/venya/admin/` is deliberately **not** a fifth artifact:
-the installer re-mints that pair on every admin-mTLS run (see "Delivered modes" above), so a
-reinstall replaces it and an off-site copy of it buys nothing.
+`venya-core.env` is encrypted noise. `/etc/venya/admin/` is deliberately **not** a fifth artifact —
+see the exclusion row below.
+
+### The machine-plane admin pair is excluded from the backup set
+
+**`/etc/venya/admin/admin.key` (delivered mode `0600`) and `/etc/venya/admin/admin.crt` (`0644`) are
+excluded from the backup set above, on purpose.** The `tar` command in "How to back up" does not name that
+directory and no step in "Restore" expects a copy of it. The mechanism, read at the shipped bytes: the mint
+`AdminCAManager.sign_admin_cert` (`packages/server/src/server/ca.py:1151`) hands back the leaf and its key
+(`:1265-1272`, the key serialized `NoEncryption()` at `:1268`), and the installer writes that pair and sets
+its modes — `install-venya-core.sh:569` unpacks `cert, key_pem, cert_pem`, `:572-573` write `admin.crt` and
+`admin.key`, `:574-575` set `0644`/`0600`, inside the `0700` directory the same script creates with
+`install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"` (`:431` names the path, `:433` opens the admin-mTLS
+block). **What replaces a lost copy is a re-mint, not a restore:** re-running the core installer preserves an
+existing CA and re-issues that pair unconditionally, and the same call can be made directly —
+`venya admin generate-admin-cert <identity> --output-dir /etc/venya/admin` (see
+[beta-known-limitations.md](beta-known-limitations.md)). That is what the installer's own line means when it
+prints "never copied off this core" (`install-venya-core.sh:580`).
+
+**What this row does NOT claim, and a reader should not infer it:**
+- It is **not** a claim that `admin.key` is protected by encryption at rest. It is written in the clear; the
+  file mode and the directory mode are the control, and that posture is a ruled exemption, listed in
+  [beta-known-limitations.md](beta-known-limitations.md) — it is not an oversight.
+- It is **not** a claim that excluding this pair weakens the rest of the set: the CA material in **#4** is still
+  irreplaceable and still must be backed up with **#3**.
+- It is **not** a statement about every install. Both directories are created inside the
+  `VENYA_ADMIN_MTLS_ENABLED` block, so an install run with that flag `false` holds no such pair to exclude.
+- It is **not** enforced by anything. No shipped check asserts that a backup archive omits
+  `/etc/venya/admin/`; this is the documented posture of the commands on this page. If you add the directory to
+  your own archive the product will not stop you — it only means you are carrying a plaintext key off the core.
 
 ## How to back up (core server)
 
