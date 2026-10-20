@@ -29,6 +29,7 @@ the leg report.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -517,11 +518,67 @@ class TestRevokeVerbDefaultDeny:
         assert row.revoked_at == when, "a repeat revoke moved the original revocation time"
         assert row.revoke_reason == "first", "a repeat revoke overwrote the recorded reason"
 
+    def test_twenty_byte_mint_class_round_trips_and_normalizes(self) -> None:
+        """AC5 of #682 — a cell at the WIDTH THE CA ACTUALLY MINTS, not a short fixture.
+
+        `server.ca` mints `int.from_bytes(os.urandom(20), "big") >> 1`: 159 bits, which renders as
+        37-40 hex characters, and the odds of such a serial fitting in 16 hex are about 2^-95. The
+        reason the old cap went unnoticed is that this file's `RELAY_SERIAL = 0xDEADBEEF1234` is an
+        8-byte-class value, so every pre-existing cell exercised the one width the gate could satisfy.
+        This cell mints at the real class and drives parse -> registry row -> `revoke` of the string
+        `list` prints, carrying AC4's normalization arm on the same value: mixed case, an `0x` prefix
+        and extra padding are all the SAME serial to the store, because one canonical form is taken at
+        the write boundary (#481).
+        """
+        serial_int = int.from_bytes(os.urandom(20), "big") >> 1
+        pem, _key = _make_relay_cert_pem(serial=serial_int)
+        minted = canonical_serial(f"{serial_int:x}")
+        assert 37 <= len(minted) <= 40, f"the mint class is 159 bits; got a {len(minted)}-hex serial"
+
+        with tempfile.TemporaryDirectory() as td:
+            cert = Path(td) / "relay-client.crt"
+            cert.write_text(pem)
+            from server.relay_registry import read_relay_credential
+
+            facts = read_relay_credential(cert)
+        assert facts.serial_number == minted, "the registry read lost digits of a 20-byte serial"
+
+        for spelling in (minted, minted.upper(), f"0x{minted}", "0" * 8 + minted):
+            client, _db = _verb_client(rows=[_row(serial_number=minted, revoked_at=None)])
+            resp = client.post("/api/v1/admin/core-relay-certs/revoke", json={"serial": spelling, "reason": "682-ac5"})
+            assert resp.status_code == 200, f"{spelling[:24]!r} -> {resp.status_code}: {resp.text[:160]}"
+            assert resp.json()["serial_number"] == minted, f"{spelling[:24]!r} canonicalized to the wrong serial"
+
+    def test_serials_at_the_raised_cap_are_accepted_not_refused(self) -> None:
+        """AC4 positive half: 17..64 hex are ordinary, and each needs its OWN registered row.
+
+        The verb is default-deny, so a 403 here would be correct behaviour for an unknown serial and
+        would prove nothing about the gate; a 200 proves the format gate let the request reach the
+        lookup that then matched. `"0" * 17` is the shape this file's own negative cell used to reject.
+        """
+        for good in (
+            "5803696f1234567890abcdef1234567890f69d0b",  # pragma: allowlist secret
+            "0" * 17,
+            "a" * 40,
+            "f" * 64,
+        ):
+            client, _db = _verb_client(rows=[_row(serial_number=canonical_serial(good), revoked_at=None)])
+            resp = client.post("/api/v1/admin/core-relay-certs/revoke", json={"serial": good, "reason": "test"})
+            assert resp.status_code == 200, f"{good!r} ({len(good)} chars) -> {resp.status_code}: {resp.text[:160]}"
+
     def test_malformed_serial_is_a_400_before_any_lookup(self) -> None:
+        """The negative half of the #682 truth table, re-paired for the raised cap.
+
+        `"0" * 17` sat here because 17 chars used to be over the cap. It is NOT over the 64-char
+        ceiling now, so leaving it would assert a refusal the product no longer makes; it moves to 65
+        (one past the store width) and the 17-char shape has its positive cell above. Empty,
+        whitespace and non-hex are refused for the reason they always were: they are not hex serials.
+        """
         client, db = _verb_client(rows=[_row(revoked_at=None)])
-        for bad in ("", "   ", "nothex", "zz", "0" * 17):
+        for bad in ("", "   ", "nothex", "zz", "0" * 65, "a" * 65):
             resp = client.post("/api/v1/admin/core-relay-certs/revoke", json={"serial": bad})
             assert resp.status_code == 400, f"{bad!r} -> {resp.status_code}"
+            assert "64" in resp.json()["detail"], f"{bad!r} refused with the old cap in its message"
         db.query.assert_not_called(), "a 400 must be decided before the store is consulted"
 
     def test_unexpected_body_field_is_refused_not_ignored(self) -> None:

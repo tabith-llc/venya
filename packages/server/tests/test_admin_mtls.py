@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from core.utils.cert_serial import canonical_serial
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -1250,15 +1251,39 @@ class TestRevokeAdminCertEndpoint:
         assert resp.status_code == 400
 
     def test_revoke_admin_cert_long_serial(self):
-        """Serial too long should return 400."""
+        """A serial past the 64-char store width is refused, with the cap named in the 400.
+
+        Re-paired for #682, not deleted: this cell used to send 20 chars, which is the measured width
+        of a real installer-minted leaf serial, so it was pinning the refusal of a shape the product
+        must ACCEPT. It now sends one char past the ceiling, and the 20-char shape moves to the paired
+        positive cell below.
+        """
         app, _backend, _revocations = _create_revoke_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/admin/certs/revoke",
-            json={"serial": "a" * 20, "reason": "test"},
-        )
-        assert resp.status_code == 400
+        for over in ("a" * 65, "0" * 200):
+            resp = client.post("/api/v1/admin/certs/revoke", json={"serial": over, "reason": "test"})
+            assert resp.status_code == 400, f"{len(over)}-char serial -> {resp.status_code}"
+            assert "64" in resp.json()["detail"], resp.json()
+
+    def test_revoke_admin_cert_20_hex_serial_is_accepted(self):
+        """#682 positive half at the admin door: a 20-byte leaf serial is revocable.
+
+        20 hex chars is the 8-byte executor-serial class whose revokes did work under the old cap, so
+        this is the boundary the cap used to sit exactly on; the 40-hex relay class is the shape that
+        broke, and it is covered beside it.
+        """
+        app, _backend, _revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        for good in ("a" * 20, "5803696f1234567890abcdef1234567890f69d0b", "f" * 64):  # pragma: allowlist secret
+            app, _b, _r = _create_revoke_test_app()
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/admin/certs/revoke", json={"serial": good, "reason": "test"})
+            assert resp.status_code == 200, f"{good!r} ({len(good)} chars) -> {resp.status_code}: {resp.text[:160]}"
+            body = resp.json()
+            assert body["revoked"] is True, body
+            assert body["serial"] == canonical_serial(good), f"{good!r} came back as {body['serial']!r}"
 
     def test_revoke_reason_at_column_bound_accepted(self):
         """revoke-cert-reason-length-unguarded: a 64-char reason (the
@@ -1321,15 +1346,44 @@ class TestRevokeAdminCertEndpoint:
         assert len(revocations) == 1
 
     def test_revoke_empty_serial_400(self):
-        """#481 negative half: the 400 validation contract is unchanged — an
-        empty serial still dies at the boundary instead of storing serial 0."""
+        """#481 negative half, re-paired for #682 (this row): the shape set moves, the contract holds.
+
+        This cell listed ``"0123456789abcdef0"`` — 17 chars, rejected only because the cap was 16.
+        #682 raised the cap to the width the serial_number columns store (64), so that value is
+        legitimately revocable now and asserting a 400 for it would pin behaviour the product does not
+        have. It moves to one char past the store width; the 17-char shape is asserted ACCEPTED in
+        `test_revoke_serial_at_raised_cap_accepted`. Empty, whitespace and non-hex still die at the
+        boundary instead of storing serial 0, which is what this cell was ever about.
+        """
         app, _backend, revocations = _create_revoke_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
-        for bad in ("", "   ", "zzzz", "0123456789abcdef0"):
+        for bad in (
+            "",
+            "   ",
+            "zzzz",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc",  # pragma: allowlist secret
+        ):
             resp = client.post("/api/v1/admin/certs/revoke", json={"serial": bad})
-            assert resp.status_code == 400, bad
+            assert resp.status_code == 400, f"{bad!r} -> {resp.status_code}"
+            assert "64" in resp.json()["detail"], resp.json()
         assert revocations == []
+
+    def test_revoke_serial_at_raised_cap_accepted(self):
+        """#682 positive half: 17 through 64 hex chars are ordinary, not malformed.
+
+        A fresh app per spelling, because this file's mock answers every duplicate lookup with the
+        first stored row — reusing one client would make the 2nd and 3rd posts read as idempotent
+        no-ops and tell us nothing about the gate.
+        """
+        for good in ("0123456789abcdef0", "a" * 40, "f" * 64):
+            app, _backend, _revocations = _create_revoke_test_app()
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/admin/certs/revoke", json={"serial": good, "reason": "test"})
+            assert resp.status_code == 200, f"{good!r} ({len(good)} chars) -> {resp.status_code}: {resp.text[:160]}"
+            body = resp.json()
+            assert body["revoked"] is True and body["already_revoked"] is False, body
+            assert body["serial"] == canonical_serial(good), f"{good!r} came back as {body['serial']!r}"
 
 
 # ---------------------------------------------------------------------------

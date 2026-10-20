@@ -1458,12 +1458,12 @@ async def admin_revoke_executor(
         # --- Serial form: credential-only, identity untouched ---
         try:
             int(serial_arg, 16)
-            if len(serial_arg) > 16 or len(serial_arg) == 0:
+            if len(serial_arg) > 64 or len(serial_arg) == 0:
                 raise ValueError("bad length")
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="serial must be hex, 1-16 chars",
+                detail="serial must be hex, 1-64 chars",
             )
         # ONE canonical serial form (ticket cert-serial-canonicalization-mismatch
         # #481); the duplicate check below reads case/padding-insensitively, so a
@@ -2057,7 +2057,8 @@ async def admin_revoke_admin_cert(
     Admin only. Idempotent — revoking the same serial twice returns success.
     """
     # Validate the OPERATOR STRING first — the 400 contract is unchanged: non-empty
-    # hex, up to 16 digits. Then normalize at the STORAGE BOUNDARY in the ONE
+    # hex, up to 64 digits — the width the serial_number columns store (#481 made 16 a write
+    # MINIMUM, not a ceiling). Then normalize at the STORAGE BOUNDARY in the ONE
     # canonical serial form (ticket cert-serial-canonicalization-mismatch #481,
     # superseding the 2026-09-20 uppercase ruling B — whose stated reason was that
     # nginx $ssl_client_serial is uppercase, and the middleware has since moved to
@@ -2067,12 +2068,12 @@ async def admin_revoke_admin_cert(
     provided = req.serial.strip()
     try:
         int(provided, 16)
-        if not provided or len(provided) > 16:
+        if not provided or len(provided) > 64:
             raise ValueError("bad length")
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid serial format — must be hex string (up to 16 chars)",
+            detail="Invalid serial format — must be hex string (up to 64 chars)",
         )
     serial = canonical_serial(provided)
 
