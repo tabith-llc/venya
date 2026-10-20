@@ -773,6 +773,30 @@ up as the setting you expect no longer taking effect.
 
 ---
 
+### Beta1's installers need internet: air-gapped installation is marked "coming soon", and no release is scheduled to carry it
+
+Status: known limitation in beta · Target: not scheduled — the carrying version is the owner's to
+rule, and this entry names no version for it · Tracked as: the workspace feature row
+`features/air-gapped-installation.md` (class `critical`), with GitLab **#5** as its closed
+predecessor history (the original "Fully offline installation method" row, `status/deferred`).
+
+**What the limitation is:** a beta1 install needs an outbound network path on the installing
+host — the installers fetch a Python 3.14 toolchain and package dependencies at install time
+(see [installation.md](installation.md), "Air-gapped networks"). Customers on air-gapped
+networks are served by a future release, marked **coming soon**; the interim answer for an
+alpha site is the local-mirror procedure behind info@tabith.com, which exists but is not
+packaged.
+
+**What is NOT claimed here:** not that the capability is abandoned — it is a critical-class
+feature row on the owner's board; and not that any specific release carries it — the ruling of
+2026-10-20 says "not beta1" and stopped there, and the version that does carry it has not been
+named by the owner.
+
+**What changes at beta+:** when the owner schedules the carrying release, this entry is deleted,
+not softened — the page's own maintenance rule.
+
+---
+
 ## Running commands
 
 ### Administrator commands that issue no request asked for a security-key ceremony
