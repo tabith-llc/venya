@@ -36,6 +36,7 @@ pins read UNVERIFIED, not green. That is `test_pinned_sha_is_not_yet_current_is_
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import re
 import subprocess
@@ -87,6 +88,86 @@ def _text() -> str:
 # --------------------------------------------------------------------------------------
 # The durable assertion: named symbol exists in the named file.
 # --------------------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------------------
+# The key-collision audit (#675, flash2): a duplicate dict key is SILENT in Python.
+# --------------------------------------------------------------------------------------
+
+_MANIFEST_PY = _PKG / "scripts" / "beta_terms_cites.py"
+
+
+def test_manifest_has_no_duplicate_keys() -> None:
+    """Source keys must equal runtime keys, and no key may carry two meanings.
+
+    `test_every_cite_is_manifested_and_its_symbol_exists` asks the manifest what each cite means, so a
+    manifest that LOST an entry to a repeated key answers confidently and wrongly — every metric stays
+    green on the surviving meaning. That is the failure this cell exists to catch, and it is not
+    catchable from the runtime dict: `len(MANIFEST)` cannot see what Python already discarded. Counting
+    keys in the SOURCE, before the dict collapses them, is the only way.
+    """
+    src = _MANIFEST_PY.read_text(encoding="utf-8")
+    n_src, n_run, dups = gen.audit_keys(src)
+    assert n_src == n_run, (
+        f"MANIFEST declares {n_src} keys but holds {n_run}: {n_src - n_run} were silently discarded by a "
+        "repeated dict key. Delete the redundant entry or give it a distinct coordinate."
+    )
+    conflicting = {k: v for k, v in dups.items() if len(set(v)) > 1}
+    assert not conflicting, f"duplicate keys with DIFFERENT values, one meaning is lost: {conflicting}"
+
+
+def test_positive_control_a_planted_duplicate_goes_red() -> None:
+    """RED BEFORE GREEN on the real predicate — the same lesson the false-symbol falsifier teaches.
+
+    Half 1 plants a duplicate key over a real entry with a DIFFERENT value and shows the audit that
+    guards the cut reports it. Half 2 shows the untouched manifest passes the identical call, so a
+    broken harness cannot pass the red half by accident.
+    """
+    src = _MANIFEST_PY.read_text(encoding="utf-8")
+    clean = gen.audit_keys(src)
+    assert clean[0] == clean[1], f"the shipped manifest already fails its own audit: {clean[2]}"
+    victim = next(iter(gen._load_manifest().MANIFEST))
+    lines = src.split("\n")
+    node = gen._manifest_dict_node(ast.parse(src))
+    assert node is not None and node.end_lineno, "no MANIFEST literal to plant into"
+    # Splice INSIDE the MANIFEST literal. Appending at end-of-file would land in DATED_OVERRIDES (the
+    # last dict in the file) and the audit would correctly see nothing — a fixture that tests nothing is
+    # worse than no fixture, which is what this line cost to learn.
+    i = node.end_lineno - 1
+    planted = "\n".join(
+        lines[:i] + [f'    {victim!r}: ("some/other/file.py", "x", 7, "pin"),', lines[i]] + lines[i + 1 :]
+    )
+    p_src, p_run, p_dups = gen.audit_keys(planted)
+    assert p_src > p_run, "planted duplicate did NOT change the source/runtime counts — the audit is decoration"
+    assert (
+        victim in p_dups and len(set(p_dups[victim])) > 1
+    ), f"FALSIFIER FAILED: audit_keys did not report the planted key {victim!r} as value-conflicting"
+    assert gen.manifest_key_problems(planted), "manifest_key_problems returned nothing on a corrupt manifest"
+    assert gen.manifest_key_problems(src) == [], "the untouched manifest reports problems"
+
+
+def test_rekey_refuses_a_collision_instead_of_clobbering_it() -> None:
+    """The exact shape that made a hand union green-and-wrong must be a refusal, not a write.
+
+    A re-pin can move one cite ONTO a coordinate another cite is leaving; if the two carry different
+    values, last-wins silently re-assigns a meaning. `main()` refuses that case before it renames
+    anything, and the predicate it uses is the merge this cell exercises — first on a fixture that MUST
+    collide, then on a swap that must NOT be called a clobber.
+    """
+    man = gen._load_manifest().MANIFEST
+    keys = list(man)
+    a, b = keys[0], keys[1]
+
+    def merge(moved: dict[str, str]) -> list[str]:
+        grouped: dict[str, list] = {}
+        for k in keys:
+            grouped.setdefault(moved.get(k, k), []).append(tuple(man[k]))
+        return [k for k, v in grouped.items() if len(v) > 1 and len(set(v)) > 1]
+
+    # The collision: `a` lands on b's key while b stays put -> two different values share one key.
+    assert merge({a: b}) == [b], "the fixture's collision was not detected — the guard proves nothing"
+    # The harmless case the same code must ALLOW: a genuine swap, where each key ends up with one value.
+    assert merge({a: b, b: a}) == [], "a two-way swap was called a clobber — --write would refuse a good re-pin"
 
 
 def test_every_cite_is_manifested_and_its_symbol_exists() -> None:
