@@ -175,6 +175,10 @@ fi
 # side effect of re-running the installer.
 DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-}"
 DB_PASSPHRASE_SUPPLIED="${DB_PASSPHRASE//[[:space:]]/}"
+# The #573 floor, declared ONCE on the shell plane and read by both the prompt text and
+# the gate below, so what an operator is told and what is refused cannot disagree.
+# Guarded against drift by packages/core/tests/test_passphrase_length_declarations_agree_675.py.
+DB_PASSPHRASE_FLOOR=15
 STORED_ENV_FILE="$INSTALL_DIR/.env"
 STORED_DB_PASSPHRASE=""
 if [ -f "$STORED_ENV_FILE" ]; then
@@ -200,7 +204,7 @@ if [ -n "$STORED_DB_PASSPHRASE" ]; then
     info "Existing install: reusing stored server passphrase from $STORED_ENV_FILE."
 elif [ -z "$DB_PASSPHRASE_SUPPLIED" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-            venya_read_secret_confirm "Enter server encryption passphrase" DB_PASSPHRASE
+            venya_read_secret_confirm "Enter server encryption passphrase (at least ${DB_PASSPHRASE_FLOOR} characters; longer passphrases are accepted too)" DB_PASSPHRASE
     else
         error "VENYA_DB_PASSPHRASE is required for unattended install (stdin is not a TTY)."
         exit 1
@@ -231,7 +235,8 @@ fi
 # Counted in Unicode CODE POINTS, never bytes: the value goes to python3 through the
 # ENVIRONMENT only (never argv, which is world-readable in /proc/*/cmdline) and is never
 # echoed — the only thing this prints on failure is a sentence with no material in it.
-DB_PASSPHRASE_FLOOR=15
+# (The floor itself is declared once, above the first prompt, so the prompt text and this
+# gate read the same number.)
 if [ -n "${DB_PASSPHRASE//[[:space:]]/}" ]; then
     _db_pp_points=$(DB_PASSPHRASE="$DB_PASSPHRASE" python3 -c 'import os;print(len(os.environ["DB_PASSPHRASE"]))') \
         || { error "cannot count the server passphrase's code points (python3 unavailable) — refusing to continue, nothing written."; exit 1; }
@@ -241,11 +246,10 @@ REFUSED: VENYA_DB_PASSPHRASE is set to a passphrase shorter than Venya's minimum
 Why it matters: this passphrase is the only thing between a copy of this host and every
 secret this deployment stores, and short passphrases are what an attacker tries first.
 To fix it:
-  1. Replace the value of VENYA_DB_PASSPHRASE with a passphrase of at least 15 characters. Characters are
-     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.
+  1. Replace the value of VENYA_DB_PASSPHRASE with a passphrase of at least 15 characters.
      Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.
   2. There is no rule about which characters appear — length is the only requirement, and
-     Venya supports passphrases up to 64 characters.
+     Passphrases longer than 64 characters are accepted too — 64 is the length Venya guarantees to support, not a maximum it enforces.
   3. Provide the passphrase through the environment, never as a command-line argument
      (command-line values are visible to other processes on the machine).
 Your existing database and its stored secrets were not modified by this refusal.
@@ -311,7 +315,7 @@ if [ -z "${VENYA_DB_PASSWORD:-}" ] && [ -f "$STORED_ENV_FILE" ]; then
 fi
 if [ -z "${VENYA_DB_PASSWORD:-}" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-            venya_read_secret_confirm "Enter PostgreSQL password for venya user" VENYA_DB_PASSWORD
+            venya_read_secret_confirm "Enter PostgreSQL password for venya user (no minimum length is enforced on this password — a longer one is stronger)" VENYA_DB_PASSWORD
     else
         error "VENYA_DB_PASSWORD is required for unattended install (stdin is not a TTY)."
         exit 1
@@ -456,7 +460,7 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     fi
     if [ -z "$ADMIN_CA_PASSPHRASE" ]; then
         if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-                venya_read_secret_confirm "Admin CA key passphrase" ADMIN_CA_PASSPHRASE
+                venya_read_secret_confirm "Admin CA key passphrase (at least ${DB_PASSPHRASE_FLOOR} characters; longer passphrases are accepted too)" ADMIN_CA_PASSPHRASE
         else
             ADMIN_CA_PASSPHRASE=$(openssl rand -base64 32)
             info "Unattended install: generated a random admin CA passphrase."
@@ -794,7 +798,7 @@ if [ -z "$CA_KEY_PASSPHRASE" ] && [ -f /etc/venya/venya-core.env ]; then
 fi
 if [ -z "$CA_KEY_PASSPHRASE" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-            venya_read_secret_confirm "Root CA key passphrase" CA_KEY_PASSPHRASE
+            venya_read_secret_confirm "Root CA key passphrase (at least ${DB_PASSPHRASE_FLOOR} characters; longer passphrases are accepted too)" CA_KEY_PASSPHRASE
     else
         CA_KEY_PASSPHRASE=$(openssl rand -base64 32)
         info "Unattended install: generated a random root CA passphrase."

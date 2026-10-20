@@ -34,6 +34,11 @@ PROMPTS = [
         SRC / "commands.py",
         'f"Enter passphrase to decrypt backup (a backup passphrase shorter than "',
     ),
+    (
+        "server CA at-rest prompt (READ door: states the rule, adds no new refusal)",
+        SRC / "at_rest_key.py",
+        'f"Server CA key passphrase ({env_var}, hidden)',
+    ),
 ]
 
 _BOUND = re.compile(r"\bat least\b|shorter than", re.IGNORECASE)
