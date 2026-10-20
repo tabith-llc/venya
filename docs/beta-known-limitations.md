@@ -600,8 +600,8 @@ exemption above changes only when the work that replaces the core-held key lands
 
 Status: known limitation in beta · Target: none until the owner rules a number · Tracked as: #675
 
-**Who is affected:** anyone setting `VENYA_DB_PASSWORD` (the PostgreSQL password the core
-database authenticates with) or `VENYA_PASSWORD` on a served install.
+**Who is affected:** anyone setting `VENYA_DB_PASSWORD` — the PostgreSQL password the core
+database authenticates with — on a served install. It is the only password variable the installer ships.
 
 **What the limitation is:** neither variable has a length rule anywhere in shipped source.
 The installer prompt for the database password runs through `venya_read_secret_confirm`,
@@ -610,8 +610,8 @@ no length test of any kind — and no shipped reader measures the value's length
 one-character database password is accepted, stored, and used by a real deployment. The
 15-character floor documented on [`db.passphrase`](#dbpassphrase-production-only) and
 enforced by the core at boot governs the **server encryption passphrase**
-(`VENYA_DB_PASSPHRASE`) and the key-protection passphrases; it does not reach these two
-variables, and the installer prompts for them carry no bound either.
+(`VENYA_DB_PASSPHRASE`) and the key-protection passphrases; it does not reach that
+variable, and the one prompt in this family — `venya_read_secret_confirm` in `install-venya-core.sh` — bounds nothing.
 
 **What is NOT claimed here:** that a floor is missing by oversight and any number will do.
 The owner ruled the passphrase floor at 15 characters on the passphrase plane and has not
