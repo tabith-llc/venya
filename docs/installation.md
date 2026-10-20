@@ -172,7 +172,9 @@ needed. `venya config set-server <url>` remains for the offline case
 
 Touch the security key when prompted. A **recovery code is printed once** —
 store it securely; it is the only way back if the key is lost. Migrations
-already ran at install time; `venya init` never migrates.
+already ran at install time; `venya init` never migrates. The first-comer rule this step depends on
+is a disclosed limitation, not a bug: see [beta-known-limitations.md](beta-known-limitations.md),
+entry **"Bootstrap is trust-on-first-use"**.
 
 The pair at `/etc/venya/admin/` is the core's **own** admin credential: it names
 that core, not a person, and it does not leave that host. A person's admin
