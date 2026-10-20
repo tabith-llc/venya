@@ -50,7 +50,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from .. import metrics
-from ..audit_lifecycle import ADMIN_CERT_ISSUED, audit_lifecycle
+from ..audit_lifecycle import ADMIN_CERT_ISSUED, ADMIN_CERT_REGISTERED, audit_lifecycle
 from ..ca import (
     ADMIN_SHORT_CERT_LIFETIME_SECONDS,
     AdminCAManager,
@@ -351,13 +351,90 @@ async def admin_issue_cert(
             "reason": _MINT_REASON,
         },
     )
+    # 5b. Population (#684). The mint writes its registry row in THIS transaction,
+    # beside the ADMIN_CERT_ISSUED audit row, so "the CA signed it" and "the store can
+    # name it" are one fact that either both commit or neither does — a credential the
+    # core just minted must never be unrevocable because a second write was forgotten.
+    # Facts come off the minted certificate, never from the request.
+    from ..admin_registry import SOURCE_ISSUE_ROUTE, facts_from_certificate, register_admin_credential
+
+    registry_outcome = register_admin_credential(db, facts_from_certificate(cert), SOURCE_ISSUE_ROUTE)
+
     metrics.CA_SIGNED_TOTAL.labels(cert_type="admin").inc()
     db.commit()
 
     logger.info(
-        "Admin certificate issued for %s (serial %x, valid to %s)",
+        "Admin certificate issued for %s (serial %x, valid to %s; registry %s)",
         identity,
         cert.serial_number,
         cert.not_valid_after_utc.isoformat(),
+        registry_outcome,
     )
     return AdminIssuedCertResponse(certificate_pem=cert.public_bytes(serialization.Encoding.PEM).decode())
+
+
+class AdminRegisterCertRequest(BaseModel):
+    """The register request: one admin certificate PEM, and nothing else.
+
+    ``extra="forbid"`` for the same reason the mint refuses a self-described identity
+    (#357): a caller cannot hand the store a serial it wants enrolled.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    certificate_pem: str = Field(
+        ...,
+        max_length=16384,
+        description="PEM-encoded admin certificate to enroll in the registry (facts are read off it)",
+    )
+
+
+class AdminRegisterCertResponse(BaseModel):
+    """What the registry now says about that credential."""
+
+    created: bool
+    serial_number: str
+    common_name: str
+
+
+@router.post("/admin/certs/register", response_model=AdminRegisterCertResponse, status_code=status.HTTP_201_CREATED)
+async def admin_register_admin_cert(
+    req: AdminRegisterCertRequest,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminRegisterCertResponse:
+    """Enroll one EXISTING admin credential in the registry. Admin only, idempotent.
+
+    The remedy the #684 refusal sentence names, and the reason a membership check can be
+    default-deny without stranding a legitimate credential: a certificate minted before
+    this population existed (or on a host the boot never read) is enrolled by presenting
+    the certificate itself. The facts are READ off that PEM
+    (``admin_registry.facts_from_certificate``), never taken from the request, so this
+    verb cannot be used to enroll an arbitrary serial — same rule and same shape as the
+    shipped ``admin_register_core_relay_cert`` (#597).
+    """
+    from ..admin_registry import SOURCE_REGISTER_ROUTE, facts_from_certificate, register_admin_credential
+
+    try:
+        cert = x509.load_pem_x509_certificate(req.certificate_pem.encode())
+        facts = facts_from_certificate(cert)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"certificate_pem is not a readable admin credential: {exc}",
+        ) from exc
+
+    outcome = register_admin_credential(db, facts, SOURCE_REGISTER_ROUTE)
+    audit_lifecycle(
+        db,
+        ADMIN_CERT_REGISTERED,
+        admin.get("user_id"),
+        {"serial_number": facts.serial_number, "common_name": facts.common_name, "created": outcome == "created"},
+    )
+    db.commit()
+    logger.info("Admin credential registry: %s serial=%s CN=%s", outcome, facts.serial_number, facts.common_name)
+    return AdminRegisterCertResponse(
+        created=outcome == "created",
+        serial_number=facts.serial_number,
+        common_name=facts.common_name,
+    )

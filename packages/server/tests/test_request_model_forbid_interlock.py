@@ -69,7 +69,13 @@ ORPHANS = {
 # CoreRelayCertRevokeRequest + CoreRelayCertRegisterRequest) — a typo'd flag on a
 # revocation verb must die at the schema, not be silently dropped and leave the
 # caller believing they revoked something. 39 -> 41 defined, 38 -> 40 forbidden.
-EXPECTED_DEFINED_REQUEST_MODELS = 41
+# #684 added ONE more, also shipped forbid (routes/admin_certs.py:
+# AdminRegisterCertRequest). Its extra=forbid is not decoration — that verb's whole
+# purpose is to enroll a credential by PRESENTING it, so a body carrying a bare
+# ``serial`` must die at the schema instead of enrolling a serial no certificate holds,
+# which is the precise failure #684 exists to stop. 41 -> 42 defined, 40 -> 41 forbidden;
+# the 2 ruled exemptions are unchanged.
+EXPECTED_DEFINED_REQUEST_MODELS = 42
 
 
 def _route_modules():
@@ -170,7 +176,7 @@ def test_inventory_count_pin():
     # ruled exemptions stay exactly SecretMetadata + FilterRequest (2).
     assert len(EXEMPT) == 2, "exemption list grew/shrank — new candidates are STOP-and-report, not list edits"
     forbidden = [n for n, m in defined.items() if m.model_config.get("extra") == "forbid"]
-    assert len(forbidden) == 40, f"forbidden defined models: {len(forbidden)} != 40 (post-#597)"
+    assert len(forbidden) == 41, f"forbidden defined models: {len(forbidden)} != 41 (post-#684)"
 
 
 def test_orphan_flag_still_listed():

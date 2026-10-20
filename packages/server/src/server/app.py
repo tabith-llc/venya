@@ -399,6 +399,17 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             exc_info=True,
         )
 
+    try:
+        from .admin_registry import ingest_admin_credential
+
+        ingest_admin_credential(config, backend)
+    except Exception:
+        logger.warning(
+            "Admin credential registry ingest raised unexpectedly — this core's admin credential may not "
+            "be revocable until the next successful boot (#684).",
+            exc_info=True,
+        )
+
     # Unconditional: a missing passphrase is a hard failure in every mode.
     # The former `not config.debug` exemption was a dead letter — init_db
     # above constructs BackendConfig(passphrase=None), which raises

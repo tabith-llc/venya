@@ -17,6 +17,7 @@ Tests cover:
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from core.utils.cert_serial import canonical_serial
@@ -1096,11 +1097,19 @@ class TestAdminCAWiring:
 # ---------------------------------------------------------------------------
 
 
-def _create_revoke_test_app():
-    """Create a minimal test app for revocation endpoint tests."""
+def _create_revoke_test_app(populated=True):
+    """Create a minimal test app for revocation endpoint tests.
+
+    ``populated`` (#684): whether the admin-credential registry NAMES the serial under test.
+    The route now checks MEMBERSHIP before it writes, so a harness that answers every
+    ``AdminCredential`` lookup with ``None`` would read 403 for the legitimate arms too —
+    the same fake-row-per-model shape this harness already uses for ``AdminCertRevocation``,
+    and the real membership truth table is asserted against actual SQLite in
+    ``test_admin_cert_membership_684.py``, not here.
+    """
     from unittest.mock import MagicMock
 
-    from core.iam.models import AdminCertRevocation
+    from core.iam.models import AdminCertRevocation, AdminCredential
     from server.config import ServerConfig
     from server.routes import admin as admin_routes
     from starlette.middleware.base import BaseHTTPMiddleware
@@ -1136,6 +1145,11 @@ def _create_revoke_test_app():
                     return mock_f
 
                 mock_q.filter = filter_side_effect
+                return mock_q
+            if model is AdminCredential:
+                mock_q = MagicMock()
+                row = SimpleNamespace(serial_number="ab12ab12ab12ab12", common_name="test-admin") if populated else None
+                mock_q.filter.return_value.first.return_value = row
                 return mock_q
             mock_q = MagicMock()
             mock_q.filter.return_value.first.return_value = None

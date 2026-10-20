@@ -2039,6 +2039,23 @@ class AdminRevokeCertRequest(BaseModel):
     reason: str = Field(default="unspecified", description="Revocation reason", max_length=64)
 
 
+#: The named refusal for a serial the admin-credential population does not name (#684).
+#: Kept as a module constant in the project's existing refusal-string shape (the shipped
+#: ``REFUSE_UNREGISTERED`` in ``core_relay_certs.py`` is the sibling), so a test can pin the
+#: vocabulary rather than pattern-match prose.
+REFUSE_UNREGISTERED_ADMIN_CERT = "REFUSE_UNREGISTERED_ADMIN_CERT"
+
+#: The one refusal sentence: cause, consequence, remedy.
+_ADMIN_UNREGISTERED_DETAIL = (
+    f"{REFUSE_UNREGISTERED_ADMIN_CERT}: serial {{serial}} names no admin credential this core "
+    "vouches for, so there is no certificate for this request to revoke and no consumer that "
+    "could ever honour it. Register it first: restart the core with VENYA_ADMIN_CERT pointing at "
+    "the admin credential it presents, or enroll it explicitly at "
+    "POST /api/v1/admin/certs/register. An unregistered serial is NOT treated as revoked and NOT "
+    "treated as live-by-default — revoking the unknown is how a store becomes an allowlist."
+)
+
+
 class AdminRevokeCertResponse(BaseModel):
     serial: str
     revoked: bool
@@ -2055,6 +2072,27 @@ async def admin_revoke_admin_cert(
     """Revoke an admin certificate by serial number.
 
     Admin only. Idempotent — revoking the same serial twice returns success.
+
+    Default-deny on MEMBERSHIP (#684): the serial must name a credential this core
+    vouches for in ``admin_credentials``, or the verb refuses. Format was never
+    membership — the old path validated the operator's string, found no row in the
+    revocation table, and blind-inserted one anyway, exiting 0 over a credential that
+    does not exist while the live admin credential kept transacting.
+
+    Truth table (every accept paired with a reject, same shape as the shipped relay
+    route in ``core_relay_certs.py``):
+
+    | registry row for the serial | revocation row | outcome |
+    |---|---|---|
+    | present | absent | 200 ``revoked=true``, row inserted, audit written |
+    | present OR absent | present | 200 ``revoked=true, already_revoked=true`` — idempotent, unchanged (``revoked=False`` is not this route's shipped face) |
+    | ABSENT | absent | **403 ``REFUSE_UNREGISTERED_ADMIN_CERT``**, nothing written, nothing audited |
+    | — | — | malformed serial -> 400 before any lookup |
+
+    The already-revoked arm stays reachable without a registry row on purpose: a
+    credential revoked by a boot predating the 041 population is a fact already recorded,
+    and refusing the repeat would turn a truthful no-op into an error and make the
+    idempotency depend on when the row was written.
     """
     # Validate the OPERATOR STRING first — the 400 contract is unchanged: non-empty
     # hex, up to 64 digits — the width the serial_number columns store (#481 made 16 a write
@@ -2079,7 +2117,7 @@ async def admin_revoke_admin_cert(
 
     # Check if already revoked (idempotent) — same insensitive match as the
     # enforcement lookup, so the answer cannot disagree with what refuses.
-    from core.iam.models import AdminCertRevocation
+    from core.iam.models import AdminCertRevocation, AdminCredential
 
     existing = (
         db.query(AdminCertRevocation).filter(serial_match_clause(AdminCertRevocation.serial_number, serial)).first()
@@ -2096,6 +2134,20 @@ async def admin_revoke_admin_cert(
         db.commit()
         logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
         return AdminRevokeCertResponse(serial=serial, revoked=True, reason=existing.reason, already_revoked=True)
+
+    # MEMBERSHIP, default-deny (#684). Nothing is written and NOTHING IS AUDITED on a
+    # miss: an ADMIN_CERT_REVOKED row for a serial that names no credential is the false
+    # statement this defect exists to stop, and an audit trail that asserts a revocation
+    # that never happened is worse than no answer at all.
+    known = db.query(AdminCredential).filter(serial_match_clause(AdminCredential.serial_number, serial)).first()
+    if known is None:
+        # DEFAULT DENY. Not 404 — same reasoning the relay route records: the point is that
+        # the caller is REFUSED, and a 404 reads like "nothing of that name exists
+        # anywhere" rather than "this store does not vouch for it, so I will not act on it".
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_ADMIN_UNREGISTERED_DETAIL.format(serial=serial),
+        )
 
     # Insert new revocation
     now = datetime.now(UTC)
