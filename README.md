@@ -219,7 +219,7 @@ Venya is the bridge.
 
 ## Getting Started
 
-Venya is currently in **alpha** — early access for teams who want to shape the product.
+Venya is currently in **beta** — the design-partner program, by application: we screen for feedback fit, not a quota.
 
 ### Quick Start (5-Minute Demo)
 
@@ -390,7 +390,7 @@ Full FAQ: [docs/faq.md](docs/faq.md)
 
 We built Venya because we lived the problem. We managed the infrastructure. We held the credentials. We watched teams struggle with the tension between automation and security. We didn't find a solution, so we built one.
 
-Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
+Visit [venya.ai](https://venya.ai/) to learn more or apply for beta access.
 
 ---
 
@@ -429,6 +429,6 @@ See [LICENSE](LICENSE) for the full terms. Contributions are accepted under the 
 
 ---
 
-*Venya™ is a trademark pending with the USPTO, owned by Tabith LLC. This software is in alpha and not yet certified for regulated environments. Security claims on this page describe design properties of the software, not formal attestations.*
+*Venya™ is a trademark pending with the USPTO, owned by Tabith LLC. This software is in beta and not yet certified for regulated environments. Security claims on this page describe design properties of the software, not formal attestations.*
 
 *Tabith LLC recommends YubiKey® security keys for Venya. Yubico and YubiKey are registered trademarks of Yubico AB. All other trademarks are the property of their respective owners.*

@@ -131,7 +131,7 @@ explicit `--key-version v1`; installs now seed an active `v1` at migration
 time.)
 
 **How do I get access?**
-Request alpha access via [venya.ai](https://venya.ai/) or info@tabith.com.
+Apply for beta access via [venya.ai](https://venya.ai/) or info@tabith.com.
 
 **How do I report a security problem?**
 [SECURITY.md](../SECURITY.md) — direct email, 48-hour acknowledgment, safe
