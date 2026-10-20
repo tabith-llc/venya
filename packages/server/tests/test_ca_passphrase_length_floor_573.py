@@ -256,7 +256,7 @@ class TestCeilingIsStatedOnly:
 
     def test_text_states_the_supported_maximum(self):
         message = _short_passphrase_refusal(_ROOT_ENV)
-        assert "Venya supports passphrases up to 64 characters" in message
+        assert "Passphrases longer than 64 characters are accepted too" in message
         assert "no maximum below" not in message, "the contradicted clause is replaced, not kept beside the new one"
         assert "always acceptable" not in message
 
