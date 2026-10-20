@@ -33,8 +33,12 @@ to that human.
    error. Do not try to decode, work around, or re-request them.
 3. **Commands must resolve into trusted directories** — use absolute binary
    paths (`/bin/cat`, `/usr/bin/ssh`, `/usr/bin/apt-get`). Bare names are
-   PATH-resolved and accepted only if they land in a trusted dir; shell
-   builtins are rejected (503) by design.
+   PATH-resolved and accepted only if they land in a trusted dir; whatever does
+   not resolve is refused (503). There is no builtin table, so the rule is
+   RESOLUTION, not shell-ness: `echo`, `true`, `test`, `printf` have real
+   binaries and PASS, while `cd`, `export`, `source`, `eval`, `set` have none and
+   are refused as "command not in trusted paths". No shell runs your command, so
+   shell syntax is never available to you.
 4. With the `venya` CLI, a leading `--` separator on `venya run` is consumed
    (not sent to the executor); venya's own flags (`--secret`,
    `--executor-id`) must come BEFORE the command — everything after the
@@ -45,10 +49,14 @@ to that human.
    IP and CIDR entries authorize connections to those addresses but never
    enable name resolution — use IP addresses for targets not allowlisted
    by name. Everything else is deny-by-default.
-6. **First run after an executor install may time out** (~60 s agent-
-   template pull) while still succeeding server-side. Before retrying:
-   check the result of the first attempt (audit/target state). Warm runs
-   are seconds-scale.
+6. **First run after an executor install is normally warm** — the executor
+   installer pre-pulls the sbx agent template with a throwaway sandbox
+   (`sbx-cold-start-prepull`), so a first command is seconds-scale, not a
+   ~60-90 s pull. The slow case survives only when that warm step failed or
+   was skipped (`VENYA_SKIP_DOCKER_LOGIN=yes`), and it warns loudly at install.
+   If a first run does look slow or times out client-side, check the result of
+   the first attempt (audit/target state, executor journal) BEFORE retrying —
+   it may already have succeeded server-side.
 7. On `401`/expired session: **ask your human to re-authenticate**
    (`venya login`, physical key touch). Sessions idle out after 15 minutes
    and hard-cap at 4 hours. You cannot and must not renew authorization
@@ -65,11 +73,12 @@ rediscover them:
   files on your machine are invisible to it, and it carries no
   `known_hosts` — the first SSH to any host fails the host-key check
   unless the command includes `-o StrictHostKeyChecking=accept-new`.
-- **No stdin channel exists, and shell metacharacters are rejected
-  (503).** The whole command string is scanned: ``| ; & $ ` ( ) { } < >
-  ! * ?``, backticks, and newlines are blocked — no pipes, no `&&`, no
-  redirects. The single exception: a standalone `<` token immediately
-  followed by `/run/secrets/venya/<id>` for a secret injected in the
+- **No stdin channel exists for your command, and shell metacharacters are
+  rejected (503).** The gate is PER ELEMENT on the argv list — no join, no shell
+  parsing — so a token containing any of ``| ; & $ ` ( ) { } < > ! * ?``, a NUL, a
+  lone surrogate, or a newline is refused even when it is buried inside one word.
+  No pipes, no `&&`, no redirects. The single exception: a standalone `<` token
+  immediately followed by `/run/secrets/venya/<id>` for a secret injected in the
   same run.
 - **A dangerous-pattern policy scans commands before execution.** For
   ssh/sshpass remote-exec commands only the LOCAL (sandbox) portion is
