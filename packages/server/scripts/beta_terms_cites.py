@@ -165,13 +165,16 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     "executors.py:702": (E, "def _ensure_dial_crl_store", 1, "pin"),
     "executors.py:628": (E, "def _build_relay_ssl_context", 1, "pin"),
     "executors.py:1571": (E, "is_online = 0.0 <= delta.total_seconds() < 60", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:116": (
-        R,
-        "peer_cn not in self.server.allowed_client_ids",
-        1,
-        "pin",
-    ),
-    "packages/executor/src/executor/daemon.py:2148": (D, "if self.state._consecutive_revocation_failures >=", 1, "pin"),
+    # Two entries used to sit at the foot of this dict —
+    # `packages/executor/src/executor/relay_listener.py:116` and `.../daemon.py:2148` — duplicating
+    # `f"{R}:116"` and `f"{D}:2148"` above with byte-identical VALUES. Python resolves a repeated dict
+    # key last-wins at import time and raises nothing, so source keys (98) outnumbered runtime keys (96)
+    # and the two later entries were dead code the moment the file loaded. They are removed rather than
+    # kept-and-keyed-by-line: the lookup key IS the coordinate as the page prints it, so a line number
+    # cannot join it without changing what `parse_cites()` matches, and nothing was gained because the
+    # duplicated meanings were the same. #675 (flash2) added `audit_keys()` in the generator, which
+    # counts keys in the SOURCE before the dict collapses them; it is now the thing that keeps a
+    # re-pin from clobbering a cite's meaning, so do not re-introduce a duplicate to satisfy it.
 }
 
 #: The maintenance/anchor block below the entries. Every coordinate there is a RECORD of what was
