@@ -203,14 +203,35 @@ async def readiness_check(request: Request) -> dict:
     if backend is None:
         return {"status": "degraded", "checks": {"database": "not_configured"}}
 
-    db = backend.get_session()
+    # #603 AC2 (residual): the readiness read takes the RESERVED liveness capacity
+    # when the backend supplies it, so /ready keeps answering while ordinary
+    # request traffic holds every slot of the shared pool. Before this it grabbed a
+    # shared-pool slot like any business query and, when it won one, reported
+    # itself healthy on a starved path.
+    #
+    # The discriminator is the CLASS, copied from the shipped guard at
+    # ``middleware/auth.py`` (``_liveness`` below): ``getattr(backend, ...)`` on a
+    # MagicMock answers any attribute name, and ~60 server test files wire mock
+    # backends, so an instance lookup would silently move those cells onto a second
+    # mock session. ``type(backend)`` carries only real implementations.
+    #
+    # The acquire sits INSIDE the try because ``Backend.get_liveness_session`` is
+    # fail-closed and RAISES when no reserved connection can be checked out within
+    # ``LIVENESS_POOL_TIMEOUT``: on this probe that is a ``degraded`` answer, never
+    # an unhandled 500 escaping a health endpoint. A capacity event stays a capacity
+    # event here — the body names the database state and asserts no security fact.
+    liveness_capable = callable(getattr(type(backend), "get_liveness_session", None))
+    db = None
     try:
+        db = backend.get_liveness_session() if liveness_capable else backend.get_session()
         db.execute(text("SELECT 1"))
         db.commit()
         return {"status": "ok", "checks": {"database": "connected"}}
     except Exception as e:
-        db.rollback()
+        if db is not None:
+            db.rollback()
         logger.error("Readiness check failed: %s", e)
         return {"status": "degraded", "checks": {"database": "not_ready"}}
     finally:
-        db.close()
+        if db is not None:
+            db.close()
