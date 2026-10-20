@@ -1,6 +1,6 @@
 # Venya Installation Guide
 
-Full deployment guide for the alpha. Venya runs on dedicated Linux VMs or
+Full deployment guide for the Venya beta. Venya runs on dedicated Linux VMs or
 bare metal. All artifacts — installers, tarballs, SHA-256 sidecars — are
 published on the GitHub releases page:
 https://github.com/tabith-llc/venya/releases. The `releases/latest/download`
@@ -327,7 +327,7 @@ dial. Two sanctioned strategies:
   echo "<executor-ip> <executor-id>" >> /etc/hosts
   ```
 
-  **Minimal alpha recipe (one core host + one executor VM, no DNS):** pick a
+  **Minimal two-node recipe (one core host + one executor VM, no DNS):** pick a
   dedicated executor-id — not the executor's own hostname (Ubuntu's
   `127.0.1.1 <hostname>` self-entry makes the installer's local pre-check pass
   trivially while saying nothing about the core's view) — and map it to the
@@ -627,8 +627,10 @@ customers on air-gapped networks — is **coming soon**: it is **not part of
 beta1**, and no scheduled release carries it yet. Beta1's installers fetch
 Python toolchains and package dependencies at install time, so a beta1
 install requires internet.
-For air-gapped alpha sites, contact info@tabith.com — a local mirror
-procedure exists but is not yet packaged.
+For air-gapped beta sites, contact info@tabith.com — a local mirror
+procedure exists but is not yet packaged. Air-gapped and fully offline
+installation is a committed roadmap capability, not a present feature; guided
+air-gap deployment is planned at the Professional tier when it ships.
 
 The offline tarball path (`file://` source or `/tmp`/`/opt` fallback) and any
 plain-`http://` source require an out-of-band `VENYA_TARBALL_SHA256` pin — a
