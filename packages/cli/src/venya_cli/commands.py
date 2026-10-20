@@ -5393,11 +5393,19 @@ def cmd_admin_revoke_admin_cert(client: APIClient, args: Any) -> int:
 
     url = server_url.rstrip("/")
     try:
-        client.post(
+        result = client.post(
             f"{url}/api/v1/admin/certs/revoke",
             json={"serial": serial, "reason": reason},
         )
-        print(f"Certificate {serial} revoked (reason: {reason})")
+        # The route answers the repeat arm with `already_revoked=true` and the reason that is ON
+        # RECORD, which is not the one typed into this call. The headline follows the answer instead
+        # of asserting the action, so an operator can tell "this call did it" from "it was already
+        # done". Same shape as the relay-credential arm (`cmd_admin_core_relay_cert`), and the exit
+        # status is deliberately UNCHANGED — this is a reporting fix, not a behavior change.
+        if (result or {}).get("already_revoked"):
+            print(f"Certificate {result.get('serial', serial)} was already revoked (no change)")
+        else:
+            print(f"Certificate {serial} revoked (reason: {reason})")
         return 0
     except APIClientAuthenticationError as e:
         print(f"Authentication failed: {e}", file=sys.stderr)
