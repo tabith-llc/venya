@@ -4302,7 +4302,11 @@ def cmd_admin_export_ca_key(args: Any) -> int:
         # here, and it has no upper bound in the code.
         passphrase1 = None
         while passphrase1 is None:
-            passphrase1 = getpass.getpass("Enter passphrase for encrypted key: ")
+            passphrase1 = getpass.getpass(
+                f"Enter passphrase for encrypted key (at least "
+                f"{MIN_PASSPHRASE_CODE_POINTS} characters; longer than "
+                f"{MAX_PASSPHRASE_CODE_POINTS} is accepted too): "
+            )
             passphrase2 = getpass.getpass("Confirm passphrase: ")
             if passphrase1 != passphrase2:
                 print("Passphrases do not match. Try again.")
@@ -4528,7 +4532,11 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
             return 1
 
         encrypted_data = backup_path.read_bytes()
-        passphrase = getpass.getpass("Enter passphrase to decrypt backup: ")
+        passphrase = getpass.getpass(
+            f"Enter passphrase to decrypt backup (a backup passphrase shorter than "
+            f"{MIN_PASSPHRASE_CODE_POINTS} characters is refused here, before anything is "
+            f"decrypted): "
+        )
         # #573: the VENYACA1 READ door. The passphrase's job here is to UNSEAL a blob that
         # already exists, and the restore's own write (`atomic_write_key`) is below this
         # block, so this door speaks the read wording: the blessed block with the
@@ -4666,11 +4674,11 @@ def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
         "of trust for this deployment, and short passphrases are what an attacker tries first.\n"
         "To fix it:\n"
         f"  1. Replace the value of {subject} with a passphrase of at least "
-        f"{MIN_PASSPHRASE_CODE_POINTS} characters. Characters are\n"
-        "     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.\n"
+        f"{MIN_PASSPHRASE_CODE_POINTS} characters.\n"
         "     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.\n"
         f"  2. There is no rule about which characters appear — length is the only requirement, and\n"
-        f"     Venya supports passphrases up to {MAX_PASSPHRASE_CODE_POINTS} characters.\n"
+        f"     Passphrases longer than {MAX_PASSPHRASE_CODE_POINTS} characters are accepted too — "
+        f"{MAX_PASSPHRASE_CODE_POINTS} is the length Venya guarantees to support, not a maximum it enforces.\n"
         "  3. Provide the passphrase through the environment, never as a command-line argument\n"
         "     (command-line values are visible to other processes on the machine).\n"
         "Your existing CA was not modified by this refusal.\n"
