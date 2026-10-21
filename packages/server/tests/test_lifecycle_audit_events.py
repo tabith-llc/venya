@@ -1551,9 +1551,21 @@ class TestRevocationLifecycle:
         assert _f(rows[0]) == {"executor_id": "exec-1", "form": "identity", "already_revoked": True}
 
     def test_executor_serial_revoke_row(self):
-        from core.iam.models import ExecutorCertRevocation
+        from core.iam.models import ExecutorCert, ExecutorCertRevocation
 
-        db = _keyed_db(MagicMock(), {ExecutorCertRevocation: None})
+        # #685: the serial arm now consults the issuance population before it writes, so the
+        # keyed double has to ANSWER that query. This is a TABLE ADDITION only — the assertion
+        # below is untouched, and the cell still proves the same thing it always did (one
+        # executor_cert_revoked row, canonical serial, already_revoked False). A model the table
+        # does not key returns None from _KeyedQ.first(), which after the gate reads as "no such
+        # certificate" and refused the call this cell means to observe.
+        db = _keyed_db(
+            MagicMock(),
+            {
+                ExecutorCertRevocation: None,
+                ExecutorCert: SimpleNamespace(serial_number="ab12", executor_id="exec-1"),
+            },
+        )
         client = TestClient(_admin_app(db), raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/exec-1/revoke", json={"serial": "ab12"})
         assert resp.status_code == 200
