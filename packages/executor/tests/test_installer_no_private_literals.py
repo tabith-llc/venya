@@ -43,7 +43,7 @@ root pair and caught by the new surface. A guard that only ever passes is not
 a guard.
 """
 
-import re
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -56,72 +56,44 @@ ARTIFACT_GLOBS = (
     "venya-common.sh",
 )
 
-# Any RFC1918 literal (superset of the dev-topology 10.27.27.x / 10.27.28.x
-# ranges). Lookarounds keep version strings and longer numerics out.
-RFC1918 = re.compile(
-    r"(?<![\d.])(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-    r"|192\.168\.\d{1,3}\.\d{1,3}"
-    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?![\d.])"
+# ONE vocabulary, imported from `scripts/private_literals.py` — the same module the
+# executable pre-commit/pre-tag guard (`scripts/pre_tag_scrub.py`, #702) loads.
+#
+# Leg 298 wrote these patterns inline right here. When the second consumer arrived,
+# inline became a FORK: two files free to disagree about what counts as private,
+# which is exactly the #689 mechanism (a rule written in one place, applied in
+# another). `test_the_two_consumers_share_one_vocabulary` pins object identity, so
+# re-copying the table into either file goes red rather than drifting quietly.
+#
+# It also means this file names the refused tokens in order to refuse them, so it
+# must be excluded from its own scan — and the exclusion list is the module's, which
+# is TWO exact filenames and nothing else. The narrowness is tested, not asserted
+# (`test_vocabulary_exclusion_cannot_hide_a_real_file`).
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import private_literals
+from private_literals import (
+    DETECTION_FIXTURES,
+    HISTORICAL_ADDRESS_FIXTURE,
+    LOOKALIKE_EXAMPLES,
+    RELAY_CN_FIXTURE,
+    SANCTIONED_EXAMPLES,
 )
 
-# The half the IP regex was structurally blind to: development/estate HOSTNAMES.
-# Bounded so `core-1-relay`, `idahox` or `montanahauser` cannot match by
-# accident, and unanchored to a word-start hyphen so `venya-test-workstation`
-# style names still match on their own component.
-DEV_HOSTNAME = re.compile(r"(?<![\w-])(?:montana|idaho|wyoming|colorado|utah|texas|venya-test-workstation)(?![\w])")
-
-# An operator identity — the local part of the owner's address, in any domain.
-# `admin@example.com` and `admin-bot@workstation` are the sanctioned fixture
-# forms already used in this tree; a personal local part is not.
-OPERATOR_IDENTITY = re.compile(r"(?<![\w.-])(?:dust|dusty|dustin)@")
-
-# A developer workspace PATH. Scoped to the private mounts, NOT to "any
-# absolute path": `/tmp/tabichat/…` is the sanctioned fleet scratch root and
-# must keep working, or this guard blocks its own test harness.
-WORKSPACE_PATH = re.compile(r"/(?:media/dust|home/dust|home/opencode)\b|dust-ext1")
-
-#: Every class the shipped text must be free of, named so a failure says which
-#: hole reopened rather than just printing a line.
-PRIVATE_CLASSES: dict[str, re.Pattern[str]] = {
-    "rfc1918-address": RFC1918,
-    "dev-hostname": DEV_HOSTNAME,
-    "operator-identity": OPERATOR_IDENTITY,
-    "workspace-path": WORKSPACE_PATH,
-}
+# Re-exported under the names the cells below already use: one spelling for readers,
+# one definition in the repo.
+RFC1918 = private_literals.RFC1918
+PRIVATE_CLASSES = private_literals.PRIVATE_CLASSES
+BUNDLE_SCAN_ROOTS = private_literals.BUNDLE_SCAN_ROOTS
+BUNDLE_SCAN_ROOT_GLOBS = private_literals.BUNDLE_SCAN_ROOT_GLOBS
+INTERLOCK_EXCLUDES = private_literals.VOCABULARY_BEARERS
+INTERLOCK_EXCLUDE_DIRS = private_literals.EXCLUDED_DIRS
+INTERLOCK_EXCLUDE_SUFFIXES = private_literals.EXCLUDED_SUFFIXES
 
 #: The PRE-widening surface, kept as a named constant so the paired negative can
 #: prove the old check was blind instead of asserting that in prose. The empty
 #: root-glob tuple is not a detail: it is the whole second half of hole 2.
-OLD_SURFACE: Surface = (("packages", "docs"), ())
-
-# Tree-wide guard (ticket private-infra-product-defaults-and-fixtures, Stage 3;
-# surface corrected by #689): no private literal in ANY shipped text surface.
-# The bundle ships packages/ docs/ tests/ scripts/ systemd/ + root *.md, all
-# counted from the live served venya-core-install.tar.gz (610/42/10/7/5 paths +
-# the root files), so the scan is derived from what a customer actually fetches.
-BUNDLE_SCAN_ROOTS = ("packages", "docs", "tests", "scripts", "systemd")
-BUNDLE_SCAN_ROOT_GLOBS = ("*.md",)
-# `CHANGELOG.md` USED to sit here under the comment "D3 — historical release
-# record". It was never actually read (see hole 2), and a historical record does
-# not require the literal: the changelog is scrubbed and scanned like the rest.
-INTERLOCK_EXCLUDES = ("test_installer_no_private_literals.py",)  # self (docstring + pattern pins + fixtures)
-INTERLOCK_EXCLUDE_DIRS = {
-    ".git",
-    ".venv",
-    "__pycache__",
-    ".pytest_cache",
-    "node_modules",
-    ".mypy_cache",
-    ".ruff_cache",
-    # Generated BUILD output, never shipped: counted from the live bundles
-    # (`tar tzf … | grep -c '/target/|/build/'` -> 0). A lane that builds the
-    # Rust extension holds its own absolute workspace path in `target/…`, which
-    # is local build state, not a shipped literal — see
-    # TestGuardCoversItsOwnBlindSpots.test_generated_output_exclusion_cannot_hide_source.
-    "target",
-    "build",
-}
-INTERLOCK_EXCLUDE_SUFFIXES = (".lock",)  # uv.lock — generated
+OLD_SURFACE = private_literals.LEGACY_SURFACE
+SHIPPED_SURFACE = private_literals.SHIPPED_SURFACE
 
 
 def _artifacts() -> list[Path]:
@@ -146,7 +118,6 @@ def _is_scannable(p: Path) -> bool:
 #: pre-#689 one. Without that the blind-spot cells could only assert the guard
 #: PASSES — which is exactly the untested half this file has a history of.
 Surface = tuple[tuple[str, ...], tuple[str, ...]]
-SHIPPED_SURFACE: Surface = (BUNDLE_SCAN_ROOTS, BUNDLE_SCAN_ROOT_GLOBS)
 
 
 def _tree_files(root: Path = REPO_ROOT, surface: Surface = SHIPPED_SURFACE):
@@ -257,14 +228,19 @@ class TestGuardCoversItsOwnBlindSpots:
     instead of a claim in a docstring.
     """
 
-    HOST_FIXTURE = "read over SSH as win on montana (rc=0)\n"
-    IDENTITY_FIXTURE = "identity: dust@montana\n"
-    ADDRESS_FIXTURE = "seeded 10.27.28.0/24 in the allowlist\n"
-    PATH_FIXTURE = "copies live in /media/dust/dust-ext1/tabith/reference-docs/\n"
-    SANCTIONED_DOC_ADDRESS = "use 192.0.2.1 as the resolver\n"
-    SANCTIONED_SCRATCH_PATH = "scratch lives in /tmp/tabichat/leg298/\n"
-    SANCTIONED_FIXTURE_IDENTITY = "identity: admin@example.com\n"
-    SANCTIONED_RELAY_CN = "comment: e.g. 'core-1-relay'\n"
+    # All fixtures are imported from `private_literals`, not written here: the
+    # refused tokens live in exactly two files in the repo (this one and the module),
+    # and a third copy in a test would need a third exclusion. `DETECTION_FIXTURES`
+    # is keyed by class, so a new class with no negative is a KeyError, not a green.
+    HOST_FIXTURE = DETECTION_FIXTURES["dev-hostname"] + "\n"
+    IDENTITY_FIXTURE = DETECTION_FIXTURES["operator-identity"] + "\n"
+    ADDRESS_FIXTURE = DETECTION_FIXTURES["rfc1918-address"] + "\n"
+    PATH_FIXTURE = DETECTION_FIXTURES["workspace-path"] + "\n"
+    RELAY_CN_LINE = RELAY_CN_FIXTURE + "\n"
+    HISTORICAL_ADDRESS = HISTORICAL_ADDRESS_FIXTURE + "\n"
+    SANCTIONED_RELAY_CN_LINE = RELAY_CN_FIXTURE.replace("idaho", "core-1") + "\n"
+    SANCTIONED_LINES = tuple(f"{example}\n" for example in SANCTIONED_EXAMPLES)
+    LOOKALIKE_LINES = tuple(f"{lookalike}\n" for lookalike in LOOKALIKE_EXAMPLES)
 
     def test_hostname_class_reds_and_the_old_ip_pattern_missed_it(self):
         """THE contrast that proves hole 1 was real, in both directions."""
@@ -284,24 +260,13 @@ class TestGuardCoversItsOwnBlindSpots:
     def test_sanctioned_replacement_forms_stay_green(self):
         """The guard must not eat its own replacements — otherwise the scrub is
         unshippable and the check is a lie about the convention it names."""
-        for fixture in (
-            self.SANCTIONED_DOC_ADDRESS,
-            self.SANCTIONED_SCRATCH_PATH,
-            self.SANCTIONED_FIXTURE_IDENTITY,
-            self.SANCTIONED_RELAY_CN,
-        ):
+        for fixture in self.SANCTIONED_LINES + (self.SANCTIONED_RELAY_CN_LINE,):
             assert _offending_lines(fixture) == [], f"green-by-design fixture reddened: {fixture.strip()!r}"
 
     def test_widened_classes_do_not_eat_lookalikes(self):
         """Negative half of the boundary: a word that merely CONTAINS a site
         name is not the site name, and a relative path is not a workspace mount."""
-        for benign in (
-            "hostname idahox relay\n",
-            "the montanahauser case\n",
-            "path /tmp/media/dustings/ is fine\n",
-            "austin@example.com\n",
-            "core-1-relay is the example CN\n",
-        ):
+        for benign in self.LOOKALIKE_LINES + (self.SANCTIONED_RELAY_CN_LINE,):
             assert _offending_lines(benign) == [], f"lookalike tripped the guard: {benign.strip()!r}"
 
     def test_root_changelog_reds_now_and_was_invisible_before(self):
@@ -368,6 +333,88 @@ class TestGuardCoversItsOwnBlindSpots:
         )
         (root / "CHANGELOG.md").write_text(changelog)
         return root
+
+
+class TestOneVocabularyAndNarrowExclusions:
+    """#702 pins: the interlock and the executable hook cannot disagree about what
+    counts as private, and the files exempt from the rule are exempt by exact name.
+
+    Both halves are the failure class this ticket is about. A rule restated is a rule
+    that drifts (that is literally how #689 shipped: an IP rule written in one place,
+    applied in another), and an exclusion list that grows by directory or prefix stops
+    being an exception and becomes a hole.
+    """
+
+    def test_the_two_consumers_share_one_vocabulary(self):
+        """Object identity, not equal content — a copied table would read identical."""
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import pre_tag_scrub
+
+        assert pre_tag_scrub.PRIVATE_CLASSES is PRIVATE_CLASSES, (
+            "scripts/pre_tag_scrub.py and this interlock hold DIFFERENT pattern tables; "
+            "one owner rule now has two vocabularies that can drift, which is the #689 "
+            "mechanism reproduced inside the guard written to stop it"
+        )
+        # And the SCAN, not just the table: `pre_tag_scrub.offending_lines` must be the
+        # module's function, not a local re-implementation with the same name.
+        assert pre_tag_scrub.offending_lines is private_literals.offending_lines, (
+            "the hook re-implements the scan instead of importing it — two code paths "
+            "judging one rule, so a fix to one silently leaves the other behind"
+        )
+
+    def test_every_class_has_a_negative_that_reds_it(self):
+        """A class added without a paired negative is a KeyError here, not a silent
+        green in the tree-wide cell — the table cannot grow untested."""
+        for cls in PRIVATE_CLASSES:
+            assert cls in DETECTION_FIXTURES, f"class {cls!r} ships with no negative fixture"
+            assert cls in _class_of(
+                DETECTION_FIXTURES[cls]
+            ), f"fixture for {cls!r} does not redden its own class: {_class_of(DETECTION_FIXTURES[cls])}"
+
+    def test_vocabulary_exclusion_cannot_hide_a_real_file(self):
+        """The exclusion is two EXACT filenames. A same-token file anywhere else,
+        including beside the vocabulary, still reddens."""
+        root = _scratch_repo()
+        planted = root / "scripts" / "not_the_vocabulary.py"
+        planted.write_text(DETECTION_FIXTURES["dev-hostname"] + "\n")
+        _scanned, offenders = _scan_tree(root)
+        assert any("not_the_vocabulary.py" in o for o in offenders), (
+            f"the vocabulary exclusion is wider than two filenames — a planted file "
+            f"next to the vocabulary went unseen: {offenders}"
+        )
+
+    def test_the_vocabulary_bears_itself_and_is_still_excluded(self):
+        """Positive half of the same pin: the module DOES carry the tokens (it must,
+        to refuse them), and IS exempt — so the exemption is real, not aspirational."""
+        vocab = REPO_ROOT / "scripts" / private_literals.PRIVATE_LITERALS_FILENAME
+        assert vocab.is_file()
+        assert _offending_lines(vocab.read_text()), (
+            "the vocabulary module contains no refused token, so it is not the source "
+            "of the rule this interlock reads — path drift, and the import is stale"
+        )
+        assert private_literals.PRIVATE_LITERALS_FILENAME in INTERLOCK_EXCLUDES
+
+    def test_pre_tag_script_names_the_surface_it_scans(self):
+        """The hook and this interlock must walk the SAME top levels, or the release
+        recipe guards a different tree than the commit does."""
+        assert tuple(private_literals.BUNDLE_SCAN_ROOTS) == tuple(BUNDLE_SCAN_ROOTS)
+
+
+def _class_of(line: str) -> list[str]:
+    return [cls for cls, _n, _l in _offending_lines(line)]
+
+
+def _scratch_repo() -> Path:
+    """A clean repo-shaped fixture. No `clean_tree` flag: the one caller that wants a
+    dirty tree PLANTS the dirty file itself, which is the point of that cell."""
+    import tempfile
+
+    root = Path(tempfile.mkdtemp(prefix="private-literals-vocab-"))
+    for rel in BUNDLE_SCAN_ROOTS:
+        (root / rel).mkdir(parents=True, exist_ok=True)
+        (root / rel / "keep.txt").write_text("nothing private here\n")
+    (root / "README.md").write_text("nothing private here\n")
+    return root
 
 
 class TestTeachingDefaultPinned:
