@@ -43,15 +43,19 @@ sent (#565 Part B). Exact flags: `cli-reference.md` (generated). What an interac
 desktop ceremony requires, including on Windows, is covered in `faq.md` and
 `installation.md` and is deliberately not restated here.
 
-### 0.1 The age-out date for a certificate an installer used to hand to a workstation
+### 0.1 The age-out date for the MACHINE-PLANE admin pair an installer used to hand to a workstation (installer-handed bootstrap credential — NOT a person's renewed certificate)
 
-**Published date: 2027-01-10.** It is computed, not chosen, and the inputs are these:
+**Which plane this date governs: the MACHINE PLANE only — the admin pair the installer mints and used to hand to a workstation.** It is computed, not chosen, and the inputs are these: **read the next line before you use the date below, because it is not your credential's expiry.**
+
+**A person's renewed admin certificate does NOT age out on this schedule — it lives 60 minutes.** `ADMIN_SHORT_CERT_LIFETIME_SECONDS = 3600` is the human-plane lifetime (RF-6 §1.2 ruling 4a), applied by `routes/admin_certs.py`, `admin_issue_cert` → `sign_admin_csr(lifetime_seconds=ADMIN_SHORT_CERT_LIFETIME_SECONDS)`. **So an operator who ran `venya admin cert renew` and then read `2027-01-10` as their own expiry was reading a date 80 days past the credential actually in their hand.**
 
 | Input | Value | Where it was read |
 |---|---|---|
 | Lifetime of the pair the installer mints | 90 days | `ADMIN_CERT_VALIDITY_DAYS = 90`, `packages/server/src/server/ca.py` (Admin CA constants block; consumed by `AdminCAManager.sign_admin_cert`) |
 | Cut-over — the run of the installer that stopped printing the copy instruction | 2026-10-12 | `2b70210` 11:35:25 -0600, merged into `dev` as `832c11c` 11:36:13 -0600 (RF-10) |
 | Sum | **2027-01-10** | `date -u -d "2026-10-12 + 90 days"` → 2027-01-10 |
+
+**Measured absent, stated as absence and not as presence.** On a re-installed guest of this fleet the 90-day class was **not present to measure**: on `venya-core-3` (read 2026-10-21 16:42–16:46Z, seat `ultra`, leg 316, source `origin/dev = aa90d201`) the served `:443` leaf expired **2027-10-18** (365 d), the root CA **2036-09-29** (3,650 d), and the admin credential in service `CN=venya-adm3` carried a span of **3,600 SECONDS** — **three lifetimes, none of them `2027-01-10`** — with exactly **one** `admin_credentials` row, `source=issue-route`. **A mint was deliberately not performed to manufacture the missing class: minting is the owner's hand.** **So treat the table below as the arithmetic of a bootstrap plane that this guest does not carry, not as a fleet-wide inventory of live 90-day credentials, and do not re-derive a date from `ADMIN_CERT_VALIDITY_DAYS` for any credential a person renewed.**
 
 **Which number is enforced where**, because two of these lifetimes are one hour apart
 in name only and a third number nearby is not a lifetime at all:
@@ -86,7 +90,7 @@ guessable, on the core that holds it:
 sudo openssl x509 -in /etc/venya/admin/admin.crt -noout -enddate
 ```
 
-Re-anchor this section on the release that first ships the new banner.
+**Re-anchor this section on `v0.1.0beta1` — the release that first ships the new banner is due to carry the re-anchor, and this instruction is the runbook's own.** Until that release is published, the date above stays a computed floor and not a measured fleet face.
 
 - **What the date means:** up to it, a credential minted by a pre-cut-over installer
   — including one copied to a workstation — is still valid on its own schedule. Past
