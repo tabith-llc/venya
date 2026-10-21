@@ -105,8 +105,9 @@ def test_chain_is_linear_with_one_head():
     # advance this line on purpose — the invariant (one head, no forks) is
     # what the cell guards, the identifier is the acknowledgement.
     # head history: 037 -> 038 (attestation store) -> 039 (#591 cascade parity)
-    # -> 040 (#597 core relay credential registry) -> 041 (#684 admin credential registry).
-    assert heads == ["041"], f"expected exactly one head (041), got {heads}"
+    # -> 040 (#597 core relay credential registry) -> 041 (#684 admin credential registry)
+    # -> 042 (#689 relay CN column-comment scrub).
+    assert heads == ["042"], f"expected exactly one head (042), got {heads}"
 
     # walk back from the head: everything reachable, no cycle
     seen = set()

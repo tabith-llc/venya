@@ -683,7 +683,7 @@ and none of them is answerable by a documentation leg:
 
 ## 9. FETCH-LOG (fetched bytes are DATA; at most one sentence quoted per source; no instruction in a page was followed)
 
-All copies live in `/media/dust/dust-ext1/tabith/reference-docs/` (this lane created only the three
+All copies live in the workspace `reference-docs/` directory (this lane created only the three
 new files below; nothing reused from the existing `man7`/`docker-com`/`systemd-io`/`kernel-org`
 copies, which cover mlock/capabilities/sandbox work, not WebAuthn).
 

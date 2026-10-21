@@ -246,8 +246,9 @@ paired rejection it must also prove, and, where it applies, the reason it is out
 | 2 — the ceremony from an interactive desktop | **RUN AND PASSING (s124, session 2)** — evidence `8c73fc0c`, report `wave27-specs-20261015/ultra-rf8-cells23-s124-report.md`, target **core-3**, identity **`venya-adm3`** |
 | 3 — the renewal round trip | **RUN AND PASSING (s124, session 2)** — same evidence, same target and identity |
 
-> **What the guest gives, and what it does not.** The `win11` guest is a montana domain and
-> montana is frozen: no lane boots, halts, defines or queries it (`virsh` reads included) —
+> **What the guest gives, and what it does not.** The `win11` guest is a domain on the owner's
+> workstation, and that box is frozen for lanes: no lane boots, halts, defines or queries it
+> (`virsh` reads included) —
 > that stays the owner's. Its booted state, its PowerShell version and its installed CLI were
 > read over SSH as `win` (rc=0) from the agent box; that read is the preflight table under
 > Cell 1. **That preflight is no longer the live face of the guest.** A current CLI has since

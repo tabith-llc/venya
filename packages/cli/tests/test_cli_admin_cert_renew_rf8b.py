@@ -82,7 +82,7 @@ def _pair(tmp_path: Path, name: str, lifetime_min: int) -> tuple[Path, Path, x50
     key = ec.generate_private_key(ec.SECP256R1())
     cert = (
         x509.CertificateBuilder()
-        .subject_name(_name(f"dusty@{name}"))
+        .subject_name(_name(f"admin-bot@{name}"))
         .issuer_name(ISSUER)
         .public_key(key.public_key())
         .serial_number(0x2222_3333)
@@ -104,7 +104,7 @@ def _pair(tmp_path: Path, name: str, lifetime_min: int) -> tuple[Path, Path, x50
     return cp, kp, cert
 
 
-def _minted_cert(cn: str = "dusty@workstation") -> bytes:
+def _minted_cert(cn: str = "admin-bot@workstation") -> bytes:
     """A plausible core-signed answer: fresh window, server-built subject, its own key."""
     now = datetime.datetime.now(UTC)
     key = ec.generate_private_key(ec.SECP384R1())  # deliberately NOT the request's key

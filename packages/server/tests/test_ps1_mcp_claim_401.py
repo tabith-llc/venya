@@ -6,7 +6,7 @@
 
 """Static honesty cells for the ps1 venya-mcp install claim (ticket #401).
 
-No pwsh runner on montana — execution UNVERIFIED, riding the #328 win11
+No pwsh runner on the Linux dev box — execution UNVERIFIED, riding the #328 win11
 window; static review cells per the #396 precedent (see
 test_installer_origin_pin_posture.py for the idiom). The old shape printed
 "venya-mcp installed" even when the import check was skipped because the venv

@@ -47,7 +47,7 @@ from starlette.testclient import TestClient
 RELAY_SERIAL = 0xDEADBEEF1234
 
 
-def _make_relay_cert_pem(serial: int = RELAY_SERIAL, cn: str = "idaho-relay") -> tuple[str, str]:
+def _make_relay_cert_pem(serial: int = RELAY_SERIAL, cn: str = "core-1-relay") -> tuple[str, str]:
     """A real CA -> real leaf chain, same shape as the installer's (CN=<host>-relay, EKU clientAuth)."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -128,9 +128,9 @@ class TestReadRelayCredentialFacts:
         from server.relay_registry import read_relay_credential
 
         facts = read_relay_credential(relay_cert_file)
-        assert facts.common_name == "idaho-relay"
+        assert facts.common_name == "core-1-relay"
         # install-venya-core.sh:1013 mints CN=${CORE_HOSTNAME}-relay
-        assert facts.hostname == "idaho"
+        assert facts.hostname == "core-1"
 
     def test_timestamps_are_offset_aware(self, relay_cert_file: Path) -> None:
         """Repo datetime law: no naive datetimes anywhere; a naive row breaks aware compares."""
@@ -357,7 +357,7 @@ class TestBootIngestWiring:
                 SimpleNamespace(mtls_cert=str(relay_cert_file), mtls=None), backend
             )
         assert facts is not None and captured, "boot found nothing to register"
-        assert captured[0].common_name == "idaho-relay"
+        assert captured[0].common_name == "core-1-relay"
         assert captured[0].serial_number == canonical_serial(RELAY_SERIAL)
 
 
@@ -424,8 +424,8 @@ def _row(**over):
 
     r = CoreRelayCredential(
         serial_number=over.get("serial_number", canonical_serial(RELAY_SERIAL)),
-        common_name=over.get("common_name", "idaho-relay"),
-        hostname="idaho",
+        common_name=over.get("common_name", "core-1-relay"),
+        hostname="core-1",
         cert_fingerprint="f" * 64,
         public_key_hash="p" * 64,
         signing_ca_subject="Venya Test CA",
@@ -485,7 +485,7 @@ class TestRevokeVerbDefaultDeny:
         body = resp.json()
         assert body["revoked"] is True
         assert body["already_revoked"] is False
-        assert body["common_name"] == "idaho-relay"
+        assert body["common_name"] == "core-1-relay"
         assert row.revoked_at is not None, "the verb returned success without stamping the row"
         assert row.revoke_reason == "host decommissioned"
         db.commit.assert_called()
@@ -605,7 +605,7 @@ class TestRevokeVerbDefaultDeny:
         assert args[2] == "test-admin", "the audit row must name the acting admin"
         fields = args[3]
         assert fields["serial_number"] == canonical_serial(RELAY_SERIAL)
-        assert fields["common_name"] == "idaho-relay"
+        assert fields["common_name"] == "core-1-relay"
 
     def test_refused_revoke_writes_no_revocation_audit_row(self) -> None:
         """The negative half of the audit claim: no event for an action that did not happen."""
@@ -645,7 +645,7 @@ class TestRegisterVerbDerivesFactsFromTheCertificate:
         assert resp.status_code == 201, resp.text[:300]
         assert resp.json()["created"] is True
         facts = reg.call_args.args[1]
-        assert facts.common_name == "idaho-relay"
+        assert facts.common_name == "core-1-relay"
         assert facts.serial_number == canonical_serial(RELAY_SERIAL)
 
     def test_register_with_garbage_is_a_400(self) -> None:
@@ -799,8 +799,9 @@ class TestMigrationAndModelAgree:
         heads = [r for r in specs if r not in parents]
         # ADVANCED by the #684 leg, exactly as the 037-era head cell documents: the
         # invariant is ONE head, and the identifier is the acknowledgement that a
-        # migration landed. 040 -> 041 (#684 admin credential registry).
-        assert heads == ["041"], f"the version tree has more than one head: {heads}"
+        # migration landed. 040 -> 041 (#684 admin credential registry)
+        # -> 042 (#689 relay CN column-comment scrub).
+        assert heads == ["042"], f"the version tree has more than one head: {heads}"
 
 
 def core_alembic_dir() -> str:

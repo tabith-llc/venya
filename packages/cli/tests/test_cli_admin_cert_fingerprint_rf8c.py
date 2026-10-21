@@ -84,7 +84,7 @@ def _cert_bytes(seed: int, lifetime_min: int = 30, key=None, signer=None, public
     # stub below plays the CA, and a CA signs the REQUESTER's public key).
     pub = public_key if public_key is not None else key.public_key()
     signer = signer if signer is not None else key
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"dusty@workstation-{seed}")])
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"admin-bot@workstation-{seed}")])
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)

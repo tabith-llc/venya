@@ -23,7 +23,7 @@ packages/server/tests/test_fido2_manager.py).
 Tier limit (documented per ruling 2026-09-16): this in-process e2e does NOT
 cover CA/cert issuance over the network, TLS/nginx, PostgreSQL, or physical
 FIDO2 hardware interaction — those belong to the separate integration tier
-(venya-test-workstation Playwright runs / physical VM acceptance).
+(the Playwright browser-tier runs / physical VM acceptance).
 """
 
 import base64
