@@ -124,7 +124,8 @@ def _make_mock_ca(real_manager=None):
     mock_ca.compute_serial_hex.side_effect = lambda s: format(s, "016x")
     mock_ca.compute_fingerprint.return_value = "AA:BB:CC"
     mock_ca.get_ca_cert_pem.return_value = b"-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----"
-    mock_ca.purge_expired_revocations.return_value = 0
+    # No `purge_expired_revocations` stub here any more (#685): the executor CA manager has no
+    # purge path to stub, and leaving one in a mock is how a closed hazard keeps a name.
     return mock_ca
 
 

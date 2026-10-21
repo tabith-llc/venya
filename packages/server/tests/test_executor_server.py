@@ -595,7 +595,6 @@ class TestRevocationList:
         app = FastAPI()
         app.state.backend = MagicMock()
         app.state.backend.get_session.return_value = db
-        ca_manager.purge_expired_revocations = MagicMock(return_value=0)
         app.state.ca_manager = ca_manager
         app.include_router(executors_routes.router, prefix="/api/v1")
         return app
@@ -608,10 +607,15 @@ class TestRevocationList:
         assert resp.status_code == 200
         data = resp.json()
         assert data["revoked_serials"] == []
-        # READ-ONLY pin (ticket sec-sweep-low-informational #23b): the public
-        # GET no longer purges (write-on-read at fleet_size x 2/min) — the
-        # purge is a maintenance-loop pass now.
-        ca_manager.purge_expired_revocations.assert_not_called()
+        # READ-ONLY pin, RE-PAIRED for #685 (was: "the public GET no longer purges — the purge
+        # is a maintenance-loop pass now", proven with a mock attribute that would have caught a
+        # call). There is now NO purge path on the executor CA manager at any call site, so the
+        # guarantee is structural rather than behavioral: the attribute the old pin watched for
+        # does not exist to be called. That is the stronger half of the #685 exemption.
+        assert not hasattr(CAManager, "purge_expired_revocations"), (
+            "#685: ExecutorCertRevocation is exempt from time-based purge — a purge attribute on "
+            "the executor CA manager is the hazard this row closed, at any call site"
+        )
 
     def test_revocation_list_with_entries(self, ca_manager):
         revocations = [

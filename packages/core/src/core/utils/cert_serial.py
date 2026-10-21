@@ -133,7 +133,11 @@ def serial_match_clause(column: Any, value: Any) -> Any:
 
     Applying a function to the column makes the predicate non-sargable: the same
     shape the admin-mTLS lookup already had (it compared ``func.upper(...)``), on
-    tables that are retention-bounded (``crl_retention_days``) and CRL-capped.
+    tables that are CRL-capped and — since #685 (owner ruling 2026-10-20) — NOT
+    retention-bounded any more: `ExecutorCertRevocation` is exempt from time-based purge, so
+    the executor population grows for the life of the DB and this scan does not self-limit.
+    That is the price of not aging revoked credentials out on a timer, and it was accepted on
+    purpose; the operator consequence is `docs/revocation-table-operations-runbook.md` §2a.
     A lookup error here stays fail-closed at the call site, as before.
 
     Args:

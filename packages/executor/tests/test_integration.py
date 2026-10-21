@@ -656,8 +656,18 @@ class TestRevocation:
         assert data["revoked"] is False
 
     def test_revocation_list_endpoint_returns_serials(self, ca_manager, ca_key, ca_cert):
-        """Revocation list endpoint returns all revoked serial numbers."""
-        ca_manager.purge_expired_revocations = MagicMock(return_value=0)
+        """Revocation list endpoint returns all revoked serial numbers.
+
+        #685 re-pair: this cell used to stub `ca_manager.purge_expired_revocations` before the
+        GET, which is the shape of "the purge exists but this path does not call it". That is no
+        longer the guarantee — the executor CA manager has no purge path to stub or to call, so
+        the read-only property is asserted structurally here instead.
+        """
+        from server.ca import CAManager
+
+        assert not hasattr(
+            CAManager, "purge_expired_revocations"
+        ), "#685: ExecutorCertRevocation is exempt from time-based purge"
         cert1 = _sign_executor_cert(ca_key, ca_cert, "executor-1", validity_days=30)
         cert2 = _sign_executor_cert(ca_key, ca_cert, "executor-2", validity_days=30)
 

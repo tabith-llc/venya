@@ -27,7 +27,7 @@ core. This is a fleet-wide outage wearing a migration's clothing.
 
 | # | Statement shape against `executor_cert_revocations` | Readers blocked? | Measured |
 |---|---|---|---|
-| 1 | `INSERT` / `DELETE` (the revoke path, the retention purge) — takes `ROW EXCLUSIVE` | **NO** | 20 s `ROW_EXCLUSIVE` hold: poll `200`, health `200` at every sample, 22 journal lines, **no silence** |
+| 1 | `INSERT` / `DELETE` (the revoke path; the retention purge is gone — see §2a) — takes `ROW EXCLUSIVE` | **NO** | 20 s `ROW_EXCLUSIVE` hold: poll `200`, health `200` at every sample, 22 journal lines, **no silence** |
 | 2 | `LOCK TABLE … IN ACCESS EXCLUSIVE MODE` — held | **YES** | 30 s hold: read waited **27,058 ms**; poll/health/ready `000`; **57 s of zero access-log lines** |
 | 3 | `ACCESS EXCLUSIVE` — **queued, never granted** (blocked behind a reader) | **YES** | read waited **16,048 ms**; ungranted lock requests went 1 → 3; a route died at t=12 s |
 
@@ -38,8 +38,37 @@ keeps starving the liveness plane for as long as it waits. "It will only take a 
 bound the damage, because the queue is upstream of the grant.
 
 Fact 1 is the reason this is a runbook and not a code prohibition: ordinary revocation activity —
-re-enrolling, rotating, the 90-day retention purge — does **not** stall readers under MVCC and
-needs no window.
+re-enrolling, rotating — does **not** stall readers under MVCC and needs no window.
+
+## 2a. There is no retention purge on this table any more (#685)
+
+Up to and including the anchor this runbook was written against, a maintenance-loop pass
+(`maintenance.py` → `CAManager.purge_expired_revocations`, 5-minute schedule) DELETEd
+`executor_cert_revocations` rows older than `crl.crl_retention_days` (default 90). **That pass and
+that method are removed** by the owner's ruling of 2026-10-20 on ticket #685: the table is the
+membership population for credential validity, so truth about a revoked credential is not aged out
+on a timer. It now matches `ExecutorCert`, which was never purged.
+
+Three operational consequences, all of them intended:
+
+- **The table grows.** Rows are permanent for the life of the core's DB. Size is now bounded only
+  by how many executor credentials have ever been revoked, so the §5 scan-cost guidance reads
+  differently: the population is not trimmed any more, and the `DELETE` that used to trim it is not
+  available as a lock-class answer to a slow scan either.
+- **Do not hand-delete history.** `TRUNCATE` and a targeted `DELETE` are the same act the code was
+  removed for: they drop the assertion that a serial is revoked. If the population really must be
+  reduced, that is a ruling to ask for, not an operation to run.
+- **`crl.crl_retention_days` is no longer a knob you can use to shrink this table.** The field is
+  still shipped and still validated — and the validator now REFUSES to start the core on any value
+  below the longest leaf-certificate lifetime whose revocations live in the two revocation tables,
+  `max(EXECUTOR_VALIDITY_DAYS=30, ADMIN_CERT_VALIDITY_DAYS=90)` = **90**. A value like `1` used to
+  be accepted by `ge=1` and would have deleted rows for credentials still inside their own validity
+  window; it now aborts startup, and so does anything from 1 through 89. (The shipped default is 90
+  and sits exactly on that bound, which is why the comparison is `>=` and not `>` — see
+  `test_crl.py::test_shipped_default_retention_sits_on_the_anchor_and_loads`.) The admin half of
+  the anchor is deliberate: `AdminCAManager.purge_expired_revocations` is not wired today, and the
+  guard covers it anyway, so the day someone wires it there is no window that can age out a live
+  credential. That bound is defense-in-depth: it holds even if the exemption is ever reverted.
 
 ## 3. Doing DDL on the revocation table
 
@@ -131,10 +160,10 @@ of them arrive from an operator, a backup tool, or a scheduler:
 | `VACUUM FULL executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Do not run on this table in-service. Plain `VACUUM` takes `SHARE UPDATE EXCLUSIVE` and is fine. |
 | `CLUSTER executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Avoid entirely; there is no reason to cluster this table. |
 | `REINDEX TABLE executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Use `REINDEX INDEX CONCURRENTLY` per index instead. |
-| `TRUNCATE executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Never. It also destroys revocation history, which is a security fact, not just data. Use the retention purge. |
+| `TRUNCATE executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Never. It destroys revocation history, which is a security fact, not just data — and there is no retention purge to point at as the sanctioned alternative any more (#685): the rows are permanent by ruling. |
 | `ALTER TABLE executor_cert_revocations …` (most forms) | `ACCESS EXCLUSIVE` | **YES** | §3. |
 | plain `VACUUM` / `ANALYZE` | `SHARE UPDATE EXCLUSIVE` | no | Safe. |
-| the retention purge (`maintenance.py` → `ca.py:772`, a `DELETE`, 5-minute schedule) | `ROW EXCLUSIVE` | no | Safe as shipped; do not "optimize" it into a `TRUNCATE`. |
+| an operator-run `DELETE` against this table | `ROW EXCLUSIVE` | no | Lock-safe, **ruled wrong**: the retention purge that used to be the sanctioned `DELETE` was removed (#685, §2a). Do not substitute your own. |
 
 **Long transactions** are the other half of the hazard, via fact 3: a transaction that holds
 `ACCESS SHARE` and stays open lets a DDL queue up behind it, and then everyone else queues behind
@@ -196,8 +225,9 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   it is counted on its own cumulative series, `venya_revocation_read_scan_refusals_total{site=…}` —
   never merged into `venya_revocation_read_refusals_total`, because a slow scan and a lock convoy are
   two different diagnoses. If the SCAN counter is what is moving, the table is being read too slowly:
-  the fix is the size of the population (the retention knob `crl.crl_retention_days` and the purge it
-  drives, and the unindexed `executors.revoked_at` scan the poll fallback performs) or an index, not a
+  the fix is the size of the population — which since #685 is NOT reducible by any purge (see §2a: the
+  retention window is no longer consumed, and the rows are permanent by ruling), so the live options
+  are the unindexed `executors.revoked_at` scan the poll fallback performs, and an index, not a
   bigger number here.
 - A slow read that still ANSWERS is visible rather than silent: `venya_revocation_read_duration_seconds{site=…}`,
   bucketed up to 300 s. `venya_request_duration_seconds` tops out at a 10 s bucket, so a 12 s read and
@@ -208,11 +238,12 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   public, unauthenticated endpoint every executor polls.
 
 **The admin plane carries the same bound, on its own table (#658).**
-`_validate_admin_mtls` reads `admin_cert_revocations` — a different table, with its own retention
+`_validate_admin_mtls` reads `admin_cert_revocations` — a different table, whose own retention
 purge (`AdminCAManager.purge_expired_revocations`, a `DELETE`, so `ROW EXCLUSIVE` and safe as
-shipped) — and that read used to be synchronous and unbonded inside an `async def` on the ordinary
-pool. It now runs through the SAME seam and the SAME knob (`crl.revocation_read_lock_timeout_ms`);
-there is no second deadline mechanism and no second config key. It is labelled separately, so a
+shipped) is NOT wired into the maintenance loop and was NOT touched by #685 — and that read used to
+be synchronous and unbonded inside an `async def` on the ordinary pool. It now runs through the
+SAME seam and the SAME knob (`crl.revocation_read_lock_timeout_ms`); there is no second deadline
+mechanism and no second config key. It is labelled separately, so a
 stall on one plane is never misread as a stall on the other:
 `venya_revocation_read_refusals_total{site="admin-mtls"}` against the executor plane's
 `{site="heartbeat"|"executor-mtls"|"audit-ingest"|"executor-session"|"crl"|"register/…"|"dial/…"}`.

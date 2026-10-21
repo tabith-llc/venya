@@ -433,10 +433,16 @@ no CRL Distribution Point is published by default (`crl_url` defaults to None an
 installer sets `VENYA_CRL__CRL_URL`), so nothing in this runbook should be read as
 saying one exists.
 
-**Lifecycle:** the identity flag dies only with the Executor row — never via
-the CRL retention purge. The CRL table (`crl_retention_days`, default 90) is
-append-only serial history + advisory broadcast; purge-dropped serial rows are
-expected, not a bug (the identity flag is the enforcement truth).
+**Lifecycle:** the identity flag dies only with the Executor row — never via a timer.
+The CRL table (`executor_cert_revocations`) is append-only serial history + advisory
+broadcast, and since #685 (owner ruling 2026-10-20) it is EXEMPT from time-based purge:
+the maintenance-loop pass that used to delete rows older than `crl_retention_days` is
+removed, so a revoked serial stays listed. Purge-dropped serial rows are no longer
+"expected" — if a row disappears, that is an incident, not aging. (`crl_retention_days`
+is still declared and is still startup-validated: the core refuses to boot on a value
+below `EXECUTOR_VALIDITY_DAYS`, so no config value can age out a credential that could
+still be valid even if the exemption is ever reverted. See
+`docs/revocation-table-operations-runbook.md` §2a.)
 
 **Admin client-cert revocation** (separate table, `admin_cert_revocations`):
 the supported path is `venya admin revoke-admin-cert <serial>` (ORM — sets

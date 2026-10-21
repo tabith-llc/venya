@@ -780,26 +780,15 @@ class CAManager:
         crl = builder.sign(ca_key, hashes.SHA256())
         return crl.public_bytes(serialization.Encoding.DER)
 
-    def purge_expired_revocations(self, db_session, retention_days: int) -> int:
-        """Delete revocation records older than retention_days.
-
-        Args:
-            db_session: SQLAlchemy session.
-            retention_days: Keep records for this many days.
-
-        Returns:
-            Number of deleted records.
-        """
-        from core.iam.models import ExecutorCertRevocation
-
-        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
-        deleted_count = (
-            db_session.query(ExecutorCertRevocation)
-            .filter(ExecutorCertRevocation.revoked_at < cutoff)
-            .delete(synchronize_session=False)
-        )
-        db_session.commit()
-        return deleted_count
+    # NO purge_expired_revocations on this manager. #685 (owner ruling 2026-10-20):
+    # ExecutorCertRevocation is exempt from time-based purge — it is the membership
+    # population for credential validity, and truth-about-state is not aged out on a
+    # timer. The method and its maintenance-loop caller were REMOVED, not neutered, so
+    # there is no shipped code path left that can delete an executor revocation row.
+    # The `AdminCAManager.purge_expired_revocations` twin below is untouched: it is not
+    # wired to the maintenance loop, and the ruling named the executor table only.
+    # Defense-in-depth for a revert lives where the window is declared —
+    # `config.CRLConfig._retention_covers_revoked_population_lifetime`.
 
 
 # --- Admin CA constants ---

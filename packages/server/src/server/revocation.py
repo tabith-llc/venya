@@ -29,9 +29,12 @@ Ruled order (do not reorder):
    auto-revoke) never taints the identity.
 3. Otherwise not revoked.
 
-Lifecycle: the identity flag dies only with the Executor row — never via the
-CRL retention purge. The CRL table is append-only serial history and advisory
-broadcast; its time-based purge is permitted (ruling 3).
+Lifecycle: the identity flag dies only with the Executor row — never via a timer.
+The CRL table is append-only serial history and advisory broadcast, and it is EXEMPT
+from time-based purge (#685, owner ruling 2026-10-20), so a serial named here stays
+named. The older sentence in this block — "its time-based purge is permitted
+(ruling 3)" — described the behavior #685 closed, and is corrected here rather than
+left to mislead the next seat reading the order this module owns.
 
 #603 AC1 addition (this leg): the read runs under a BOUNDED lock wait, and a read
 that cannot answer inside its deadline raises ``RevocationReadUnavailable``
