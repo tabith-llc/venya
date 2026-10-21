@@ -42,29 +42,29 @@ and this entry does not claim it was)
 
 **What is enforced today.** One door: the DIAL, which is the core connecting OUT to an
 executor. The relay context is built by `_build_relay_ssl_context`
-(`packages/server/src/server/routes/executors.py:628`) and, since `54457a6`, that builder
+(`packages/server/src/server/routes/executors.py:639`) and, since `54457a6`, that builder
 consults a certificate revocation list at the TLS handshake —
 `ssl_ctx.load_verify_locations(capath=crl_capath)` then
 `ssl_ctx.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF`
-(`packages/server/src/server/routes/executors.py:675-676`). The list is minted fresh for
-every dial by `_ensure_dial_crl_store` (`.../executors.py:702`), which the relay path calls
-at `.../executors.py:1979`, and the context carrying it is built at
-`.../executors.py:1994`. In operator language: when the core is about to send a command to
+(`packages/server/src/server/routes/executors.py:687-688`). The list is minted fresh for
+every dial by `_ensure_dial_crl_store` (`packages/server/src/server/routes/executors.py:713`), which the relay path calls
+at `packages/server/src/server/routes/executors.py:2027`, and the context carrying it is built at
+`packages/server/src/server/routes/executors.py:2042`. In operator language: when the core is about to send a command to
 an executor, it will not complete that handshake against a credential the list says is
 revoked, and it will not complete it against a list it cannot refresh either. The three
 answers are distinct and deliberately named apart — a revoked leaf is refused with 403 and
-says so (`.../executors.py:789`); a stale or unavailable list is refused with 503 whose text
-says **"no revocation asserted"** (`.../executors.py:699`) and never claims a revocation that
+says so (`packages/server/src/server/routes/executors.py:810`); a stale or unavailable list is refused with 503 whose text
+says **"no revocation asserted"** (`packages/server/src/server/routes/executors.py:710`) and never claims a revocation that
 did not happen; a missing CA anchor keeps the pre-existing TLS-misconfiguration wording
-(`.../executors.py:1987`, and the same wording again at `:1997` for a context that cannot be
+(`packages/server/src/server/routes/executors.py:2035`, and the same wording again at `:1997` for a context that cannot be
 built) rather than being relabelled as a revocation event.
 
 **What is NOT enforced.** The other door — the LISTENER, the executor's `:8443` side that
 ACCEPTS a connection — does no **list** consultation at all. Its TLS context is built by
 `RelayListener._build_ssl_context`
-(`packages/executor/src/executor/relay_listener.py:505`) and sets the TLS floor, the
+(`packages/executor/src/executor/relay_listener.py:611`) and sets the TLS floor, the
 executor's own leaf, the CA anchor and `verify_mode = ssl.CERT_REQUIRED`
-(`packages/executor/src/executor/relay_listener.py:509-520`). There is **no CRL load and no
+(`packages/executor/src/executor/relay_listener.py:626-637`). There is **no CRL load and no
 `VERIFY_CRL` flag anywhere in the executor's shipped source** — re-derivable with
 `git grep -i crl -- packages/executor/src`, which returns nothing at this tip, and
 `git grep VERIFY_CRL -- packages/`, whose only hits in the product are the dial line above and
@@ -76,27 +76,27 @@ tip, while `git grep -i crl -- packages/executor/src` now returns the #586 Gap A
 The two relay surfaces are also **not symmetric in any verify
 flag**: the file sets no `verify_flags` line at all, so it lacks the
 `VERIFY_X509_STRICT | VERIFY_X509_PARTIAL_CHAIN` the dial sets deliberately
-(`packages/server/src/server/routes/executors.py:663`). Chain handling differs between the two
+(`packages/server/src/server/routes/executors.py:674`). Chain handling differs between the two
 doors, not just list handling. **Since #597 and #586 Gap A this door is not blind — it refuses a
 revoked core-relay peer by registry match and a revoked executor-class peer by revocation-list match,
 both after the handshake and before any request byte: `peer_revocation_refusal` and
 `peer_executor_revocation_refusal`, `packages/executor/src/executor/relay_listener.py`.**
 
 What the listener DOES have is a post-handshake accept gate
-(`revocation_accept_reason`, `packages/executor/src/executor/relay_listener.py:311`, fired at
-`packages/executor/src/executor/relay_listener.py:387`). Read it precisely, because it is not
+(`revocation_accept_reason`, `packages/executor/src/executor/relay_listener.py:326`, fired at
+`packages/executor/src/executor/relay_listener.py:471`). Read it precisely, because it is not
 a peer check: it consults the ONE answer this daemon holds about **itself** —
 `DaemonState.revoked` and `revocation_answered`
 (`DaemonState.__init__`, `packages/executor/src/executor/daemon.py:249`,
 `packages/executor/src/executor/daemon.py:255`)
-as written by `ExecutorDaemon._main_loop` (`packages/executor/src/executor/daemon.py:2122`,
-`packages/executor/src/executor/daemon.py:2134`, and the consecutive-failure cutoff at
-`packages/executor/src/executor/daemon.py:2148`). So it refuses every new connection when THIS
+as written by `ExecutorDaemon._main_loop` (`packages/executor/src/executor/daemon.py:2168`,
+`packages/executor/src/executor/daemon.py:2180`, and the consecutive-failure cutoff at
+`packages/executor/src/executor/daemon.py:2204`). So it refuses every new connection when THIS
 executor has been revoked or has received no revocation answer since boot; it holds no copy of
 any list and does no serial or identity matching of the peer in front of it **at this gate** — and its own
 contract comment says why — at `:8443` the peer is the core's relay-client credential, which
 the executor-serial list never describes
-(`packages/executor/src/executor/relay_listener.py:319`). **TWO further gates now sit beside this one
+(`packages/executor/src/executor/relay_listener.py:335`). **TWO further gates now sit beside this one
 and do match the peer** — `peer_revocation_refusal` (the #597 registry population) and
 `peer_executor_revocation_refusal` (#586 Gap A, the executor-serial population),
 `packages/executor/src/executor/relay_listener.py` — both reading the ONE serial already taken off the
@@ -113,15 +113,15 @@ succeeded.
 And the stronger thing, which the page has to say rather than imply: **at this surface the listener
 can name a revoked peer today, from two populations and from no CRL at all.** The service CA that signs the core's
 relay-client credential
-(`-CA /var/lib/venya/ca/ca.crt`, `install-venya-core.sh:1020`) is the same CA that signs executor
-leaves (`CAManager.ca_cert_path`, `packages/server/src/server/ca.py:394`, leaf mint at
-`packages/server/src/server/ca.py:621`), and the CRL that CA mints is populated from
+(`-CA /var/lib/venya/ca/ca.crt`, `install-venya-core.sh:1024`) is the same CA that signs executor
+leaves (`CAManager.ca_cert_path`, `packages/server/src/server/ca.py:395`, leaf mint at
+`packages/server/src/server/ca.py:622`), and the CRL that CA mints is populated from
 `ExecutorCertRevocation` alone (`CAManager.generate_crl`,
-`packages/server/src/server/ca.py:715`, query at `packages/server/src/server/ca.py:749`; the model
+`packages/server/src/server/ca.py:716`, query at `packages/server/src/server/ca.py:760`; the model
 is titled "Revoked executor certificate serial numbers",
 `packages/core/src/core/iam/models.py:380`). The consequence for a **core relay** credential is that
 this list can never name it — and that is no longer a hole in the door, because #597 gave that class
-its own registry (`CoreRelayCredential`, `packages/core/src/core/iam/models.py:665`) and the door
+its own registry (`CoreRelayCredential`, `packages/core/src/core/iam/models.py:742`) and the door
 matches against it (`peer_revocation_refusal`). For an **executor-class** peer the list already named
 the serial; what was missing was anyone at `:8443` asking, and #586 Gap A added that ask
 (`peer_executor_revocation_refusal`, fed by `revoked_executor_serials` on the daemon state, carried on
@@ -150,27 +150,27 @@ dialed. This entry names that half as unobserved and does not claim the dial was
 **Who is affected in the shipped posture.** Reachability, not theory. The listener binds
 `:8443` (`RELAY_PORT`, `packages/executor/src/executor/relay_listener.py:46`) on the executor
 and takes connections from the core network (default `host="0.0.0.0"` in `RelayListener.__init__`,
-`packages/executor/src/executor/relay_listener.py:462`, and the inbound `8443/tcp` rule for an
+`packages/executor/src/executor/relay_listener.py:568`, and the inbound `8443/tcp` rule for an
 executor in [FIREWALL.md](FIREWALL.md):50). The peer that presents at that door is the
 core's relay-client credential, signed by the core installer with a **365-day** validity
-(`-days 365`, `install-venya-core.sh:1022`), CN `${CORE_HOSTNAME}-relay`
-(`install-venya-core.sh:1013`). So: any core host that still holds a relay-client certificate
+(`-days 365`, `install-venya-core.sh:1026`), CN `${CORE_HOSTNAME}-relay`
+(`install-venya-core.sh:1017`). So: any core host that still holds a relay-client certificate
 that was once signed by your CA, and whose CN is still in the executor's `relay_client_ids`,
 completes the handshake at that executor. **Retiring the machine is no longer silently ignored —
 since #597 a revoked serial of that credential is refused at the accept point — but the handshake
 itself still succeeds, and a credential that was never ingested (a core not booted since the
 migration) stays unrevocable and completes it exactly as before.** Executor leaves are dual-purpose,
 `SERVER_AUTH` and `CLIENT_AUTH`
-(`packages/server/src/server/ca.py:51`), so an executor credential is also a credential that
+(`packages/server/src/server/ca.py:52`), so an executor credential is also a credential that
 can present as a client.
 
 **One boundary is settled and is not on the plan: work already in flight is NOT terminated by a
 revocation.** That is the owner's ruling, recorded in the shipped source
-(`packages/server/src/server/routes/executors.py:705-710` and the scope note at
-`packages/server/src/server/routes/executors.py:1975-1977`); fail-closed on a stale list applies
+(`packages/server/src/server/routes/executors.py:717-722` and the scope note at
+`packages/server/src/server/routes/executors.py:2023-2025`); fail-closed on a stale list applies
 at the dial, and killing live sessions is ruled AGAINST, not deferred. The accept point already
 matches that boundary: a refusal happens after the handshake and before any request byte
-(`packages/executor/src/executor/relay_listener.py:387-409`), and the RF-3 admission permit is
+(`packages/executor/src/executor/relay_listener.py:515-537`), and the RF-3 admission permit is
 taken later, inside the handler — so a refusal at accept can only ever deny new work.
 
 **The proof that is half-run.** The physical revoke-then-refuse has now been executed on a served
@@ -181,7 +181,7 @@ dial**.
 What exists in the tree beside those runs is unit-level: the dial
 half is pinned by `packages/server/tests/test_relay_dial_crl_586.py`, which mints a real CA,
 real leaves, a real CRL and a real loopback handshake but runs **no venya daemon on either
-side** (its own module docstring, `packages/server/tests/test_relay_dial_crl_586.py:21-24`);
+side** (its own module docstring, `packages/server/tests/test_relay_dial_crl_586.py:23-26`);
 the listener accept gate is pinned by
 `packages/executor/tests/test_relay_revocation_gate_586.py`. A unit that refuses a leaf in a
 loopback handshake is not a revocation feature proved on a customer deployment. **The merged dial half must not be read as "revocation works at the handshake"** — it is one of two
@@ -206,12 +206,12 @@ One alternative exists and is **the owner's call, not this page's plan, and not 
 item**: build the transport consult anyway. It would buy the wording "a CRL is consulted at every
 relay handshake" while delivering, as its only real effect, a **stop clock** — a list lapse makes
 the listener refuse new connections. The clock is an hour, not an abstraction: the minted list
-carries `next_update = now + 1 hour` (`packages/server/src/server/ca.py:758`, and the same stamp
-on the admin sibling at `packages/server/src/server/ca.py:1465`), while the listener's published
+carries `next_update = now + 1 hour` (`packages/server/src/server/ca.py:769`, and the same stamp
+on the admin sibling at `packages/server/src/server/ca.py:1475`), while the listener's published
 context is rebuilt only by `RelayListener.reload_ssl_context`
-(`packages/executor/src/executor/relay_listener.py:582`) whose one production caller is the
-daemon's rotation arm (`packages/executor/src/executor/daemon.py:2103`) — a 30-day cadence
-(`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:46`). A list baked in at boot is
+(`packages/executor/src/executor/relay_listener.py:688`) whose one production caller is the
+daemon's rotation arm (`packages/executor/src/executor/daemon.py:2149`) — a 30-day cadence
+(`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:47`). A list baked in at boot is
 therefore certain to lapse inside an hour, and under the ruled fail-closed posture a lapsed list
 means the executor refusing every new relay connection. That is a fleet-wide availability trade,
 it is the owner's to make, and it is named here as his rather than as a task.
@@ -220,12 +220,12 @@ it is the owner's to make, and it is named here as his rather than as a task.
 the page should not let the peer-revocation gap hide them. First, the core's own application gate
 refuses a revoked EXECUTOR serial per request, on the inbound plane, in
 `_validate_executor_mtls` → `executor_revocation_state` with the presented serial
-(`packages/server/src/server/middleware/auth.py:748`, lookup at
-`packages/server/src/server/middleware/auth.py:863`). Second, the executor daemon stops
+(`packages/server/src/server/middleware/auth.py:860`, lookup at
+`packages/server/src/server/middleware/auth.py:975`). Second, the executor daemon stops
 cooperatively on a bounded outage rather than serving on an unanswered question —
 `max_revocation_failures`, default 3
 (`packages/executor/src/executor/config.py`, `CertificateRotationConfig.max_revocation_failures`), fed at
-`packages/executor/src/executor/daemon.py:2148`. The first of those is an application-plane gate on
+`packages/executor/src/executor/daemon.py:2204`. The first of those is an application-plane gate on
 the core's inbound side, not a peer refusal at `:8443`, and the second is a cooperative stop; neither
 is claimed as peer revocation here. **They are the controls that were load-bearing while the peer arms
 were being built, and they still are — the door's own refusals now sit beside them, not instead of
@@ -236,12 +236,12 @@ assumption is not:
 
 - **Remove the identity, not the credential.** `relay_client_ids` is the executor's allow-list
   of core client CNs (`ExecutorConfig.relay_client_ids`,
-  `packages/executor/src/executor/config.py:416`); drop a retired core's CN
+  `packages/executor/src/executor/config.py:422`); drop a retired core's CN
   and `ExecuteHandler.do_POST` refuses it with 403
   (`packages/executor/src/executor/relay_listener.py:116`). It fails closed when the
   list is empty — the listener does not bind at all
-  (`packages/executor/src/executor/relay_listener.py:524-529`, and the same guard in
-  `ExecutorDaemon.start` at `packages/executor/src/executor/daemon.py:1899`). Caveat that
+  (`packages/executor/src/executor/relay_listener.py:632-637`, and the same guard in
+  `ExecutorDaemon.start` at `packages/executor/src/executor/daemon.py:1947`). Caveat that
   matters: the executor installer
   **rewrites** this key on every run (`relay_client_ids = ["${CORE_HOSTNAME}-relay"]`,
   `install-venya-executor.sh:558`), so a hand-edit there is not durable across a re-run — the
@@ -249,7 +249,7 @@ assumption is not:
 - **Re-mint the core's relay pair, and know what that does NOT do.** A completing run of
   `install-venya-core.sh` regenerates the relay key and re-signs the credential with no
   existence guard on the files (`openssl ecparam -genkey ... relay-client.key`,
-  `install-venya-core.sh:1005`, then the sign at `install-venya-core.sh:1022`), while the run
+  `install-venya-core.sh:1009`, then the sign at `install-venya-core.sh:1026`), while the run
   preserves the certificate authority — the same re-run behaviour named in the `#588` entry
   below. So a re-run rotates what the core presents. **Since #597 the previous credential is not
   invisible either — it is in `core_relay_credentials` and is revocable by serial**
@@ -261,13 +261,13 @@ assumption is not:
   executor restricted to your core host(s).
 - **Retire everything derived from the CA** by rotating the certificate authority —
   [cert-rotation-runbook.md](cert-rotation-runbook.md), whose custody path
-  (`venya admin split-ca-key`, `packages/cli/src/venya_cli/cli.py:381`) is the break-glass
+  (`venya admin split-ca-key`, `packages/cli/src/venya_cli/cli.py:410`) is the break-glass
   half. This is the heavy, fleet-wide answer, not the routine one.
 
 **A revoked core relay-client credential is refused at this door, and do not read short-lived
 certificates as the mechanism.** The 30-day short lifetime that exists is the
-EXECUTOR leaf (`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:46`); the
-core relay-client credential is minted at 365 days (`install-venya-core.sh:1022`). **This bullet used to
+EXECUTOR leaf (`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:47`); the
+core relay-client credential is minted at 365 days (`install-venya-core.sh:1026`). **This bullet used to
 say the opposite — that no revoked serial of this class existed and that the cell proving a refusal
 could not be written against today's product. Both halves became false at `1033c2d`:** the serial is
 nameable now, the door refuses it, and the cell is written
@@ -395,20 +395,20 @@ on a list.
 plane, because it is not true.** Three shipped mechanisms, all tighter than the theft window:
 the core re-mints the revocation list fresh at every relay connection and refuses outright if a
 current list cannot be produced (`_ensure_dial_crl_store`,
-`packages/server/src/server/routes/executors.py:702` — its docstring carries the owner's ruled
+`packages/server/src/server/routes/executors.py:713` — its docstring carries the owner's ruled
 posture, "refuse everything until a properly refreshed list arrives", 2026-10-13); a stale or
 missing list is answered as a refusal with 503 that asserts no revocation
-(`_STALE_LIST_DETAIL`, `executors.py:699`, routed by `_dial_crl_verdict_for`, `executors.py:775`
+(`_STALE_LIST_DETAIL`, `packages/server/src/server/routes/executors.py:710`, routed by `_dial_crl_verdict_for`, `packages/server/src/server/routes/executors.py:796`
 — of the three handshake codes, only `CERT_REVOKED` (23) is ever reported as revoked; "unable to
 get CRL" (3) and "CRL expired" (12) are staleness, deliberately never relabelled revocations);
 and on the administrator plane, revocation is a per-request serial lookup at the front door
-(`_validate_admin_mtls`, `packages/server/src/server/middleware/auth.py:493`: "nginx has no
+(`_validate_admin_mtls`, `packages/server/src/server/middleware/auth.py:555`: "nginx has no
 `ssl_crl`, so this lookup is the enforcement point"). Immediate, both directions.
 
 **Mentioned once, so it is not mistaken for the mechanism: the `next_update` stamp.** The
 revocation lists this product signs carry a stated validity of one hour
 (`builder = builder.next_update(now + timedelta(hours=1))`, `CAManager.generate_crl`,
-`packages/server/src/server/ca.py:758`, and `AdminCAManager.generate_crl`, `ca.py:1465`). That
+`packages/server/src/server/ca.py:769`, and `AdminCAManager.generate_crl`, `packages/server/src/server/ca.py:1475`). That
 field is a signature-horizon on the published artifact for whatever consumes it off-box. **No
 shipped verifier reads it as a trust tolerance** — the code above re-mints per dial and refuses
 at staleness — so its one-hour number is a coincidence with the theft window's one hour, not the
@@ -417,13 +417,13 @@ same commitment. A future seat must not anchor the owner's 60 minutes here.
 **The executor's own stop, which is the operational plane.** A revoked executor
 that is still reporting to its core stops itself on its next heartbeat — the shipped cadence is a
 beat every 30 seconds: `ExecutorDaemon._main_loop`,
-`packages/executor/src/executor/daemon.py:2163` (`self._shutdown_event.wait(30.0)`, heartbeat and
+`packages/executor/src/executor/daemon.py:2219` (`self._shutdown_event.wait(30.0)`, heartbeat and
 revocation poll on the same tick); the core's heartbeat route states the same cadence ("Executors
 POST to this endpoint every 30s", `packages/server/src/server/routes/executors.py`, `heartbeat`),
 and server-side changes reach each executor "on each executor's next heartbeat (~30 s)"
-(`packages/server/src/server/routes/admin.py:1071`). The core's fleet view marks a credential
+(`packages/server/src/server/routes/admin.py:1077`). The core's fleet view marks a credential
 no-longer-online once 60 seconds pass without a beat (`list_executors`,
-`packages/server/src/server/routes/executors.py:1571`), so about a minute is the outer edge of
+`packages/server/src/server/routes/executors.py:1619`), so about a minute is the outer edge of
 what an operator waits to SEE the stop. These figures are better than the "roughly five minutes"
 this bound was described as while this page was being drafted — the shipped number is the one
 above, and nothing here is a regression against it. They remain properties of the reporting
@@ -519,11 +519,11 @@ is first minted. It is not an edge case and it is not rare — it is only far aw
 one limit on this page whose date an operator can and should write in a calendar today.
 
 **What you get today:** the root CA is minted with a **3,650-day** validity
-(`CA_VALIDITY_DAYS = 3650  # 10 years`, `packages/server/src/server/ca.py:45`, applied at the
+(`CA_VALIDITY_DAYS = 3650  # 10 years`, `packages/server/src/server/ca.py:46`, applied at the
 signing call `.not_valid_after(now + timedelta(days=CA_VALIDITY_DAYS))`,
-`packages/server/src/server/ca.py:478`), and the Admin CA carries the same span
+`packages/server/src/server/ca.py:479`), and the Admin CA carries the same span
 (`ADMIN_CA_VALIDITY_DAYS = 3650`, `packages/server/src/server/ca.py:796`, applied at
-`packages/server/src/server/ca.py:1060`). So the expiry day is your install day plus 3,650: a root
+`packages/server/src/server/ca.py:1070`). So the expiry day is your install day plus 3,650: a root
 minted on 2026-10-03 00:48:37 GMT reads `notAfter=Sep 30 00:48:37 2036 GMT`, which is the shipped
 constant rather than a rounded decade. Read your own with
 `openssl x509 -in /var/lib/venya/ca/ca.crt -noout -startdate -enddate`.
@@ -539,7 +539,7 @@ Two facts belong in the same breath, because each one is the reason the other ma
   `/api/v1/health` (`_check_ca`, `packages/server/src/server/routes/health.py:78`) asks only
   whether the CA loads. What exists is a loud failure at the end: the executor's CA probe refuses
   an expired anchor by name (`"CA certificate expired"`, inside `validate_ca_certificate`,
-  `packages/executor/src/executor/daemon.py:1357`), and the core's own verification fails closed
+  `packages/executor/src/executor/daemon.py:1404`), and the core's own verification fails closed
   past `not_valid_after` (inside `_verify_forwarded_cert`, the two lifetime checks at
   `packages/server/src/server/middleware/auth.py:203-206`). So the failure is a named refusal, not
   silent acceptance — but it arrives on the day, with no runway.
@@ -576,8 +576,8 @@ key-custody paths, not day-to-day use. The stored files are `0600` and root- or
 different reasons. The count is live call sites, not grep hits —
 `git grep -n 'NoEncryption()' <ref> -- 'packages/*/src/*'` returns **six lines** at this anchor,
 and four of them are comments, not calls: three sit inside writers that now encrypt
-(`cmd_admin_cert_renew`, `packages/cli/src/venya_cli/commands.py:2103`; `executor_register`,
-`commands.py:3241`; `executor_cert_renew`, `commands.py:3678`, each describing the shape the
+(`cmd_admin_cert_renew`, `packages/cli/src/venya_cli/commands.py:2139`; `executor_register`,
+`packages/cli/src/venya_cli/commands.py:3316`; `executor_cert_renew`, `packages/cli/src/venya_cli/commands.py:3753`, each describing the shape the
 writer replaced) and one is the `key_passphrase` module docstring
 (`packages/executor/src/executor/key_passphrase.py:10`), which says outright that the executor leaf
 key *used to* be serialized that way. The two that remain are the pair below. Re-derive it that
@@ -587,7 +587,7 @@ and rc 1 on a tree that plainly has hits, which is how a count of "no sites" get
 tree full of them.
 
 - the core's own machine-plane admin key, returned unencrypted by
-  `AdminCAManager.sign_admin_cert` (`packages/server/src/server/ca.py:1130`, the call at
+  `AdminCAManager.sign_admin_cert` (`packages/server/src/server/ca.py:1140`, the call at
   `:1244-1247`) — this one is
   **a ruled exemption, not an oversight**: the file mode is the control, the key stays on
   the core, and the exemption is retired only by the certificate-signing-request or
@@ -612,7 +612,7 @@ documented once in
 on a host.** The two above are the Python writers of CA and leaf key material — the class #565
 governs. Separately, the core installer mints three TLS machine keys with `openssl ecparam` and
 leaves them unencrypted at rest, each guarded by mode and ownership rather than a passphrase:
-the server leaf key (`install-venya-core.sh:965`, `chmod 600` at `:967`), the relay client key
+the server leaf key (`install-venya-core.sh:969`, `chmod 600` at `:967`), the relay client key
 (`:1005`, `:1007`) and the inner-listener key (`:1063`, `:1065`). Those are not #565 sites — no
 `NoEncryption()` call is involved, and a daemon must read them unattended at start — but a partner
 sweeping a core for readable private keys will find them, so they are named here rather than left
@@ -989,7 +989,7 @@ the context-build call `:1945`→`:1994`. In the other files: the admin CRL `nex
 **did not move**: `ca.py:45`/`:46`/`:51`/`:394`/`:621`/`:715`/`:749`/`:758`/`:803`/`:1060`/`:796`,
 `models.py:379`/`:380`/`:613`, every `relay_listener.py` and `daemon.py` number, the two
 `executor/config.py` numbers, `admin_certs.py:317`, `test_clock_skew_fraction_rf7.py:55`,
-`test_relay_dial_crl_586.py:21-24`, `install-venya-core.sh:965`/`:1005`/`:1013`/`:1020`/`:1022`
+`test_relay_dial_crl_586.py:21-24`, `install-venya-core.sh:969`/`:1005`/`:1013`/`:1020`/`:1022`
 (its +18 landed at `:1122`, below every cite), and `install-venya-executor.sh:558`.
 
 **Two entries changed state on this pass, and both are removals of a claim the tree no longer
