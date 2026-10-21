@@ -70,7 +70,7 @@ def _minted_cert_pem(public_key) -> bytes:
     signer = ec.generate_private_key(ec.SECP256R1())
     cert = (
         x509.CertificateBuilder()
-        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dusty@workstation")]))
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "admin-bot@workstation")]))
         .issuer_name(CA_SUBJECT)
         .public_key(public_key)
         .serial_number(0x7777_0001)
@@ -162,7 +162,7 @@ def _seed_pair(tmp_path: Path):
     """An existing cert/key pair on disk so the renew cell has a path to write over."""
     key = ec.generate_private_key(ec.SECP256R1())
     now = datetime.datetime.now(UTC)
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dusty@old")])
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "admin-bot@old")])
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)

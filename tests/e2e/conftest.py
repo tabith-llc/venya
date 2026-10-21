@@ -6,7 +6,7 @@
 
 """E2E test configuration for browser-based enrollment.
 
-Tests run headless on venya-test-workstation against venya-core-1.
+Tests run headless on the workstation against venya-core-1.
 Uses Playwright context.credentials API for WebAuthn virtual authenticator.
 """
 

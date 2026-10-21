@@ -237,7 +237,7 @@ class TestRealHandshakeAtTheDoor:
         leaf_key = ec.generate_private_key(ec.SECP256R1())
         leaf = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "idaho-relay")]))
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "core-1-relay")]))
             .issuer_name(ca_name)
             .public_key(leaf_key.public_key())
             .serial_number(PEER_SERIAL_INT)

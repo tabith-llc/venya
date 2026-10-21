@@ -60,7 +60,7 @@ def _minted_cert() -> bytes:
     key = ec.generate_private_key(ec.SECP384R1())
     cert = (
         x509.CertificateBuilder()
-        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dusty@workstation")]))
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "admin-bot@workstation")]))
         .issuer_name(ISSUER)
         .public_key(key.public_key())
         .serial_number(0xAAAA_BBBB)

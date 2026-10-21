@@ -779,7 +779,7 @@ class CoreRelayCredential(Base):
     common_name = Column(
         String(128),
         nullable=False,
-        comment="Subject CN as presented, e.g. 'idaho-relay' — matched against relay_client_ids",
+        comment="Subject CN as presented, e.g. 'core-1-relay' — matched against relay_client_ids",
     )
     hostname = Column(
         String(128),

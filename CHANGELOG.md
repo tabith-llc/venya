@@ -5,6 +5,16 @@ Notable changes to Venya will be documented in this file.
 ## [Unreleased]
 
 
+- **The shipped tree carries no development-site names (`#689`).** Test fixtures, two
+  docs and one database column comment named real development hosts, an operator
+  identity and a workspace path. They now use the documentation forms the tree already
+  uses (`admin@example.com`, RFC 5737 ranges, a `<core-host>`-shaped example). The
+  interlock that was written to stop this only matched IP literals and only walked
+  `packages/` and `docs/`, so it could not see a hostname, an email or a path, and it
+  never opened the root `CHANGELOG.md` at all; it now matches hostnames, operator
+  identities and workspace paths too, and walks every top level the release bundle
+  actually ships. No product behavior change — one column COMMENT changes, through a
+  migration (`042`).
 - **A revoke command now accepts the whole serial it can be shown (`#682`, `#676`).**
   Certificate serials on this product are wider than the sixteen characters the revoke
   inputs used to allow, so a serial copied from a listing or a journal line could be
@@ -980,11 +990,11 @@ the lists below.
 - New `docs/agent-prompts.md` — a paste-ready operating contract for customer AI agents (AGENTS.md / CLAUDE.md / Cursor rules), linked from the README banner + docs table, installation §6, and agents.md. An interlock test pins the block's claims (tool names, redaction marker, injection path, 401/503 behavior) to the live MCP tool surface so the prompt cannot silently rot.
 
 ### Changed
-- Test fixtures and docs no longer embed development-fleet addresses or identities: private-range (RFC1918) literals swept to documentation ranges (RFC 5737), `dust@montana` → `admin@example.com`, dev password probe → synthetic. A tree-wide interlock test now fails CI if any RFC1918 literal re-enters `packages/` or `docs/` (installer-artifact guard extended; CHANGELOG and the guard's own self-test excluded). No product behavior change.
+- Test fixtures and docs no longer embed development-fleet addresses or identities: private-range (RFC1918) literals swept to documentation ranges (RFC 5737), the operator identity in fixtures → `admin@example.com`, dev password probe → synthetic. A tree-wide interlock test now fails CI if any RFC1918 literal re-enters `packages/` or `docs/` (installer-artifact guard extended; the guard's own self-test excluded — and note that scan never opened the root `CHANGELOG.md` at all, which is what the later scrub-and-widen leg fixed). No product behavior change.
 
 - **BREAKING — Executor: the built-in DNS-resolver default is removed; `dns_resolver`
   is now explicit config.** The sandbox egress policy previously always admitted a
-  hardcoded resolver IP (`10.27.28.1` — a development-fleet address, functionally
+  hardcoded resolver IP (a development-fleet address, functionally
   dead on any other network). Now set `dns_resolver = "<your resolver IP>"` in
   `/etc/venya/executor.toml` — fresh installs take it from the required
   `VENYA_DNS_RESOLVER` installer knob (re-runs reuse the stored value) — or
@@ -1019,8 +1029,9 @@ the lists below.
   is never written). A standing interlock test fails if a private-range
   literal returns to any shipped installer script. **Installed a release
   before this fix?** Check `/etc/venya/egress-allowlist.txt`: releases through
-  `v0.1.0alpha14` seeded `10.27.28.0/24` — a development-fleet subnet that is
-  not yours. Delete it or replace it with your own target ranges; the file is
+  `v0.1.0alpha14` seeded a development-fleet subnet — a private RFC 1918
+  range that is not yours. If the file holds a private `10.*` range you did not add,
+  delete it or replace it with your own target ranges; the file is
   read at sandbox creation, so no restart is needed.
 
 ### Fixed

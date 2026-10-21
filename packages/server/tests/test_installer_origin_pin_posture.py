@@ -23,7 +23,7 @@ Truth table, both halves: file+no-pin ABORT (zero state), http+no-pin ABORT,
 http+correct-pin PROCEED (no sidecar), https+no-pin PROCEED via sidecar
 (CONTROL), wrong-pin ABORT on every scheme (paired negative), operator
 override of an https default to http CAUGHT. ps1 gets static-review cells
-(no pwsh runner on montana — recorded honestly).
+(no pwsh runner on the Linux dev box — recorded honestly).
 """
 
 import re
@@ -252,7 +252,7 @@ def test_common_sh_carries_the_scheme_guard() -> None:
 
 
 def test_ps1_guard_lands_before_any_download_state() -> None:
-    """ps1 static review (no pwsh runner on montana — execution UNVERIFIED,
+    """ps1 static review (no pwsh runner on the Linux dev box — execution UNVERIFIED,
     #328 ruling): the scheme guard sits after the $tarballUrl assignment and
     before prompt, workDir creation, and every curl."""
     src = (REPO_ROOT / "install-venya-cli.ps1").read_text(encoding="utf-8")
