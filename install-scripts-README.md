@@ -163,6 +163,11 @@ and their releases is a separate owner act, so an alpha asset may still resolve 
 it runs. For a current install use the beta tag (`v0.1.0beta1`, created when the cut
 lands).
 
+*Beta-line note (`#690`):* from `v0.1.0beta1` the manifest is **16 assets**, not 15 — the
+16th is `venya-common.sh.sha256`, the sidecar all three install scripts fetch at run time on
+a piped (`curl | sudo bash`) install, because `${TARBALL_URL%/*}` collapses their three
+defaults onto one release-directory URL. A pre-Windows tag on the beta line carries 14.
+
 ### Uninstallers
 
 Each artifact has a matching uninstaller (served from the same origin).
