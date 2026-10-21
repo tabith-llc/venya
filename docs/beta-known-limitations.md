@@ -971,17 +971,25 @@ there is RED. Prose is not machine-checked and never will be — whether a limit
 the shipped tree is a person re-deriving it against behaviour, and a guard that interprets sentences
 gets switched off inside a week.
 
-**The numbers on this page are currently UNVERIFIED, and that is the honest face, not an oversight.**
-The owner's ruling (2026-10-18) is *"claim-truth now, numbers re-pinned at the cut commit with a
-checked assertion."* So the claim halves were re-derived today, and the coordinates were deliberately
-**not** re-pinned at any development tip — this branch's base moved twice while the page was being
-corrected, and a number pinned at a face that has already moved is the exact mechanism that published
-the stale ones. At the release commit, run
-`uv run -p 3.14 --directory packages/server python scripts/gen_beta_terms_pins.py --write`, set
-`PINNED_AT` in the same changeset from the sha the generator prints, and the strict cell becomes live:
-from then on a merge that moves a cited symbol reddens the suite instead of quietly publishing a wrong
-line. **Until that has been done at the commit you are reading, treat every `:N` on this page as a
-pointer to a symbol, not as a coordinate** — grep the symbol, and you get the right line at your tree.
+**The coordinates on this page were re-pinned by the generator, and they are exact at one named
+face.** The owner's ruling (2026-10-18) was *"claim-truth now, numbers re-pinned at the cut commit
+with a checked assertion"*, and that recipe has now been carried out: the generator ran with
+`--write` at `2b90902` (commit `17fc21d` — 105 cites re-pinned, 60 manifest keys re-keyed, 3
+duplicate keys dropped, so the manifest went from 96 keys to 93), and `--check` reads rc 0 with
+`would change: False` at the release face `f07066c`. `PINNED_AT` in
+`packages/server/tests/test_beta_terms_cite_interlock.py` now names that face, which makes the strict
+cell **live from this commit forward**: a merge that moves a cited symbol reddens the suite instead of
+quietly publishing a wrong line. Before this commit the cell printed a deferral and returned without
+asserting anything, so the page's numbers were protected by nobody — that is the defect this paragraph
+replaces, and it is why the sentence above says *verified*, not *disciplined*.
+
+**What that does and does not mean.** It means each `:N` on this page matches the tree at the
+commit `PINNED_AT` names — measured, not believed. It does **not** mean the number is true of the
+checkout you happen to be reading: any merge since that face can move a symbol, which is exactly what
+the live cell now catches rather than hides. So the reading rule stays, with its reason corrected: at
+the named face treat `:N` as a coordinate, and anywhere else grep the symbol beside it — the symbol
+name is the durable part, the number is a pointer into one specific tree. Prose on this page is still
+not machine-checked, and the claim halves are still re-derived by a person against behaviour.
 
 **Source anchor:** the statements above were read against the shipped source at `dev`
 `2e0e751` and the `#590` entry against `dev` `e8d5a22`; the two `Revocation` entries (`#586`,
