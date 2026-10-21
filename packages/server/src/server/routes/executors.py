@@ -949,6 +949,16 @@ async def register_executor(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid enrollment token",
             )
+        # #672 DEAD-STATE DISCLOSURE: no shipped verb ever writes state="revoked" on the
+        # EXECUTOR plane. The complete writer set for ExecutorEnrollmentToken is the mint
+        # (routes/admin.py::admin_enroll_executor -> "created", plus the model default) and
+        # the consume UPDATE below (-> "consumed"); maintenance.purge_admin_identity_metadata
+        # writes no state at all, and expiry is computed, never stored as "expired". The
+        # state="revoked" writers that DO exist live in core/iam/enrollment_manager.py and act
+        # on EnrollmentToken — the USER plane. Refusal kept as-is; a real revoke verb on this
+        # plane is feature-scope and unruled, so tokens here expire on TTL, full stop.
+        # Guard: server/tests/test_executor_token_revoked_state_672.py fails if a writer is
+        # ever added, so this branch cannot silently become load-bearing.
         if token.state == "revoked":
             metrics.TOKEN_CONSUMED.labels(result="revoked").inc()
             raise HTTPException(
@@ -1017,6 +1027,9 @@ async def register_executor(
                     detail="Enrollment token not found",
                 )
             elif token.state == "revoked":
+                # #672: same dead state as the pre-check above — unreadable in practice on
+                # this plane because no shipped writer can set it here. See that block and
+                # test_executor_token_revoked_state_672.py.
                 metrics.TOKEN_CONSUMED.labels(result="revoked").inc()
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
