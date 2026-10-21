@@ -731,6 +731,31 @@ dial takes.
 
 ---
 
+### The age-out date this product publishes for administrator credentials is computed from shipped constants, and has never been observed on a running guest
+
+Status: known limitation in beta · Target: an owner-present window, no date set · Tracked as: the
+workspace carrier `features/RF-11-rollout-ageout-docs.md`, whose own status line reads *landed in
+part — not proven, not closed*.
+
+**What the limitation is:** the age-out date an operator can read for an administrator credential is
+**derived, not measured**. It comes from the shipped lifetimes — `EXECUTOR_VALIDITY_DAYS` (30) and
+`ADMIN_CERT_VALIDITY_DAYS` (90) in `ca.py`, against a root authority minted for `CA_VALIDITY_DAYS`
+(3,650) — and the arithmetic is sound. What has not happened is the physical read: no served,
+re-installed guest has been observed refusing a credential after it passed `not_valid_after`. So the
+date is a computed date standing in for an observed one, and beta ships it as that.
+
+**What is NOT claimed here:** not that the check is missing — verification fails closed past
+`not_valid_after` inside `_verify_forwarded_cert`, and an expired authority anchor is refused by name
+(`"CA certificate expired"` in `validate_ca_certificate`), so the failure is a named refusal rather
+than silent acceptance. And not any specific calendar day: the computed date depends on the day your
+own authority was first minted, which differs per deployment, so this entry deliberately prints no
+date. The gap is the **observation**, not the mechanism.
+
+**What changes at beta+:** the cell runs in an owner-present window against a served guest, and this
+entry is **deleted**, not softened, when it does.
+
+---
+
 ## Installing and upgrading
 
 ### An executor setting you put in the config file disappears the next time the installer re-runs
@@ -871,6 +896,33 @@ preserved. The row **is** closed — 2026-10-13, `status/merged` on the label fa
 `glab api` at this tip — and this entry stays for one reason only: a build cut before that merge
 still demands the ceremony, so a partner on an older install is still in scope. Nothing on this
 page claims the served-core recovery proof was run; that ask belongs to the tracker, not here.
+
+---
+
+### Beta publishes no sizing table: the concurrency default is 1, and the load curve that would justify any higher number has not been run
+
+Status: known limitation in beta · Target: not scheduled — the bench needs an owner-present window ·
+Tracked as: the workspace carrier `features/RF-5-capacity-benchmark.md` (`class: REFACTOR — owner-present
+bench`), whose publishable sizing table was declared out of beta scope by the owner on 2026-10-14.
+
+**What the limitation is:** `max_concurrent_commands` ships at **1** — one relayed command at a time
+per executor — and the shipped field text says so itself: any value above 1 requires the RF-3
+acceptance cells (cross-command leak, pool-before-listener) to have passed on the bench VM. Because
+the load curve at caps 2/4/8 has never been run on a shipping
+tip, there is no honest beta answer to "how many executors, how many guests, how many commands at
+once." This entry is the disclosure that the number does not exist, and no document in this release
+supplies one.
+
+**What is NOT claimed here:** not that a higher cap is safe to set — the field refuses it, and that
+refusal is the shipped posture; **no capacity figure of any kind is stated or implied**, because the
+carrier's own standing rule bars a capacity claim and that bar is unchanged; and not that memory is
+the binding ceiling — on today's shape the ceiling is **policy**, since the admission knob rejects
+values above 1 before any footprint limit is reached. What *is* measured is the per-sandbox footprint
+default, and it is not a sizing table.
+
+**What changes at beta+:** the curve runs, the owner rules the default on that data rather than on
+local observation, and the sizing table becomes a document of its own — at which point this entry
+leaves with it.
 
 ---
 
