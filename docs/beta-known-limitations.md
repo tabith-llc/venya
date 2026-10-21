@@ -905,20 +905,25 @@ Status: known limitation in beta · Target: not scheduled — the bench needs an
 Tracked as: the workspace carrier `features/RF-5-capacity-benchmark.md` (`class: REFACTOR — owner-present
 bench`), whose publishable sizing table was declared out of beta scope by the owner on 2026-10-14.
 
-**What the limitation is:** `max_concurrent_commands` ships at **1** — one relayed command at a time
-per executor — and the shipped field text says so itself: any value above 1 requires the RF-3
-acceptance cells (cross-command leak, pool-before-listener) to have passed on the bench VM. Because
-the load curve at caps 2/4/8 has never been run on a shipping
-tip, there is no honest beta answer to "how many executors, how many guests, how many commands at
-once." This entry is the disclosure that the number does not exist, and no document in this release
-supplies one.
+**What the limitation is:** the shipped default is `max_concurrent_commands = 1` — one relayed command
+at a time per executor, which is the sequential posture beta ships. **The mechanism above that value is
+real and is not refused by anything in the product:** the config validator only rejects a cap **below 1**
+(`_at_least_one_slot`), and the shipped field text says the class "deliberately carries no ceiling", so an
+operator can set 2, 4 or 8 today and the executor honors it — the value sizes the admission permits
+themselves, and the reader returns the cap unchanged for any value at or above 1. What beta does **not**
+have is any characterization of that setting: the load curve at caps 2/4/8 has never been run, and the
+field's own text conditions values above 1 on the RF-3 acceptance cells passing on the bench VM — a
+documented condition that **no shipped code enforces**. So the honest statement is: concurrency above 1
+is supported by the shipped mechanism but uncharacterized, and there is no beta answer to "how many
+executors, how many guests, how many commands at once." This entry is the disclosure that the number
+does not exist, and no document in this release supplies one.
 
-**What is NOT claimed here:** not that a higher cap is safe to set — the field refuses it, and that
-refusal is the shipped posture; **no capacity figure of any kind is stated or implied**, because the
-carrier's own standing rule bars a capacity claim and that bar is unchanged; and not that memory is
-the binding ceiling — on today's shape the ceiling is **policy**, since the admission knob rejects
-values above 1 before any footprint limit is reached. What *is* measured is the per-sandbox footprint
-default, and it is not a sizing table.
+**What is NOT claimed here:** **no capacity figure of any kind is stated, implied, or rounded to a
+rule of thumb** — the carrier's standing rule bars a capacity claim, and that bar is unchanged; not that a
+high cap is safe, and not that it is unsafe either, because nothing has been measured to support either
+word; and not that memory is the binding ceiling on a shipping build — today the binding limit is the
+default plus the absence of data, since the admission knob enforces no upper bound at all. What *is*
+measured is the per-sandbox footprint default, and it is not a sizing table.
 
 **What changes at beta+:** the curve runs, the owner rules the default on that data rather than on
 local observation, and the sizing table becomes a document of its own — at which point this entry
