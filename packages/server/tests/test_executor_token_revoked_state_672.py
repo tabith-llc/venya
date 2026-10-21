@@ -295,10 +295,19 @@ def test_user_plane_revoke_still_writes_revoked_in_the_db(tmp_path):
     """The other half of the paired negative, run for real: breaking the user plane is not how this row passes."""
     from core.iam.enrollment_manager import EnrollmentManager
     from core.iam.models import Base, EnrollmentToken, User
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, event
     from sqlalchemy.orm import sessionmaker
 
     engine = create_engine(f"sqlite:///{tmp_path / 'mint672.db'}")
+
+    # #634: a sqlite engine without this listener declares every FK and enforces none, and the
+    # core interlock reddens any new blind engine file. House shape is test_secret_delete_fk.py.
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
     Base.metadata.create_all(engine)
     with sessionmaker(bind=engine)() as s:
         s.add(User(user_id="u672", status="pending_enrollment"))
