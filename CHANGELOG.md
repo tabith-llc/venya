@@ -154,9 +154,9 @@ Notable changes to Venya will be documented in this file.
   made to do nothing, so the guard is proven to bite. Nothing an operator types changed in
   these three.
 
-## [0.1.0beta1] - Unreleased
+## [0.1.0beta1] - 2026-10-21
 
-> Dated at the cut — the release act replaces "Unreleased" with the actual ship date in the same commit that creates the tag.
+> Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
 
 - **The pre-beta alpha line is withdrawn by owner order (2026-10-18).** The
   `v0.1.0alpha*` and `v0.1.0-alpha.*` releases are retired: new installs and upgrade
