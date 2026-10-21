@@ -58,9 +58,15 @@ _spec.loader.exec_module(gen)
 
 #: The sha the coordinates were last RE-PINNED by the generator, or ``None`` when they never have
 #: been. Set by running the generator at the cut commit (`--write`) and filling this in from ITS
-#: OWN stdout, in the same changeset. None is the honest face today: the numbers on the page predate
-#: this tool, so the strict cell below reports them unverified instead of pretending otherwise.
-PINNED_AT: str | None = None
+#: OWN stdout, in the same changeset. It is no longer ``None``: the generator ran at `2b90902`
+#: (`17fc21d`, 105 cites re-pinned, manifest 96 -> 93 keys) and `--check` reads rc 0 / `would
+#: change: False` at the face named below, so the coordinates are exact there BY VERIFICATION. The
+#: value names that face rather than the one the generator ran at, because the strict cell diffs
+#: `PINNED_AT..HEAD` over `CITED_ROOTS` and the merge worth catching is the one after this point:
+#: a cited symbol that moves from here forward reddens the suite instead of publishing a stale line.
+PINNED_AT: str | None = (
+    "f07066c9a32a5868331f9e9c052e95e2fc9e32cf"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
+)
 
 #: Files whose churn invalidates the pins — the tree the cites point into.
 CITED_ROOTS = ("packages/", "install-venya-core.sh", "install-venya-executor.sh", "venya-common.sh")
