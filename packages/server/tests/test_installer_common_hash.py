@@ -281,8 +281,8 @@ def test_serve_time_embed_lands_exactly_once_with_guard_intact() -> None:
 # --- because `RELEASES.md` §5 publishes those bytes verbatim. The pre-#690    ---
 # --- manifest never staged the sidecar, so all three installs hit the wall.   ---
 
-#: The one format the tool emits — see create-tarball-and-serve.sh:345 (colorado
-#: dust/venya-installer.git master). NOT a bare hash: the sibling tarball sidecars
+#: The one format the tool emits — see create-tarball-and-serve.sh:345 (the private
+#: git remote, dust/venya-installer.git master). NOT a bare hash: the sibling tarball sidecars
 #: and this one are all `<hash>  <name>`, and the installer reads `awk '{print $1}'`.
 PUBLISHED_SIDECAR_NAME = "venya-common.sh"
 
