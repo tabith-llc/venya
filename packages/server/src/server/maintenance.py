@@ -149,16 +149,21 @@ def cleanup_rate_limit_counters(db: Session, *, hours: int = 1) -> int:
     return result.rowcount
 
 
-def run_maintenance(db: Session, config, ca_manager) -> None:
+def run_maintenance(db: Session, config) -> None:
     """Run all cleanup passes against ``db``.
 
     Args:
         db: The DB session (caller owns close/rollback).
         config: The ``ServerConfig`` (or ``None``). Missing fields fall back to
             the same defaults the inline loop used (900 / 14400 / 60).
-        ca_manager: The ``CAManager`` (or ``None`` in unit contexts) — REQUIRED
-            positional so a forgotten wiring fails loudly (TypeError) instead
-            of silently skipping the revocation purge (user ruling 2026-09-21).
+
+    There is NO revocation-purge pass here any more, and no ``ca_manager`` parameter to
+    carry one (#685, owner ruling 2026-10-20): ``ExecutorCertRevocation`` is exempt from
+    time-based purge, so a row that names a revoked executor credential stays in the
+    membership population for as long as the credential itself would have been valid —
+    and longer. The pass and the parameter were removed TOGETHER rather than left in
+    place calling nothing, because a required positional whose only documented purpose
+    was the purge is the silent no-op the 2026-09-21 ruling was written to prevent.
     """
     session_timeout = getattr(getattr(config, "session", None), "session_timeout", 900)
     max_session_duration = getattr(getattr(config, "session", None), "max_session_duration", 14400)
@@ -201,23 +206,20 @@ def run_maintenance(db: Session, config, ca_manager) -> None:
         db.rollback()
         logger.exception("Rate limit cleanup failed")
 
-    # Revocation-table purge — RELOCATED from the two public CRL GETs (ticket
-    # sec-sweep-low-informational #23b): unauthenticated write-on-read ran at
-    # fleet_size x 2/min; the table stays bounded on this 5-minute schedule
-    # instead. BOUNDARY (interactive ruling on the revocation rework, confirmed
-    # against ca.py purge_expired_revocations): SERIAL-level rows only
-    # (ExecutorCertRevocation kill-history, retention-bounded) — identity-level
-    # revocation (Executor.revoked_at) is TERMINAL and is never touched by the
-    # purge; the relocation does not widen purge semantics.
-    if ca_manager is not None:
-        try:
-            from . import metrics
-
-            retention_days = getattr(getattr(config, "crl", None), "crl_retention_days", 90)
-            purged = ca_manager.purge_expired_revocations(db, retention_days)
-            metrics.CA_REVOCATIONS_PURGED_TOTAL.inc()
-            if purged:
-                logger.info("Revocation purge: deleted %d expired serial-level revocations", purged)
-        except Exception:
-            db.rollback()
-            logger.exception("Revocation purge failed")
+    # #685 (owner ruling 2026-10-20) — the pass that used to sit here is gone.
+    # It called CAManager.purge_expired_revocations, which DELETEd
+    # ExecutorCertRevocation rows older than `crl.crl_retention_days` (default 90),
+    # relocated off the two public CRL GETs by ticket sec-sweep-low-informational #23b.
+    # That table is the membership population for credential validity, so truth about a
+    # revoked credential was being aged out on a timer: a purge-dropped row stops
+    # answering in revocation.py's serial lookup and stops being listed in the CRL, and
+    # the revoked executor keeps dialing. Exempt now, permanently — `ExecutorCert` rows
+    # were never purged either, so the two tables agree.
+    # The bound that keeps a REVERT from reintroducing the hazard lives with the knob
+    # itself (`config.CRLConfig._retention_covers_revoked_population_lifetime`), and it refuses a
+    # window shorter than the longest leaf-certificate lifetime whose revocations live in the two
+    # revocation tables — max(EXECUTOR_VALIDITY_DAYS 30, ADMIN_CERT_VALIDITY_DAYS 90) = 90 — so no
+    # config value can ever again name a purge window that would drop a row for a still-valid
+    # credential, on either plane, wired or not.
+    # The admin plane is untouched: `AdminCAManager.purge_expired_revocations` still
+    # exists and is still NOT wired into this loop, exactly as it was before this leg.

@@ -138,7 +138,12 @@ CA_REVOCATIONS_PURGED_TOTAL = Counter(
     "Total expired revocation records purged",
     [],
 )
-
+# #685 (owner ruling 2026-10-20): the series is declared and no longer incremented — the
+# maintenance-loop pass that fed it was removed when ExecutorCertRevocation became exempt
+# from time-based purge. It stays shipped on purpose: an operator who sees this counter
+# above zero after a revert is looking at the exact hazard #685 closed, and a family that
+# vanishes from the exposition is a scrape-side change nobody ruled. See
+# `server/maintenance.py::run_maintenance` for the exemption text.
 CRL_TRUNCATED_TOTAL = Counter(
     "venya_crl_truncated_total",
     "CRL responses served while revocation history exceeds the entry ceiling (refs #337)",

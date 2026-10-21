@@ -1309,8 +1309,10 @@ async def get_revocation_list(
     """
     # READ-ONLY (ticket sec-sweep-low-informational #23b): this public GET
     # used to purge expired revocations on every poll (~30s x fleet) — an
-    # unauthenticated write-on-read. The purge now runs as a maintenance-loop
-    # pass (maintenance.run_maintenance, 5-minute schedule).
+    # unauthenticated write-on-read. The purge moved to a maintenance-loop pass
+    # and has since been REMOVED outright (#685, owner ruling 2026-10-20):
+    # ExecutorCertRevocation is exempt from time-based purge, so neither this
+    # route nor the maintenance loop deletes a revocation row any more.
 
     # The one place the poll decides whether it has an answer at all. Raises
     # RevocationSnapshotUnavailable for a missing/stale snapshot; the refusal detail is
@@ -1360,7 +1362,9 @@ async def get_crl(
 
     Public endpoint — no authentication required. READ-ONLY: the expired-
     revocation purge moved to the maintenance loop (ticket
-    sec-sweep-low-informational #23b — public GETs must not write).
+    sec-sweep-low-informational #23b — public GETs must not write) and the
+    maintenance pass itself is gone (#685: `ExecutorCertRevocation` is exempt
+    from time-based purge), so this GET deletes nothing.
     Supports conditional GET via ETag for caching.
     """
     from core.iam.models import ExecutorCertRevocation

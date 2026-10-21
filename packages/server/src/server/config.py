@@ -138,7 +138,21 @@ class CRLConfig(BaseModel):
         default=90,
         ge=1,
         le=365,
-        description="Days to keep revocation records before purge",
+        description=(
+            "Days to keep revocation records before purge. On the EXECUTOR plane this window "
+            "is no longer consumed by any purge: ExecutorCertRevocation is exempt from "
+            "time-based purge (refs #685, owner ruling 2026-10-20), so the value is bound by "
+            "the validator below and checked at startup rather than driving a DELETE. "
+            "Do not read that as license to set it low: the validator refuses any value below "
+            "the longest leaf-certificate lifetime whose revocations live in the two "
+            "revocation tables — max(EXECUTOR_VALIDITY_DAYS=30, ADMIN_CERT_VALIDITY_DAYS=90) = "
+            "90 — so no config value can age out a row while the credential it names could "
+            "still be valid, even if the exemption is ever reverted and even on the admin "
+            "path whose purge is not wired today. NOTE: the field floor `ge=1` is no longer a "
+            "lawfully reachable value — 1 through 89 are refused at startup by this validator; "
+            "the bound is kept as a type guard, not as a usable range (refs #685). Env "
+            "override: VENYA_CRL__CRL_RETENTION_DAYS."
+        ),
     )
     crl_url: str | None = Field(
         default=None,
@@ -181,6 +195,61 @@ class CRLConfig(BaseModel):
             "override: VENYA_CRL__REVOCATION_READ_SCAN_TIMEOUT_MS. (refs #654, #656)"
         ),
     )
+
+    @model_validator(mode="after")
+    def _retention_covers_revoked_population_lifetime(self) -> CRLConfig:
+        """Startup check: a retention window can never be shorter than the credential it guards.
+
+        The shipped idiom for a bound a single field cannot express is a ``model_validator`` that
+        raises — same shape as ``SessionConfig._session_timeout_within_max``,
+        ``_scan_deadline_above_lock_deadline`` below, and
+        ``revocation_snapshot.validate_snapshot_windows`` on the module-constant side. The pair
+        here is a config field against CA-plane constants, so it is checked when the core LOADS
+        its config: a value that violates it stops the process, it does not boot and then misbehave
+        on a 5-minute schedule.
+
+        Why the anchor is the MAXIMUM leaf lifetime across both revocation populations, not just
+        the wired one (lead ruling, leg 286 / F2, on the owner's own clause "even if the exemption
+        is ever reverted"): a path getting wired later IS that future change, and a guard that
+        validates only today's wired call site is dead weight the moment ``AdminCAManager`` gains a
+        caller — with nobody left to remember to add it. So:
+
+            EXECUTOR_VALIDITY_DAYS (30, executor_cert_revocations — the table #685 named)
+            ADMIN_CERT_VALIDITY_DAYS (90, admin_cert_revocations — present, unwired, unchanged)
+            -> anchor = max(30, 90) = 90
+
+        ``CA_VALIDITY_DAYS`` (3650) does NOT enter the anchor: that is the ISSUER lifetime, and no
+        code path writes a CA serial into either revocation table. Relay credentials do not enter
+        it either — ``revocation_snapshot.relay_revocation_populations`` reads
+        ``CoreRelayCredential.revoked_at`` off the registry row, not off a revocation table.
+
+        **STRICT ``>=``, NOT ``>`` — this is the load-bearing character.** The shipped default
+        (90) equals the admin anchor (90), so a strict-greater comparison would refuse the
+        DEFAULT config and stop every core on its next restart: enforcement would become an
+        outage. ``test_crl_config_max_boundary`` plus
+        ``test_shipped_default_retention_sits_on_the_anchor_and_loads`` pin both halves.
+
+        The import is deferred on purpose: ``ca.py`` imports ``config.py`` at module scope, so a
+        module-scope import here would be a real cycle. The constants are read at validation time,
+        which is after both modules are loaded.
+        """
+        from .ca import ADMIN_CERT_VALIDITY_DAYS, EXECUTOR_VALIDITY_DAYS
+
+        min_retention_days = max(EXECUTOR_VALIDITY_DAYS, ADMIN_CERT_VALIDITY_DAYS)
+        if self.crl_retention_days < min_retention_days:
+            raise ValueError(
+                f"crl.crl_retention_days ({self.crl_retention_days} days) must stay at or above "
+                f"{min_retention_days} days — max(EXECUTOR_VALIDITY_DAYS "
+                f"({EXECUTOR_VALIDITY_DAYS}), ADMIN_CERT_VALIDITY_DAYS "
+                f"({ADMIN_CERT_VALIDITY_DAYS})), the longest leaf-certificate lifetime whose "
+                "revocations live in the revocation tables: a purge window shorter than the "
+                "certificate lifetime it follows can DELETE a revocation row while the credential "
+                "it names is still inside its own validity period, which answers 'not revoked' "
+                "about a revoked executor. The executor table is exempt from time-based purge "
+                "(refs #685) and this bound is what keeps a revert — or a newly wired admin path — "
+                "from reopening that door (refs #685)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _scan_deadline_above_lock_deadline(self) -> CRLConfig:

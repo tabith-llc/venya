@@ -96,22 +96,107 @@ def test_crl_config_defaults():
 
 
 def test_crl_config_custom():
-    """CRLConfig should accept custom values."""
-    config = CRLConfig(crl_retention_days=30, crl_url="https://crl.example.com/crl")
-    assert config.crl_retention_days == 30
+    """RE-PAIRED for #685/F2 (was: custom `crl_retention_days=30`).
+
+    30 is no longer a constructible value: the guard anchor is
+    `max(EXECUTOR_VALIDITY_DAYS, ADMIN_CERT_VALIDITY_DAYS)` = 90, so the old "custom value" of 30
+    is now one of the refused low values. The cell keeps its shape — a custom window plus a custom
+    CDP URL — at a value that is lawfully settable.
+    """
+    config = CRLConfig(crl_retention_days=120, crl_url="https://crl.example.com/crl")
+    assert config.crl_retention_days == 120
     assert config.crl_url == "https://crl.example.com/crl"
 
 
 def test_crl_config_min_boundary():
-    """crl_retention_days should accept minimum value of 1."""
-    config = CRLConfig(crl_retention_days=1)
-    assert config.crl_retention_days == 1
+    """RE-PAIRED for #685 (was: "crl_retention_days should accept minimum value of 1").
+
+    The old assertion pinned the hazard this ticket closes. ``ge=1`` is a TYPE bound only: a
+    one-day window over populations whose credentials live 30 and 90 days would DELETE the
+    revocation row of a credential still inside its own ``not_after``, which answers "not
+    revoked" about a revoked executor. The Field floor is NOT weakened — what changed is that a
+    startup validator refuses the low half of the range
+    (``config.CRLConfig._retention_covers_revoked_population_lifetime``), so the value that used
+    to be "the minimum" cannot be loaded at all. This cell is the guard's paired negative.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="must stay at or above"):
+        CRLConfig(crl_retention_days=1)
 
 
 def test_crl_config_max_boundary():
     """crl_retention_days should accept maximum value of 365."""
     config = CRLConfig(crl_retention_days=365)
     assert config.crl_retention_days == 365
+
+
+def test_retention_guard_anchor_is_the_longest_leaf_lifetime_across_both_tables():
+    """The guard binds the MAXIMUM leaf-certificate lifetime whose revocations live in the two
+    revocation tables — max(30, 90) = 90 — not the CA's 3650-day ISSUER lifetime and not the
+    365-day relay credential, which lives on a registry row, not in a revocation table (#685,
+    lead ruling on finding F2). Constants are read off their declaration, so a change to either
+    number trips this cell rather than a remembered ratio.
+    """
+    from server.ca import ADMIN_CERT_VALIDITY_DAYS, CA_VALIDITY_DAYS, EXECUTOR_VALIDITY_DAYS
+
+    assert EXECUTOR_VALIDITY_DAYS == 30
+    assert ADMIN_CERT_VALIDITY_DAYS == 90
+    anchor = max(EXECUTOR_VALIDITY_DAYS, ADMIN_CERT_VALIDITY_DAYS)
+    assert anchor == 90
+    # The issuer lifetime is NOT in the anchor, and the cell says so out loud: folding
+    # CA_VALIDITY_DAYS in would make every legal config unbootable, because the ceiling is 365
+    # and the CA lives 3650 days. The ceiling itself is asserted BEHAVIOURALLY — the `le`/`ge`
+    # pair is unchanged by this leg, and 366 still refuses while 365 still loads.
+    assert CA_VALIDITY_DAYS > anchor
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        CRLConfig(crl_retention_days=366)  # the `le=365` ceiling was NOT moved for this guard
+    assert CRLConfig(crl_retention_days=365).crl_retention_days == 365
+
+    # Boundary, both sides of the line: at the anchor it loads, one day under it does not.
+    assert CRLConfig(crl_retention_days=anchor).crl_retention_days == anchor
+    with pytest.raises(ValidationError):
+        CRLConfig(crl_retention_days=anchor - 1)
+
+
+def test_retention_guard_refuses_at_config_load_before_anything_starts():
+    """Raise-before-start, not raise-on-first-purge: the check rides config LOAD, so a bad
+    window never reaches a running core (#685)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="ADMIN_CERT_VALIDITY_DAYS"):
+        ServerConfig(crl={"crl_retention_days": 7}, recovery_code_pepper="test-pepper")
+    # And the admin half of the anchor is really what refuses 30–89 — the executor lifetime alone
+    # would have let it through, which is exactly finding F2.
+    with pytest.raises(ValidationError, match=r"max\(EXECUTOR_VALIDITY_DAYS"):
+        ServerConfig(crl={"crl_retention_days": 30}, recovery_code_pepper="test-pepper")
+
+
+def test_shipped_default_retention_sits_on_the_anchor_and_loads():
+    """THE BOUNDARY CELL the lead named, and the one character that decides enforcement versus
+    an outage (#685 / F2).
+
+    The shipped default is 90 and `ADMIN_CERT_VALIDITY_DAYS` is 90, so the default sits EXACTLY on
+    the anchor. The guard therefore has to be strict ``>=`` — i.e. refuse only BELOW it. A `>`
+    comparison would refuse the DEFAULT config, and every core on the network would fail to boot
+    on its next restart with nobody having set anything. This cell pins the three facts that make
+    that impossible: the default equals the anchor, the default loads, and a bare ServerConfig
+    loads.
+    """
+    from server.ca import ADMIN_CERT_VALIDITY_DAYS, EXECUTOR_VALIDITY_DAYS
+
+    anchor = max(EXECUTOR_VALIDITY_DAYS, ADMIN_CERT_VALIDITY_DAYS)
+    default = CRLConfig.model_fields["crl_retention_days"].default
+    assert default == anchor, (
+        f"the shipped default ({default}) no longer sits on the guard anchor ({anchor}); a "
+        "strict `>` comparison here would brick every core on restart"
+    )
+    assert CRLConfig().crl_retention_days == 90
+    assert CRLConfig(crl_retention_days=90).crl_retention_days == 90
+    assert ServerConfig(recovery_code_pepper="test-pepper").crl.crl_retention_days == 90
 
 
 # ---------------------------------------------------------------------------
@@ -216,48 +301,59 @@ def test_generate_crl_max_entries(ca_manager):
 
 
 # ---------------------------------------------------------------------------
-# Purge tests
+# Purge tests — RE-PAIRED for #685 (owner ruling 2026-10-20)
+#
+# Both cells used to PIN THE PURGE ("should delete old records" / "should return 0 when no
+# records are old enough"). The behavior they asserted IS the defect. Neither `def test_` is
+# deleted: each is re-paired to the new guarantee, the house precedent being #685's own
+# test_serial_form_crls_without_identity.
 # ---------------------------------------------------------------------------
 
 
 def test_purge_expired_revocations(ca_manager):
-    """purge_expired_revocations should delete old records."""
+    """RE-PAIRED (was: "purge_expired_revocations should delete old records").
+
+    The time-based purge path is GONE from the executor CA manager rather than left in place
+    calling nothing, so no caller can age a revoked serial out on a timer — and a row far
+    older than the old 90-day window is still listed in the CRL, because this table is the
+    population, not a cache of it.
+    """
+    assert not hasattr(CAManager, "purge_expired_revocations"), (
+        "ExecutorCertRevocation is exempt from time-based purge (#685): the executor CA "
+        "manager must not expose a purge path at all"
+    )
+    assert not hasattr(ca_manager, "purge_expired_revocations")
+
     now = datetime.now(UTC)
-
-    mock_old = MagicMock()
-    mock_old.revoked_at = now - timedelta(days=100)
-    mock_new = MagicMock()
-    mock_new.revoked_at = now - timedelta(days=10)
-
-    mock_query = MagicMock()
-    mock_query.filter.return_value.delete.return_value = 1
-    mock_query.filter.return_value.all.return_value = [mock_old, mock_new]
-
-    mock_session = MagicMock()
-    mock_session.query.return_value.filter.return_value.delete.return_value = 1
-    mock_session.query.return_value.filter.return_value.all.return_value = [mock_old, mock_new]
-    mock_session.commit.return_value = None
-
-    deleted = ca_manager.purge_expired_revocations(mock_session, retention_days=90)
-
-    assert deleted == 1
-    mock_session.commit.assert_called_once()
+    ancient = MockRevocation(serial_number="0000000000000a01", revoked_at=now - timedelta(days=400))
+    crl_der = ca_manager.generate_crl(MagicMock(), revocations=[ancient])
+    crl = x509.load_der_x509_crl(crl_der)
+    assert [c.serial_number for c in crl] == [0x0A01]
 
 
 def test_purge_expired_revocations_nothing_to_delete(ca_manager):
-    """purge_expired_revocations should return 0 when no records are old enough."""
-    now = datetime.now(UTC)
+    """RE-PAIRED (was: "purge_expired_revocations should return 0 when no records are old
+    enough").
 
-    mock_new = MagicMock()
-    mock_new.revoked_at = now - timedelta(days=10)
+    This is now the SCOPE half of the pair: the exemption covers the one table the owner named.
+    `AdminCAManager.purge_expired_revocations` still EXISTS (and is still unwired into the
+    maintenance loop) — #685 did not generalise to the admin plane. Pinning the asymmetry is
+    what stops a later seat from reading "revocations are never purged" as a statement about
+    the whole CA surface, and from quietly widening behavior nobody ruled.
+    """
+    from server.ca import AdminCAManager
 
-    mock_session = MagicMock()
-    mock_session.query.return_value.filter.return_value.delete.return_value = 0
-    mock_session.commit.return_value = None
+    assert not hasattr(CAManager, "purge_expired_revocations")
+    assert hasattr(
+        AdminCAManager, "purge_expired_revocations"
+    ), "the admin twin is out of scope for #685 — it must stay exactly as it shipped"
 
-    deleted = ca_manager.purge_expired_revocations(mock_session, retention_days=90)
+    # Paired with the admin path's own bound: the admin credential lifetime (90 days) is
+    # LONGER than the executor one the guard uses, which is finding F2 in the leg report —
+    # recorded here so a revert of the exemption cannot silently under-protect that plane.
+    from server.ca import ADMIN_CERT_VALIDITY_DAYS, EXECUTOR_VALIDITY_DAYS
 
-    assert deleted == 0
+    assert ADMIN_CERT_VALIDITY_DAYS > EXECUTOR_VALIDITY_DAYS
 
 
 # ---------------------------------------------------------------------------
