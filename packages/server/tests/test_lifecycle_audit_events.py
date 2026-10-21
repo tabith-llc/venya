@@ -1582,7 +1582,15 @@ class TestRevocationLifecycle:
     def test_executor_serial_duplicate_emits_noop_row(self):
         from core.iam.models import ExecutorCertRevocation
 
-        db = _keyed_db(MagicMock(), {ExecutorCertRevocation: SimpleNamespace(serial_number="ab12")})
+        # #687: the duplicate arm now READS the stored owner off this row, so the double has to
+        # carry the column a real `ExecutorCertRevocation` always has (nullable, but present). This
+        # is a TABLE ADDITION only — the assertion below is untouched, and it still proves the same
+        # thing it always did. The value is the SAME executor the path names, which is exactly the
+        # correctly-paired repeat: the payload is byte-for-byte what this cell asserted before the
+        # fix, so this row is also the negative-2 byte-identity proof on the shipped-double side.
+        db = _keyed_db(
+            MagicMock(), {ExecutorCertRevocation: SimpleNamespace(serial_number="ab12", executor_id="exec-1")}
+        )
         client = TestClient(_admin_app(db), raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/exec-1/revoke", json={"serial": "ab12"})
         assert resp.status_code == 200

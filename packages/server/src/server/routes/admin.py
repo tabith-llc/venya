@@ -293,6 +293,12 @@ class AdminRevokeExecutorResponse(BaseModel):
     revoked: bool
     executor_id: str
     serial_number: str | None = None
+    # #687, serial-form duplicate only: when the path executor_id disagrees with the owner the
+    # revocation row stored, `executor_id` names the STORED owner and these two carry the attempt.
+    # Both default to None and the route serializes with response_model_exclude_none, so a
+    # correctly-paired repeat answers with exactly the three keys it always sent.
+    requested_executor_id: str | None = None
+    executor_id_mismatch: bool | None = None
 
 
 class AdminRemoveExecutorResponse(BaseModel):
@@ -1427,6 +1433,10 @@ def _revoke_record_serial(db: Session, executor_id: str, serial_number: str, rev
 @router.post(
     "/admin/executors/{executor_id}/revoke",
     response_model=AdminRevokeExecutorResponse,
+    # #687: keeps the mismatch pair out of a correctly-paired response (see the model above).
+    # Every shipped return on this route passes serial_number, and that column is NOT NULL, so
+    # nothing that answers today loses a key to this flag.
+    response_model_exclude_none=True,
     status_code=status.HTTP_200_OK,
 )
 async def admin_revoke_executor(
@@ -1448,6 +1458,11 @@ async def admin_revoke_executor(
       predecessor serial whose record pointer has moved on). Note: a serial
       form on the CURRENT record serial also refuses dial (the shared
       revocation state checks the record serial when none is presented).
+
+    A DUPLICATE serial-form call is attributed to the owner the revocation ROW names, not to the
+    executor_id in the path it was sent to (#687): that arm answers before the population gate
+    below, so its path value is unverified, and audit_events is append-only. A caller whose path
+    value disagrees is still recorded — in `requested_executor_id`, flagged.
     """
     from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation
 
@@ -1477,14 +1492,42 @@ async def admin_revoke_executor(
         if existing is not None:
             # Q3 (#301): the ATTEMPT is the record — the duplicate still
             # emits, with the no-op visible in fields.
-            audit_lifecycle(
-                db,
-                EXECUTOR_CERT_REVOKED,
-                admin.get("user_id"),
-                {"executor_id": executor_id, "serial_number": serial_arg, "already_revoked": True},
-            )
+            #
+            # #687: WHAT gets attributed is the row's owner, not the caller's path value. This
+            # arm returns before the population gate below, so `executor_id` here has been checked
+            # against nothing, and audit_events is append-only — an admin could name any executor
+            # in a permanent record. `existing.executor_id` is the value the ORIGINAL, gated
+            # revocation stored (the identity arm through _revoke_record_serial, the serial arm
+            # through its own gate, rotation through routes/executors.py), so it is the recoverable
+            # truth and it is already in hand. A disagreement stays ON the record as
+            # requested_executor_id + the mismatch flag rather than being dropped: the attempt to
+            # mis-attribute is itself evidence. The event and the response carry the same owner, so
+            # the client is not fed the value the log refused to write.
+            #
+            # executor_id is nullable on this table (alembic 002_executor_cert_revocations:31), so a
+            # row with no stored owner has no truth to prefer and the path value stands — with no
+            # mismatch flag, because there is nothing on this side to disagree with. shortcut: a
+            # NULL-owner row stays attributed to the unverified path value; upgrade if the column
+            # is ever made NOT NULL by a backfill migration.
+            owner = existing.executor_id or executor_id
+            fields = {
+                "executor_id": owner,
+                "serial_number": serial_arg,
+                "already_revoked": True,
+            }
+            mismatch = owner != executor_id
+            if mismatch:
+                fields["requested_executor_id"] = executor_id
+                fields["executor_id_mismatch"] = True
+            audit_lifecycle(db, EXECUTOR_CERT_REVOKED, admin.get("user_id"), fields)
             db.commit()
-            return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=serial_arg)
+            return AdminRevokeExecutorResponse(
+                revoked=False,
+                executor_id=owner,
+                serial_number=serial_arg,
+                requested_executor_id=executor_id if mismatch else None,
+                executor_id_mismatch=True if mismatch else None,
+            )
         # #685: consult the credential population BEFORE writing, the way the identity
         # arm already does at the bottom of this route. Until this check the serial arm's
         # only lookup was the idempotency query above, so a serial no certificate holds
