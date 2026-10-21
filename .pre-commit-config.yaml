@@ -59,6 +59,32 @@ repos:
       # (the #627 class). The same rule has a second door: packages/cli/tests/
       # test_httpx2_upper_bound_447.py imports this script, which is what covers `--no-verify`
       # and a fresh clone with no hooks installed (measured: 0 non-sample hooks).
+      # Refs #689/#702, part 3 of the owner's scrub plan. His wording assumed CI
+      # ("CI gates the expanded guard"); measured at 87a743c this repo has NO CI at all
+      # — zero .github/workflows, .gitlab-ci.yml, Jenkins, Azure, Drone, Circle or
+      # Travis files — so the only automated gate that exists is this chain, and that
+      # deviation from his plan is deliberate and stated here rather than smoothed over.
+      # Without this entry the private-identifier rule is a PYTEST CELL, judged only
+      # when a seat voluntarily runs a suite, and a commit reintroducing a dev hostname
+      # passes every hook below. `detect-secrets` (the hook above) does not cover this
+      # class: it hunts secret-shaped strings, and a hostname, a personal local part, a
+      # private subnet or a workspace path are ordinary prose with zero entropy.
+      #
+      # ONE implementation behind both moments: this pre-commit entry (every commit)
+      # and the release recipe's `--stage pre-tag --ref <rev>` (before `git tag`, read
+      # from the REF so a dirty worktree cannot flatter a tag candidate). Stdlib-only,
+      # never invokes `uv`, never writes to the tree — the #627 hook-mutation class.
+      # No `commit-msg`-stage form, unlike the baseline guard: there is nothing here a
+      # trailer could legitimately excuse. A private identifier in shipped text is not
+      # an intentional change to declare, it is the thing the owner ruled must never
+      # ship, so an escape hatch in the message stage would be a hole, not a feature.
+      - id: pre-tag-scrub
+        name: private-identifier scrub guard (#689/#702)
+        entry: python3 scripts/pre_tag_scrub.py --stage pre-commit
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: httpx2-bound-census
         name: httpx2 bound census (workspace-wide, #447)
         entry: python3 scripts/check_httpx2_bound_census.py
