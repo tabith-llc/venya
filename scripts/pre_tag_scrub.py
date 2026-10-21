@@ -268,8 +268,22 @@ def run(stage: str, root: Path, ref: str | None = None, extra: list[str] | None 
     except RuntimeError as exc:
         return 1, f"REFUSED: {exc}\n"
     if extras:
-        items = items + extras
-        target = f"{target} + {len(extras)} supplied file(s)"
+        # Dedupe by repo-relative name: a supplied file that the tree walk ALREADY
+        # reads must not be counted twice. Found by my own hand — I passed the served
+        # bundle's CHANGELOG.md to `--path` while scanning that bundle, and the report
+        # said 38 hits where the tree holds 34. A gate whose number is inflated by its
+        # own invocation is a gate someone learns to distrust, so the duplicate is
+        # dropped and said, never silently summed.
+        seen = {rel for rel, _text in items}
+        fresh = [(rel, text) for rel, text in extras if rel not in seen]
+        already = len(extras) - len(fresh)
+        items = items + fresh
+        if fresh:
+            target = f"{target} + {len(fresh)} supplied file(s)"
+        if already:
+            target = (
+                f"{target} ({already} supplied file(s) were already inside the scanned " "surface and counted once)"
+            )
     return _verdict(items, scan_texts(items), stage, target)
 
 

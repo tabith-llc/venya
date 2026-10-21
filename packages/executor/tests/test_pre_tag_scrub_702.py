@@ -255,6 +255,29 @@ class TestSuppliedFilesAreJudgedToo:
         rc, output = pre_tag_scrub.run("pre-tag", _REPO_ROOT, ref="HEAD", extra=[str(tmp_path / "absent.md")])
         assert rc == 1 and "not a readable file" in output, f"missing --path went quiet: rc={rc} {output[:160]}"
 
+    def test_a_supplied_file_inside_the_tree_is_not_counted_twice(self, tmp_path):
+        """The bug I found in my own tool by using it: scanning the served bundle AND
+        passing its CHANGELOG.md to `--path` reported 38 hits where the tree held 34.
+        An inflated count on a gate is a number people learn to distrust, so the
+        duplicate is dropped AND said — never silently summed, never silently dropped."""
+        root = _big_clean_tree(tmp_path)
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(private_literals.DETECTION_FIXTURES["dev-hostname"] + "\n")
+        once, out_once = pre_tag_scrub.run("scan", root)
+        twice, out_twice = pre_tag_scrub.run("scan", root, extra=[str(changelog)])
+        assert once == 1 and twice == 1, (out_once, out_twice)
+        import re as _re
+
+        def _count(text: str) -> int:
+            m = _re.search(r"ERROR: (\d+) private-identifier hit\(s\)", text)
+            assert m, f"no count line to read in: {text[:160]!r}"
+            return int(m.group(1))
+
+        assert (
+            _count(out_once) == _count(out_twice) == 1
+        ), f"the same file counted twice: {_count(out_once)} vs {_count(out_twice)}"
+        assert "counted once" in out_twice, f"the dedupe was silent, which is its own defect: {out_twice[:200]}"
+
 
 class TestHookIsWiredAndAffordable:
     """A hook nobody installed, or one that costs a minute per commit, is not enforcement."""
