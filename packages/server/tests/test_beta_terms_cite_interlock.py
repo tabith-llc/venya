@@ -59,13 +59,16 @@ _spec.loader.exec_module(gen)
 #: The sha the coordinates were last RE-PINNED by the generator, or ``None`` when they never have
 #: been. Set by running the generator at the cut commit (`--write`) and filling this in from ITS
 #: OWN stdout, in the same changeset. It is no longer ``None``: the generator ran at `2b90902`
-#: (`17fc21d`, 105 cites re-pinned, manifest 96 -> 93 keys) and `--check` reads rc 0 / `would
-#: change: False` at the face named below, so the coordinates are exact there BY VERIFICATION. The
-#: value names that face rather than the one the generator ran at, because the strict cell diffs
-#: `PINNED_AT..HEAD` over `CITED_ROOTS` and the merge worth catching is the one after this point:
-#: a cited symbol that moves from here forward reddens the suite instead of publishing a stale line.
+#: (`17fc21d`, 105 cites re-pinned, manifest 96 -> 93 keys), and at the face named below
+#: `--write` itself reports `105 cites already correct …; nothing written` — the coordinates are
+#: exact there BY VERIFICATION, not by inheritance. A commit cannot contain its own sha, so this
+#: value names the settled release face the pin was struck against (the parent of the commit that
+#: sets it) rather than the one the generator first ran at: the strict cell diffs `PINNED_AT..HEAD`
+#: over `CITED_ROOTS`, `packages/` is one of those roots, so this very file counts as moved and the
+#: cell RE-RESOLVES all 105 cites against the live tree and asserts agreement. A merge that moves a
+#: cited symbol from here forward reddens the suite instead of quietly publishing a stale line.
 PINNED_AT: str | None = (
-    "f07066c9a32a5868331f9e9c052e95e2fc9e32cf"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
+    "e135687bd1cccddacdefe0297312641c4d822f4b"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
 )
 
 #: Files whose churn invalidates the pins — the tree the cites point into.
