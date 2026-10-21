@@ -3891,6 +3891,22 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
             json={"serial": serial.casefold()} if serial else None,
         )
         revoked = result.get("revoked", False) if result else False
+        # #687 CLI half: show what the core ASSERTS, not what the operator typed. The route answers a
+        # duplicate serial-form revoke with the owner the revocation row stored, plus
+        # requested_executor_id/executor_id_mismatch when they disagree. Before this the two prints
+        # below echoed the local path variable, so the terminal was the fourth face still reading the
+        # unverified value after the log and the response had been corrected. `asserted` falls back to
+        # the typed value ONLY when the body names no owner at all (an older core), which is exactly
+        # the pre-fix answer, so a paired repeat stays byte-identical on every shipped arm.
+        asserted = (result or {}).get("executor_id") or executor_id
+        # The note is gated on the CORE's own flag, never on the CLI's own arithmetic. An older core can
+        # answer a different owner without setting executor_id_mismatch; printing that string in that
+        # case would attribute a field to the server that the server never sent — the same invention the
+        # ticket is about, arriving from the client side. So: display always follows the core, the flag
+        # is quoted only when the core actually raised it.
+        flagged = bool((result or {}).get("executor_id_mismatch"))
+        # The core's own field name is reused rather than a new CLI coinage: one fact, one vocabulary.
+        claimed = (result or {}).get("requested_executor_id") or executor_id
         # The core answers 200 with revoked=false when the serial it was given is
         # ALREADY revoked (identity form: the executor row already carries
         # revoked_at). Transport success is not semantic success, so the headline
@@ -3901,11 +3917,21 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
                 if revoked
                 else "Certificate serial was already revoked (no change)."
             )
-            print(f"  Executor ID:  {executor_id}")
+            print(f"  Executor ID:  {asserted}")
+            if flagged:
+                # Named on the face rather than left to the log, so an operator at a terminal sees the
+                # disagreement at the moment they make it. Reuses the core's field name verbatim.
+                print(
+                    f"  NOTE:         serial belongs to {asserted}; this call was made as {claimed} "
+                    "(executor_id_mismatch)"
+                )
             print(f"  Serial:       {serial.casefold()}")
         else:
+            # Identity form: the route has no mismatch arm — it resolves the row by this very id, so the
+            # core never sets the flag here and no note can appear. Displaying `asserted` keeps the rule
+            # (show what the core says) without inventing a second face for a fact that cannot occur.
             print("Certificate revoked." if revoked else "Executor identity was already revoked (no change).")
-            print(f"  Executor ID:  {executor_id}")
+            print(f"  Executor ID:  {asserted}")
         if not serial and revoked:
             print("  Identity:     REVOKED (terminal — re-enrollment requires a NEW executor_id)")
         print(f"  Revoked:      {'Yes' if revoked else 'No'}")
