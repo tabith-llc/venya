@@ -346,9 +346,83 @@ def test_pins_match_the_tree_they_claim_at_when_pinned() -> None:
         if not c.symbol or c.path not in files:
             continue
         lines = files[c.path]
-        actual = next((i for i, ln in enumerate(lines, 1) if c.symbol in ln), None)
+        # #684-class resolver defect: this took the FIRST line containing the symbol, while the
+        # generator takes the c.occurrence-th one. Three pin rows declare occurrence >= 2, so the
+        # cell could report MOVED on a page that was right. One resolver now, shared with the two
+        # cells below, so the strict path and the generator cannot answer differently.
+        actual = _resolve_for_test(lines, c.symbol, c.occurrence)
         if actual is not None and actual != c.start:
             bad.append(f"  page:{c.line} {c.token} says {c.start}, symbol {c.symbol!r} is at {actual}")
     assert not bad, f"cited symbols moved since {PINNED_AT} — re-run the generator at the cut commit:\n" + "\n".join(
         bad
     )
+
+
+def _resolve_for_test(lines: list[str], symbol: str, occurrence: int) -> int | None:
+    """The one resolver, shared by the strict cell and its negative halves."""
+    hits = [i for i, ln in enumerate(lines, 1) if symbol in ln]
+    return hits[occurrence - 1] if 0 < occurrence <= len(hits) else None
+
+
+def test_agrees_with_the_generator_resolver_on_every_pinned_symbol() -> None:
+    """The strict cell and the generator must not answer differently for any real pin row.
+
+    This is the drift guard. The defect this leg fixed was two implementations of one rule: the
+    generator took the Nth hit, the cell took the first, and the cell never read ``occurrence``.
+    Runs whether or not ``PINNED_AT`` is set, so the agreement is asserted today, not only at the cut.
+    """
+    files = gen._tracked_files()
+    text = _text()
+    mismatches = []
+    checked = 0
+    for c in gen.parse_cites(text, files):
+        if not c.symbol or c.path not in files or c.kind != "pin":
+            continue
+        mine = _resolve_for_test(files[c.path], c.symbol, c.occurrence)
+        theirs = gen.resolve([c], files)[0][1]
+        checked += 1
+        if mine != theirs:
+            mismatches.append(
+                f"  page:{c.line} {c.token} symbol={c.symbol!r} occ={c.occurrence}: cell={mine} generator={theirs}"
+            )
+    assert checked > 0, "the pin manifest resolved nothing — this cell would be vacuous"
+    assert (
+        not mismatches
+    ), f"cell resolver and generator resolver disagree on {len(mismatches)} pin row(s):\n" + "\n".join(mismatches)
+
+
+def test_occurrence_2_pin_resolves_to_the_second_line_and_first_line_pin_reddens() -> None:
+    """Paired negative for the resolver, on a planted symbol that occurs twice.
+
+    Positive half: a row declaring ``occurrence=2`` pointing at the SECOND line passes.
+    Negative half: the same fixture pointing at the FIRST line is a mismatch, so a pin that ignores
+    ``occurrence`` cannot pass silently.
+    Control: the pre-fix expression is computed here and shown to answer a DIFFERENT line from the
+    generator on this same fixture — that is the wrongness this leg removed, stated in a cell that
+    goes green either way.
+    """
+    lines = [
+        "def unrelated(): pass",
+        "needle_fn = 1",
+        "    return needle_fn",
+    ]
+    containing = [i for i, ln in enumerate(lines, 1) if "needle_fn" in ln]
+    assert containing == [2, 3], "the planted fixture must actually carry two occurrences"
+
+    cite = gen.Cite(path="x/y.py", start=3, end=3, symbol="needle_fn", line=42, occurrence=2)
+    # generator's own answer, and the cell's answer, agree on the second line
+    assert gen.resolve([cite], {"x/y.py": lines})[0][1] == 3
+    assert _resolve_for_test(lines, cite.symbol, cite.occurrence) == 3
+
+    # positive half: a pin claiming line 3 is NOT a move
+    assert _resolve_for_test(lines, cite.symbol, cite.occurrence) == cite.start
+
+    # negative half: the same row claiming the FIRST line is a move, and reddens the strict check
+    wrong = gen.Cite(path="x/y.py", start=2, end=2, symbol="needle_fn", line=42, occurrence=2)
+    assert _resolve_for_test(lines, wrong.symbol, wrong.occurrence) != wrong.start
+
+    # control: the shape this cell had before the fix takes the first hit, and disagrees with the
+    # generator on this fixture. Computed, never asserted as correct.
+    first_match = next((i for i, ln in enumerate(lines, 1) if cite.symbol in ln), None)
+    assert first_match == 2, "the old resolver's answer is what makes this a real paired negative"
+    assert first_match != cite.start
