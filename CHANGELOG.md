@@ -154,7 +154,9 @@ Notable changes to Venya will be documented in this file.
   made to do nothing, so the guard is proven to bite. Nothing an operator types changed in
   these three.
 
-## [0.1.0beta1] - 2026-10-15
+## [0.1.0beta1] - Unreleased
+
+> Dated at the cut — the release act replaces "Unreleased" with the actual ship date in the same commit that creates the tag.
 
 - **The pre-beta alpha line is withdrawn by owner order (2026-10-18).** The
   `v0.1.0alpha*` and `v0.1.0-alpha.*` releases are retired: new installs and upgrade
@@ -488,7 +490,9 @@ Notable changes to Venya will be documented in this file.
   nothing called and the shared-memory prose that outlived them were removed (#471); the deploy
   record refuses a dirty source tree (#16); and the browser-auth router's module docstring now
   states what is mounted instead of what was disabled in August (#312, documentation).
-## [0.1.0alpha17] - 2026-10-13
+## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
+
+> This version was **belayed as a release name** by the owner on 2026-10-15 (`decisions.md` s119: "alpha17 belayed as a release name"), and **no `v0.1.0alpha17` tag exists on any face** — the entry body below is kept as the dated record of work that shipped later under `v0.1.0beta1`. Deliberately not written as `## [0.1.0alpha17]`: the bracket form is what a release claim is matched on, and this is not one.
 
 There is no backwards compatibility during alpha. Three changes in this window are
 things an operator has to act on, so they are named at the top rather than buried in
