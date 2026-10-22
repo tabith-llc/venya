@@ -185,6 +185,24 @@ deny-by-default against `/etc/venya/egress-allowlist.txt` (written empty by
 design at install — fail-closed; seed it via `VENYA_EGRESS_ALLOW` or edit it
 directly; the configured DNS resolver is always permitted); a compromised
 command cannot phone home.
+
+**Where that decision is made, and what the decider can see.** Venya registers
+one per-host allow rule for every entry in the file (`sbx policy allow network
+<host> --sandbox <name>`, `apply_network_policy` in
+`packages/executor/src/executor/strategies/sbx_strategy.py`) and the `sbx`
+proxy denies everything else, so the enforcing component is Docker's, not
+Venya's. It is a layer-7 proxy: to apply a hostname policy to HTTPS it
+terminates the sandbox's TLS and serves a per-hostname leaf minted by its own
+CA, which is pre-installed in the sandbox image's system trust store. Two
+consequences follow from that enforcement point, not from anything Venya does:
+
+- **Payload is denied; the destination name is not.** A tunnel request for a
+  host that is not on the allowlist is established first, and the deny lands
+  one layer later on the inner request — so destination and SNI can leave the
+  sandbox even when the content is blocked.
+- **A certificate check run from inside a sandbox is a check of that proxy, not
+  of the remote endpoint.** A chain the sandbox reports as verified may be the
+  inspection proxy's leaf, issued by the CA the image already trusts.
 The executor service runs under a seccomp profile, `PrivateTmp`, and no
 `CAP_IPC_LOCK` (mlock is confined to the core by design; the pair that pins it is
 `packages/core/tests/test_capability_isolation.py` and

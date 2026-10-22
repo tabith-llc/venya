@@ -139,6 +139,8 @@ The Venya server communicates with executor daemons over mutual TLS. Both sides 
 ### Egress Control
 Commands run inside an sbx microVM with deny-by-default networking. The executor reads an operator-defined allowlist (`/etc/venya/egress-allowlist.txt`) and only permits connections to approved destinations. If a compromised command tries to phone home to an attacker's server, the connection is blocked at the sandbox level. DNS is restricted to the operator's resolver.
 
+**Who enforces it, and what it can see.** Venya registers the per-host allow rules; the denying is done by **Docker's `sbx` proxy**, a layer-7 egress inspector that terminates sandbox HTTPS and presents certificates minted by its own CA, pre-installed in the sandbox image's trust store. So the block is on **content**: a destination that is not allowed is refused on the request, but the tunnel to it is set up first, which means **destination and SNI can leave the sandbox even when the payload is denied**. And because that proxy sits in the middle of every HTTPS session a sandbox opens, **a certificate check run from inside a sandbox tells you about the proxy, not about the server you think you reached.**
+
 ### Complete Audit Trail
 Every command execution is logged:
 - **Who** authorized the session (FIDO2-enrolled user)
@@ -165,7 +167,7 @@ The table below states what the product enforces. For what a beta release does n
 | Sessions are time-limited | 4-hour hard cap, 15-minute idle window, 5-minute access tokens |
 | Executor identity is verified | Mutual TLS with certificate chain validation |
 | Compromised executors are blocked | A revoked credential is refused when the request is served — by the core's relay dial, by the executor's inbound gates, by the daemon's own revocation poll, and by the executor's relay listener at connection-accept time. This is post-handshake enforcement, not connection-layer CRL enforcement (see the note below) |
-| Data exfiltration is prevented | sbx sandbox with deny-by-default egress allowlisting |
+| Data exfiltration is prevented | sbx sandbox with deny-by-default egress allowlisting: Venya registers the per-host allows, Docker's `sbx` layer-7 proxy denies everything else. The proxy terminates sandbox HTTPS with its own CA (pre-installed in the image trust store) to make that decision, so it blocks content — a denied destination can still see a tunnel, and its name and SNI leave the sandbox; a certificate chain verified inside a sandbox is verified against that proxy (see Egress Control) |
 | Every action is traceable | Append-only audit log with user, executor, command, timestamp |
 | Secrets are encrypted at rest | Envelope encryption — per-secret DEK wrapped with AES-256-KW; payload ChaCha20-Poly1305 |
 
