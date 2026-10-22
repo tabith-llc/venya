@@ -296,8 +296,11 @@ that fails, and it fails for three separate reasons:
   re-applies the mode on every run, and a group bit left the machine-plane key
   directory group-writable on every re-run). Do not widen it.
 - **The assignments go inside `env`, not in front of `sudo`.** `sudo`'s `env_reset`
-  does not carry your shell's variables across the privilege change, so
-  `SSL_CERT_FILE=… sudo -u venya venya …` silently arrives with none of them set.
+  does not carry your shell's variables across the privilege change, so an
+  `export`-ed `SSL_CERT_FILE` arrives unset. And putting the assignment after
+  `sudo` (`sudo -u venya SSL_CERT_FILE=… venya …`) depends on a `setenv` grant that
+  the stock sudoers does not give, so on a default install it refuses outright. The
+  `env …` form the installer's banner prints works under both.
 - **`SSL_CERT_FILE` named explicitly.** The CLI picks its trust anchor from
   `SSL_CERT_FILE`, and only then from the `ca.crt` beside the config file in **the
   home directory the command actually runs in** (`api_client.py::_resolve_tls_anchor`,
