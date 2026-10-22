@@ -106,7 +106,7 @@ rediscover them:
 - Full install flow: [installation.md](installation.md)
 - Server configuration: required fields, env-var mapping, validation timing: [deployment-config.md](deployment-config.md)
 - Every CLI command (incl. `venya setup` workstation configuration): [cli-reference.md](cli-reference.md)
-- MCP client wiring (generic + opencode): [installation.md §6](installation.md#6-mcp-client-wiring-llm-operators)
+- MCP client wiring (generic + opencode + pi): [installation.md §6](installation.md#6-mcp-client-wiring-llm-operators)
 - See the whole chain work end-to-end: [alpha-demo.md](alpha-demo.md)
 - Architecture and guarantees: [architecture.md](architecture.md)
 
