@@ -92,6 +92,21 @@ repos:
         pass_filenames: false
         files: "^packages/[^/]+/pyproject\\.toml$"
 
+      # Refs leg 369, owner order 2026-10-22: "we need to re-determine every dependency version
+      # being used and update documentation properly!". `docker-sbx 0.38.0` sat in the shipped
+      # notices page for ten minor versions of drift because nothing compared it to anything. This
+      # entry is that comparison at the only automated moment this repo has (measured at 87a743c:
+      # NO CI — see scripts/pre_tag_scrub.py's own header). Stdlib-only, never invokes `uv`, writes
+      # nothing: a hook that regenerated the page mid-commit would be the #627 mutation class.
+      # The assertion itself is packages/cli/tests/test_dep_version_inventory_369.py — this catches
+      # it early and kindly, that file is what stops `--no-verify`.
+      - id: third-party-notices-inventory
+        name: dependency versions derived, not typed (leg 369)
+        entry: python3 scripts/gen_third_party_notices.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: uv-lock
         name: uv-lock (check)
         entry: uv lock --check
