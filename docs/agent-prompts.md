@@ -6,6 +6,7 @@ below into the instruction file your agent framework reads at every session:
 | Framework | Paste into |
 |---|---|
 | opencode | `AGENTS.md` |
+| pi | `~/.pi/agent/AGENTS.md` (every project) or the project's `AGENTS.md` |
 | Claude Code | `CLAUDE.md` |
 | Cursor | `.cursor/rules` (or `.cursorrules`) |
 | Anything else | the agent's system prompt / instructions field |

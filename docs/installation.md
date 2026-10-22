@@ -594,6 +594,77 @@ don't type `/list_secrets`. On 401/expired: `venya login <user-id>` (key
 touch) and retry — the MCP server reads the refreshed token from the same
 `VENYA_CONFIG` file.
 
+### pi
+
+`pi` is another stdio MCP client. It talks to `venya-mcp` the same way; what
+differs is where its config lives and that the server exposes a small, named
+tool set rather than a large catalogue.
+
+Log in first. The MCP server authenticates with **your user access token** — the
+one `venya login` writes into `config.json` — not with an admin certificate:
+
+```bash
+venya setup <core-host>
+venya login <user-id>
+```
+
+Then register the server in pi's **user-level** config
+(`~/.pi/agent/mcp.json`), which is where credentials belong:
+
+```bash
+pi mcp add venya --exposure direct \
+  --env VENYA_CONFIG="$HOME/.config/venya/config.json" \
+  --env VENYA_CA_CERT="$HOME/.config/venya/ca.crt" \
+  --description "Run commands on Venya executors, list secrets, read the audit trail" \
+  -- venya-mcp
+```
+
+Check it without starting a session. `pi mcp list` connects to every enabled
+server, prints its state and tools, and exits 1 if an entry is invalid or a
+server did not connect:
+
+```bash
+pi mcp list
+```
+
+You should see four tools — `run_command`, `list_executors`, `list_secrets`,
+`get_audit` — registered to pi as `mcp__venya__run_command` and so on. Then
+start `pi` and use them by asking: "list the venya secrets", "run `uptime` on
+exec-3". They are model-invoked, not slash commands. `/mcp` inside a session
+shows each server's state, tool count, and the tail of stderr if it failed to
+start; run `/reload` after adding or changing a server outside the session.
+
+Two pi-specific choices in that command:
+
+- **`--exposure direct`.** pi's default exposure for an MCP server is
+  `codemode`: the tools are registered but not declared to the model, and the
+  model reaches them through its own scripts. Venya's four tools are meant to
+  be called by name, so declare them. You can change exposure later from `/mcp`
+  in a session; `pi mcp list` marks tools whose exposure differs from their
+  server's.
+- **user-level vs project config.** Add `-l` to write this project's
+  `.pi/mcp.json` instead of the user-level file. pi reads the project file only
+  after you grant project trust, and a project entry replaces a user-level
+  entry of the same name. Keep the Venya entry user-level unless every user of
+  the repo should carry its token path.
+
+If the server shows as failed, read which prerequisite it stopped on: the
+startup checks the session token first, then the CA, so it prints exactly one of
+`No Venya session token found. Run the venya CLI …` (log in — the file at
+`VENYA_CONFIG`, default `~/.config/venya/config.json`, is missing) or
+`Venya CA certificate not found. Set the VENYA_CA_CERT environment variable …`
+(the CA file `venya setup` installs beside `config.json` is not being passed).
+There is no way to skip either one: `VENYA_TLS_VERIFY=false` is an alpha debug
+mode that warns and its shipped message says "never use in production".
+`venya-mcp` parses no flags at all — no `--version` — so `pi mcp list` and
+`/mcp` are how you read why a server did not come up; `/mcp` shows the full
+connection error and the tail of stderr from a failed stdio server. On
+401/expired: the server says what to do in its own words — *"Run the `venya` CLI
+(e.g. `venya list`) and approve your security key, then restart the MCP server."*
+The running process holds the token it read at startup, so it does not pick up a
+new login on the next call; in pi, `/mcp reconnect venya` restarts the stdio
+server for you.
+
 ### Next: create a secret and prove the redaction path
 
 With the client wired, run the 5-minute end-to-end demo —
