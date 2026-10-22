@@ -1105,11 +1105,16 @@ class SbxStrategy(InjectionStrategy):
             cmd += [self._sandbox_name, "sh", "-c", command]
 
         try:
+            # stdin=DEVNULL: without it the sbx client inherits the DAEMON's stdin, so a
+            # guest command that waits on stdin (ssh at a prompt, `read`, a pager) holds the
+            # single admission permit for the full SBX_TIMEOUT while every client fuse blows
+            # far earlier. EOF now, fail fast instead. (#695 AC1; the ceiling itself is #696.)
             result = subprocess.run(  # nosec
                 cmd,
                 capture_output=True,
                 timeout=SBX_TIMEOUT,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
         finally:
             if env_file:
