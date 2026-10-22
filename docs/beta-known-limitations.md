@@ -931,6 +931,37 @@ leaves with it.
 
 ---
 
+### `sshpass` with a redirect aimed at a remote `sudo -S` does not deliver the password
+
+Status: known limitation in beta · Target: `#696` (a per-command ceiling plus cancel), which does not
+gate this release · Tracked as: `#695` (open — **this entry is the disclosure that answers it**, and the
+owner ruled it in this form: document the collision, keep the capability, and land `#696` as the real
+protection)
+
+**Who is affected:** anyone storing an `ssh-password` secret and trying to escalate on the far side of
+an `ssh` hop in the same command — the shape that reads naturally, and the shape that does not work.
+
+**What the limitation is:** `sshpass` reads its **own** stdin, and it runs `ssh` on a dedicated terminal
+it owns, so a `< /run/secrets/venya/<id>` redirect feeds `sshpass`, not `ssh`, and the remote `sudo -S`
+prompt is answered by nothing — the command waits instead of failing. **Use `sshpass` for password
+authentication as documented (in **balanced** and **permissive** policy — under **strict** nothing is
+allowed by default, so `sshpass` is refused there too, by the empty allowlist and not by a named
+pattern). For an unattended remote `sudo`, use key authentication with the redirect, so `ssh`'s stdin
+stays free for `sudo -S`.** Password authentication and an unattended remote `sudo` in the same command
+are **not supported** in beta1.
+
+**What is NOT claimed here:** that `sshpass` is refused, disabled or unsupported as a capability — it is
+shipped and it is not in the executor's blocked-pattern list; the refusal under **strict** comes from the
+empty default allowlist, and it is a posture, not a judgement about this verb. And **not** that a
+passphrase-prompt helper is a workaround for this case: that path has no physical capture in beta, so no
+alternative is offered beyond the two above.
+
+**What changes at beta+:** `#696` lands the per-command ceiling and a client-side cancel, so a command
+that waits cannot hold the executor for the full timeout; if a supported shape for password auth plus
+unattended remote `sudo` is ever built, this entry is deleted rather than softened.
+
+---
+
 ## How to read an entry, and how this list is maintained
 
 Each entry gives: what you will hit, whether it is fixed-targeted or open, the issue that

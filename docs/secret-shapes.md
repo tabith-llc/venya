@@ -46,14 +46,14 @@ The blessed taxonomy is `BUILTIN_SHAPES` in
 
 | Shape | Consumption | Example command (path canon only — `{secret_path}` = the injected file `/run/secrets/venya/<secret_id>`) |
 |---|---|---|
-| `ssh-password` | sshpass reads the password file | `sshpass -f {secret_path} ssh -o StrictHostKeyChecking=accept-new bot@web-server-3 uptime` |
+| `ssh-password` | sshpass reads the password file. Available in **balanced** and **permissive** policy; refused under **strict**, and by the empty allowlist (`STRICT_DEFAULT_COMMANDS`), not by a named pattern. Not supported in the same command as a remote `sudo -S` — see [beta-known-limitations.md](beta-known-limitations.md) | `sshpass -f {secret_path} ssh -o StrictHostKeyChecking=accept-new bot@web-server-3 uptime` |
 | `ssh-key` | key material presented to ssh from the file | `ssh -i {secret_path} -o StrictHostKeyChecking=accept-new bot@web-server-3 uptime` (see the operator note in architecture.md: ssh-carried commands must avoid space-bearing argument traps) |
 | `http-netrc` | curl/netrc credential file | `curl -n --netrc-file {secret_path} https://api.example.com/data` |
 | `http-header-file` | header lives INSIDE the file; curl reads the config | `curl -K {secret_path} https://api.example.com/data` — the file carries the `header = …` line |
 | `mysql-defaults` | client option file | `mysql --defaults-file={secret_path} -e "status"` |
 | `ipmi-passfile` | password from file | `ipmitool -H 192.0.2.10 -U admin -f {secret_path} chassis power status` |
 | `askpass` | sudo/git/ssh passphrase prompts answered via the static helper | stored value = the passphrase; at execute time the relay wires `GIT_ASKPASS`/`SSH_ASKPASS` to the helper (`routes/executors.py` askpass branch, `venya_contract.relay.ASKPASS_HELPER_PATH`). The command itself needs no shape-specific syntax. |
-| `sudo-stdin` | sudo's `-S` reads the password from stdin; the session-bound `<` redirect pair is the ruled delivery | `sudo -S < {secret_path} systemctl restart httpd` (the `<` must be its own argument followed exactly by the bound secret path — `executor.py:_redirect_pair`; do NOT add `-p ''` to remote ssh commands, see architecture.md) |
+| `sudo-stdin` | sudo's `-S` reads the password from stdin; the session-bound `<` redirect pair is the ruled delivery. The pair delivers to a **local** `sudo -S`; a `<` redirect carried through `ssh` (with or without `sshpass`) feeds the local stdin, not the remote prompt, so a remote `sudo -S` waits instead of failing — use `ssh-key` for an unattended remote `sudo` | `sudo -S < {secret_path} systemctl restart httpd` (the `<` must be its own argument followed exactly by the bound secret path — `executor.py:_redirect_pair`; do NOT add `-p ''` to remote ssh commands, see architecture.md) |
 | `env:NAME` | value is written into the sandbox env file as `NAME=<value>` before the run (`routes/executors.py` env-shape branch; `RelayEnvVar` contract) | store the key as `env:KUBECONFIG`; then plain `kubectl get pods` works — see the `$` constraint in §5 |
 
 Every shape is mediated through the same per-session tmpfs staging file;
