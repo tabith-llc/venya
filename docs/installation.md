@@ -272,15 +272,83 @@ at the context build. The renewal-side rule is written up once in
 [cert-rotation-runbook.md](cert-rotation-runbook.md) §0; this section points at it
 rather than restating it.
 
-- The **CLI** (installer-banner shape) — note `VENYA_SERVER_URL` is required
-  unless a stored config names the server:
+- The **CLI** — run it as the `venya` service account. This is the shape the core
+  installer's closing banner prints, and every part of it is load-bearing:
 
 ```bash
-SSL_CERT_FILE=/var/lib/venya/ca/ca.crt \
-VENYA_SERVER_URL=https://<core-host> \
-VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
-venya admin executor-enroll <executor-id>
+# ON THE CORE. /opt/venya is the default install directory — use yours if you chose another.
+sudo -u venya env PATH="/opt/venya/.venv/bin:$PATH" \
+  SSL_CERT_FILE=/var/lib/venya/ca/ca.crt \
+  VENYA_SERVER_URL=https://<core-host> \
+  VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt \
+  VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
+  /opt/venya/.venv/bin/venya admin executor-enroll <executor-id>
 ```
+
+Why each piece has to be there — the short form people reach for first is the one
+that fails, and it fails for three separate reasons:
+
+- **`sudo -u venya`.** The admin pair sits in `/etc/venya/admin`, which the core
+  installer creates `install -d -m 0700 -o venya -g venya`, and the CA sits under a
+  `/var/lib/venya/ca` pinned at `700`. **An ordinary login cannot read either
+  directory, so no amount of `chmod`-ing your own copy fixes it — running as the
+  `venya` identity is the recipe.** That mode is deliberate (#610: `install -d`
+  re-applies the mode on every run, and a group bit left the machine-plane key
+  directory group-writable on every re-run). Do not widen it.
+- **The assignments go inside `env`, not in front of `sudo`.** `sudo`'s `env_reset`
+  does not carry your shell's variables across the privilege change, so
+  `SSL_CERT_FILE=… sudo -u venya venya …` silently arrives with none of them set.
+- **`SSL_CERT_FILE` named explicitly.** The CLI picks its trust anchor from
+  `SSL_CERT_FILE`, and only then from the `ca.crt` beside the config file in **the
+  home directory the command actually runs in** (`api_client.py::_resolve_tls_anchor`,
+  which checks `os.environ["SSL_CERT_FILE"]` first and falls back to
+  `config.ca_path`). The CA that §2's `venya setup` wrote sits beside
+  *your* `config.json`; a mint run under a different account does not look there, and
+  it dies before sending a request with `no Venya TLS trust anchor is configured` —
+  naming a `ca.crt` path under some other home. Passing `SSL_CERT_FILE` inside the
+  `env` list is what makes the trust anchor travel with the privilege change.
+
+The banner also prints a one-time shape — install the anchor into an account-owned
+config directory so a later call finds it without `SSL_CERT_FILE`:
+
+```bash
+sudo -u venya /opt/venya/.venv/bin/venya config set-server https://<core-host>
+sudo mkdir -p /home/venya/.config/venya
+sudo cp /var/lib/venya/ca/ca.crt /home/venya/.config/venya/ca.crt
+sudo chown venya:venya /home/venya/.config/venya/ca.crt
+```
+
+**Read the fallback caveat before you rely on it.** The CLI looks for that `ca.crt`
+under *whatever home the command actually runs in*, and a `sudo -u` change does not
+always move `HOME`. The refusal is explicit about where it looked — it prints
+`no SSL_CERT_FILE set and no config-dir CA at <path>` naming the home that was
+actually searched (`api_client.py::_resolve_tls_anchor`). If that path is not the
+directory you wrote to, do not chase permissions: pass `SSL_CERT_FILE` in the `env`
+list, as the block above does. That is why the mint is given with the anchor named
+explicitly.
+
+The bare form — `VENYA_ADMIN_CERT=… VENYA_ADMIN_KEY=… venya admin executor-enroll
+<executor-id>` typed as your own login — is what the product's own error text names
+when an install has no token (`install-venya-executor.sh`: *"Mint one from an admin
+workstation: venya admin executor-enroll <executor-id>"*), and on a headless core it
+is not runnable as written: the pair is unreadable to you, and with no admin pair
+loaded the CLI falls back to an interactive FIDO2 login, which dies on a machine with
+no workstation key.
+
+**Then check the mint produced a token, not just a directory.** With `--output-dir`,
+the command creates that directory **before** it dials the core
+(`commands.py::cmd_admin_executor_enroll`, the #616 ordering), so the directory
+sitting there is not evidence of a token — it also exists when the mint failed. A
+failed mint does print `Enrollment failed:` on stderr and exits non-zero, but a shell
+that swallows the output loses that. Verify the file itself:
+
+```bash
+sudo -u venya test -s /secure/enroll/token && echo "token present"
+sudo -u venya ls -l /secure/enroll/    # token 0600, directory 0700, plus core-server-ca.crt / admin-ca.crt
+```
+
+Without `--output-dir` the token is printed to stdout and written nowhere, so capture
+it from the output instead of looking for a file.
 
 - Or the cert-only API path directly:
 
@@ -298,12 +366,10 @@ install burns is the **wall clock** (apt/Docker/sbx steps run before
 registration). The TTL is server-configurable:
 `executor_enrollment.token_ttl_seconds` (raise it for slow or air-gapped
 installs). If the token expires, re-mint and re-run — the installer re-run is
-fast (idempotent: apt/Docker/sbx steps skip or cache):
-
-```bash
-# re-mint on a core (admin mTLS), then re-run the executor installer with the fresh token
-venya admin executor-enroll <executor-id>          # add --output-dir for offline/air-gapped CA copy
-```
+fast (idempotent: apt/Docker/sbx steps skip or cache). Re-mint with the
+`sudo -u venya env …` command above, then re-run the executor installer with the
+fresh token; add `--output-dir <dir>` to write the token and both CA certs into a
+directory for transfer (the offline/air-gapped shape).
 
 The core
 **requires a token for executor registration by default**
@@ -529,12 +595,18 @@ venya login <user-id>
 
 ## 5. Enroll regular users
 
-Run this on the core with its machine-plane pair (that site-1 shape; see §3 for
-what the CLI can and cannot load):
+Run this on the core with its machine-plane pair, **as `venya`** — the same shape as
+the §3 mint, including the `env` assignments inside `sudo` and an explicit
+`SSL_CERT_FILE` (that site-1 credential pair; see §3 for what the CLI can and cannot
+load):
 
 ```bash
-VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
-venya admin create-user <user-id> --roles user
+sudo -u venya env PATH="/opt/venya/.venv/bin:$PATH" \
+  SSL_CERT_FILE=/var/lib/venya/ca/ca.crt \
+  VENYA_SERVER_URL=https://<core-host> \
+  VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt \
+  VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
+  /opt/venya/.venv/bin/venya admin create-user <user-id> --roles user
 ```
 
 The response carries a 15-minute single-use enrollment token; the user runs
