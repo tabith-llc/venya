@@ -74,6 +74,21 @@ executor's *host* firewall does nothing for sandbox traffic. (Conversely, the ex
 own daemon traffic to the core on 443 *is* host-stack traffic and *is* subject to the
 host firewall.)
 
+**Who does the denying, and what that proxy can see.** The enforcing component is
+Docker's `sbx` egress proxy, not a venya process: venya registers a per-host allow rule
+for each entry in the file (`sbx policy allow network <host> --sandbox <name>`,
+`apply_network_policy` in `packages/executor/src/executor/strategies/sbx_strategy.py`)
+and the `sbx` proxy denies everything else. The proxy is a layer-7 policy engine, so to
+rule on HTTPS it terminates the sandbox's TLS and serves a per-hostname certificate
+minted by its own CA, which is pre-installed in the sandbox image's trust store. Two
+properties of that enforcement point, stated here because they are not properties of
+venya's design: **content is what gets denied** — a tunnel to a destination that is not
+on the allowlist is established before the deny lands on the request inside it, so the
+destination name and SNI can leave the sandbox even when the payload is blocked — and a
+certificate verified from inside a sandbox is verified **against that proxy**, not
+against the endpoint an operator assumes was reached. The deny-by-default guarantee
+above is unchanged by this; what it governs is payload.
+
 **Host firewall on an executor:** **8443/tcp inbound** from the core, **443/tcp outbound**
 to the core (and to Docker Hub for template pulls). Target reachability is configured in
 the sbx egress allowlist, not the host firewall.
