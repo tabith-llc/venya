@@ -187,7 +187,7 @@ class TestColumnIsRetained:
         A fresh SQLite table built by ``create_all`` follows the ORM model (nullable, Python-side
         default), so the nullability claim is read from the migration that ships to real installs
         — not from this fixture's DDL. The model/migration nullability difference itself is a
-        separate row (the clerk-booked nullability-drift item), not adjudicated here.
+        separate row (the nullability-drift item booked by the ticket seat), not adjudicated here.
         """
         migration = (_PACKAGES / "core" / "alembic" / "versions" / "001_initial_schema.py").read_text(encoding="utf-8")
 

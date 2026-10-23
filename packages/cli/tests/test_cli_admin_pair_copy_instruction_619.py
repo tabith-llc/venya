@@ -38,7 +38,7 @@ untested):
   rejected — the refusal names no copy-from-core instruction (the shipped regression);
   rejected — the installer banner still says do-not-copy, so the two surfaces cannot
              drift apart again without a red cell;
-  accepted — the first sentence survives BYTE-STABLE (clerk's filed row makes that the
+  accepted — the first sentence survives BYTE-STABLE (the filing seat's row makes that the
              contract, and operators/scripts grep for it);
   accepted — the refusal routes to the ceremony, naming only subcommands that exist at
              this tip (`venya setup`, `venya login`, `admin cert renew` — verified at
@@ -60,7 +60,7 @@ from venya_cli.api_client import APIClient, APIClientError
 # generated output and is never the thing under test).
 INSTALLER = Path(__file__).resolve().parents[3] / "install-venya-core.sh"
 
-#: First sentence, byte-for-byte, as clerk's row requires it to stay stable.
+#: First sentence, byte-for-byte, as the filing seat's row requires it to stay stable.
 FIRST_SENTENCE_STABLE = "VENYA_ADMIN_CERT points at {path!r}, which does not exist. "
 
 _MISSING = "/no/such/dir/admin.crt"
@@ -105,7 +105,7 @@ class TestRefusalRoutesToTheCeremony:
     """The positive half — and the first sentence stays byte-stable."""
 
     def test_first_sentence_is_byte_stable(self, tmp_path, monkeypatch):
-        """clerk's #619 row: the first sentence is the contract operators grep for."""
+        """the filing seat's #619 row: the first sentence is the contract operators grep for."""
         text = _refusal_text(tmp_path, monkeypatch)
         assert text.startswith(FIRST_SENTENCE_STABLE.format(path=_MISSING)), text
 

@@ -100,7 +100,7 @@ def _text() -> str:
 
 
 # --------------------------------------------------------------------------------------
-# The key-collision audit (#675, flash2): a duplicate dict key is SILENT in Python.
+# The key-collision audit (#675, a prior worker lane): a duplicate dict key is SILENT in Python.
 # --------------------------------------------------------------------------------------
 
 _MANIFEST_PY = _PKG / "scripts" / "beta_terms_cites.py"

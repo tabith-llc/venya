@@ -13,7 +13,7 @@ passphrase fell through to the command's blanket handler and printed
 speaking — that is the defect #572 files.
 
 The close is posture-scoped, and the scope is the finding (the lane's measurement, adopted by the
-lead's ruling in room wren-37). The shipped `is_encrypted` check is a SUBSTRING test, so a truncated
+lead's ruling in room dispatch 37). The shipped `is_encrypted` check is a SUBSTRING test, so a truncated
 key, armor kept over a swapped body, and armor kept over a non-base64 body ALL still claim to be
 encrypted; printing a passphrase refusal for those would send an operator with a DAMAGED file off to
 re-type a correct passphrase forever. So the approved sentence fires only when a passphrase was

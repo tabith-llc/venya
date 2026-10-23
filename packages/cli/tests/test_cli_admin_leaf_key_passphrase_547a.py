@@ -389,7 +389,7 @@ class TestThePartBReadSide:
 
 
 class TestSharedHintFragment:
-    """P3 — the two dead-end hints flash5 found reuse the ONE fragment, not a third."""
+    """P3 — the two dead-end hints a prior worker lane found reuse the ONE fragment, not a third."""
 
     def test_missing_ca_hint_names_the_precondition(self, tmp_path, capsys, monkeypatch):
         """The pre-#547 text pointed at `init-admin-ca` with no word about the
@@ -432,7 +432,7 @@ class TestSharedHintFragment:
         assert len([n for n in (ADMIN_CA_SETUP_FRAGMENT,) if n]) == 1
         assert "VENYA_ADMIN_CA_KEY_PASSPHRASE" in ADMIN_CA_SETUP_FRAGMENT
 
-    def test_fragment_wording_matches_the_shape_flash5_landed(self):
+    def test_fragment_wording_matches_the_shape_a_prior_lane_landed(self):
         """Set-what-then-run-what, in that order, naming the variable exactly."""
         assert ADMIN_CA_SETUP_FRAGMENT.startswith("Set VENYA_ADMIN_CA_KEY_PASSPHRASE")
         assert "then run: venya admin init-admin-ca" in ADMIN_CA_SETUP_FRAGMENT

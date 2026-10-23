@@ -9,9 +9,9 @@
 **The defect.** The route validated the FORMAT of the operator's string, found nothing in
 ``AdminCertRevocation``, and blind-inserted a row anyway: ``venya admin revoke-admin-cert
 --serial <any hex>`` exited 0 and wrote a revocation naming a serial no certificate ever
-held, while the live admin credential kept transacting. Measured physically by ``flash6`` at
+held, while the live admin credential kept transacting. Measured physically by a prior worker lane at
 leg 232 against the sibling relay route, which refuses the identical string with
-``REFUSE_UNREGISTERED``. Filed by ``clerk`` as issue 684 (HIGH), owner ruled "fix".
+``REFUSE_UNREGISTERED``. Filed by the ticket seat as issue 684 (HIGH), owner ruled "fix".
 
 **Why this file is a truth table and not one assertion.** A membership gate has two ways to
 fail, and both look correct in a single test: it can refuse everything (a gate that strands
@@ -266,7 +266,7 @@ def test_refusal_leaves_the_live_credential_transacting(env):
 def test_already_revoked_stays_idempotent(env):
     """Second call on a revoked serial -> 200, already_revoked=True, still ONE row.
 
-    flash6 measured ``already present`` as the shipped behavior and the dispatch says do
+    a prior worker lane measured ``already present`` as the shipped behavior and the dispatch says do
     not change it. The repeat is checked BEFORE membership, so a credential revoked by a
     boot predating this population still answers truthfully instead of erroring — the
     idempotency does not depend on when the row was written.

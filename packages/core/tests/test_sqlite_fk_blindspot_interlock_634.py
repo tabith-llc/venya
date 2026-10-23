@@ -62,7 +62,7 @@ ROOT = Path(__file__).resolve().parents[3]
 #: must never grow.
 #:
 #: # shortcut: 65 grandfathered blind engine-builders remain, upgrade one per tranche; tranches after
-#: tranche 1 are gated on flash1/#645, ultra/#612-594 and flash3/#649 clearing the shared test surface,
+#: tranche 1 are gated on three worker lanes' #645, #612-594 and #649 clearing the shared test surface,
 #: per the lead's s134 ruling (wave30-specs-20261017/wren-634-ruling-flash2-s134.md §1).
 #: Re-derive with: ``uv run -p 3.14 python -c "import importlib.util; ..."`` — see §Regenerating this
 #: baseline in this file's module docstring.

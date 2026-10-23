@@ -69,7 +69,7 @@ def test_fresh_revocation_still_reads_as_a_revocation(capsys):
     """Positive half of the pair: a confirmed new revocation keeps its success line.
 
     Without this cell the negative arm could be satisfied by muting every success message, which is
-    the failure `flash5` explicitly guarded against on the sibling class.
+    the failure a prior worker lane explicitly guarded against on the sibling class.
     """
     client = _client({"serial": SERIAL, "revoked": True, "reason": "key compromised", "already_revoked": False})
 
