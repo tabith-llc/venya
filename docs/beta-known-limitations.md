@@ -936,23 +936,25 @@ leaves with it.
 Status: known limitation in beta · Target: `#696` (a per-command ceiling plus cancel), which does not
 gate this release · Tracked as: `#695` (open — **this entry is the disclosure that answers its AC2**, and
 the owner ruled it in this form: document the collision, keep the capability, and land `#696` as the real
-protection. `#695`'s AC1 half landed on its own — see the stdin note below.)
+protection. The `#695` AC1 **code** is on the line; whether AC1 **holds** is unmeasured — see the stdin
+note below.)
 
 **Who is affected:** anyone storing an `ssh-password` secret and trying to escalate on the far side of
 an `ssh` hop in the same command — the shape that reads naturally, and the shape that does not work.
 
 **What the limitation is:** `sshpass` reads its **own** stdin, and it runs `ssh` on a dedicated terminal
 it owns, so a `< /run/secrets/venya/<id>` redirect feeds `sshpass`, not `ssh`, and the remote `sudo -S`
-prompt is answered by nothing. **What made that shape dangerous is gone, and this entry was stale until
-this sentence:** the sandbox exec call now gets its own stdin (`stdin=subprocess.DEVNULL`, beside
-`timeout=SBX_TIMEOUT` — `#695` AC1), so a guest command that would wait on stdin can no longer hold the
-single admission permit for the full timeout. **The control is source-verified and guarded by
-`packages/executor/tests/test_exec_stdin_devnull_366.py`, which asserts the kwargs at both exec postures
-and, as its paired negative, that the secret-injection `tee` site still receives `input=` — it is a check
-on the control, not a measurement of the guest. The operator-visible symptom before and after that change
-has not been re-measured on a guest, so this entry names the mechanism and the control and states no
-timing and no error string.** The unsupported combination is unchanged: the password still does not reach
-the remote `sudo -S`. **Use `sshpass` for password authentication as documented (in **balanced** and
+prompt is answered by nothing. **A control was added for the worse consequence of that shape; this entry
+claims the control and not its effect.** The sandbox exec call now passes `stdin=subprocess.DEVNULL`
+beyond `timeout=SBX_TIMEOUT` (`#695` AC1), which is verified at the host side by
+`packages/executor/tests/test_exec_stdin_devnull_366.py` — a cell asserting the **kwargs** at both exec
+postures, plus the paired negative that the secret-injection `tee` site still receives `input=`. **Whether
+that EOF reaches a guest command's own stdin is the open question and is not settled here: a guest `ssh`
+keeps its own stdin, so closing the host side may not change what the guest waits on. The single physical
+report on AC1 withdrew its own result, so neither closure nor continuation is measured.** This entry
+therefore states no timing, no error string, and no guarantee that a prompting command cannot hold the
+executor. The unsupported combination is unchanged: the password still does not reach the remote
+`sudo -S`. **Use `sshpass` for password authentication as documented (in **balanced** and
 **permissive** policy — under **strict** nothing is allowed by default, so `sshpass` is refused there too,
 by the empty allowlist and not by a named pattern). For an unattended remote `sudo`, use key
 authentication with the redirect, so `ssh`'s stdin stays free for `sudo -S`.** Password authentication and
@@ -964,10 +966,10 @@ empty default allowlist, and it is a posture, not a judgement about this verb. A
 passphrase-prompt helper is a workaround for this case: that path has no physical capture in beta, so no
 alternative is offered beyond the two above.
 
-**What changes at beta+:** `#696` lands the per-command ceiling and a client-side cancel on top of the
-EOF already delivered by `#695` AC1, so a slow command of any kind cannot hold the executor unattended;
-if a supported shape for password auth plus unattended remote `sudo` is ever built, this entry is deleted
-rather than softened.
+**What changes at beta+:** `#696` is the scheduled protection for a command that holds the executor (a
+per-command ceiling plus a client-side cancel). It is a separate code leg, it does not gate this release,
+and this entry claims nothing about its behavior before it lands; if a supported shape for password auth
+plus unattended remote `sudo` is ever built, this entry is deleted rather than softened.
 
 ---
 
