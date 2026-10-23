@@ -1,0 +1,146 @@
+repos:
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.9
+    hooks:
+      - id: bandit
+        always_run: true
+        pass_filenames: false
+        args: ["-r", "packages/", "-x", "packages/executor/tests/,packages/server/tests/,packages/core/tests/,packages/mcp/tests/,packages/cli/tests/,packages/venya-contract/tests/,packages/executor/.venv"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.4
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 25.1.0
+    hooks:
+      - id: black
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".detect-secrets-baseline", "--exclude-files", "target/", "--exclude-files", "\\.detect-secrets-baseline$"]
+        # Refs #550: count this baseline by JSON parsing, never by grepping it — the
+        # scan's is_baseline_file filter records the baseline's own filename inside
+        # filters_used, so the document references itself and a document-wide
+        # "filename" token grep over-counts by one. The read-only method lives in
+        # scripts/detect_secrets_baseline_stats.py.
+
+  - repo: local
+    hooks:
+      # Refs #546: the detect-secrets hook above rewrites .detect-secrets-baseline
+      # mid-commit and asks the committer to stage it, so a vanished detection can
+      # otherwise ship quietly. One implementation, two thin entries (R9.1): the
+      # default stage cannot see the commit message, so it fails on any vanish; the
+      # commit-msg stage is where a declared removal (Baseline-removal-reason) is
+      # honoured. The core interlock stays the enforcement; this chain is the early
+      # and kindly catch.
+      - id: baseline-shrink-guard
+        name: detect-secrets baseline shrink guard
+        entry: python3 scripts/detect_secrets_baseline_guard.py --stage pre-commit
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: baseline-shrink-guard-message
+        name: detect-secrets baseline removal declared?
+        entry: python3 scripts/detect_secrets_baseline_guard.py --stage commit-msg
+        language: system
+        stages: [commit-msg]
+
+      # Refs #447: the httpx2 cap is a workspace-wide ruling, but only this census can see all
+      # five declaring members. It sits BEFORE the lock-comparing hooks on purpose: a cap-stripped
+      # member manifest would otherwise meet `requirements-pinned`/`pip-audit` first, and their own
+      # dictated remedy (`uv lock`) quiets both while leaving the uncapped declaration in place —
+      # this census is stdlib-only (`tomllib` + `pathlib`), never invokes `uv`, and cannot re-lock
+      # (the #627 class). The same rule has a second door: packages/cli/tests/
+      # test_httpx2_upper_bound_447.py imports this script, which is what covers `--no-verify`
+      # and a fresh clone with no hooks installed (measured: 0 non-sample hooks).
+      # Refs #689/#702, part 3 of the owner's scrub plan. His wording assumed CI
+      # ("CI gates the expanded guard"); measured at 87a743c this repo has NO CI at all
+      # — zero .github/workflows, .gitlab-ci.yml, Jenkins, Azure, Drone, Circle or
+      # Travis files — so the only automated gate that exists is this chain, and that
+      # deviation from his plan is deliberate and stated here rather than smoothed over.
+      # Without this entry the private-identifier rule is a PYTEST CELL, judged only
+      # when a seat voluntarily runs a suite, and a commit reintroducing a dev hostname
+      # passes every hook below. `detect-secrets` (the hook above) does not cover this
+      # class: it hunts secret-shaped strings, and a hostname, a personal local part, a
+      # private subnet or a workspace path are ordinary prose with zero entropy.
+      #
+      # ONE implementation behind both moments: this pre-commit entry (every commit)
+      # and the release recipe's `--stage pre-tag --ref <rev>` (before `git tag`, read
+      # from the REF so a dirty worktree cannot flatter a tag candidate). Stdlib-only,
+      # never invokes `uv`, never writes to the tree — the #627 hook-mutation class.
+      # No `commit-msg`-stage form, unlike the baseline guard: there is nothing here a
+      # trailer could legitimately excuse. A private identifier in shipped text is not
+      # an intentional change to declare, it is the thing the owner ruled must never
+      # ship, so an escape hatch in the message stage would be a hole, not a feature.
+      - id: pre-tag-scrub
+        name: private-identifier scrub guard (#689/#702)
+        entry: python3 scripts/pre_tag_scrub.py --stage pre-commit
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: httpx2-bound-census
+        name: httpx2 bound census (workspace-wide, #447)
+        entry: python3 scripts/check_httpx2_bound_census.py
+        language: system
+        pass_filenames: false
+        files: "^packages/[^/]+/pyproject\\.toml$"
+
+      # Refs leg 369, owner order 2026-10-22: "we need to re-determine every dependency version
+      # being used and update documentation properly!". `docker-sbx 0.38.0` sat in the shipped
+      # notices page for ten minor versions of drift because nothing compared it to anything. This
+      # entry is that comparison at the only automated moment this repo has (measured at 87a743c:
+      # NO CI — see scripts/pre_tag_scrub.py's own header). Stdlib-only, never invokes `uv`, writes
+      # nothing: a hook that regenerated the page mid-commit would be the #627 mutation class.
+      # The assertion itself is packages/cli/tests/test_dep_version_inventory_369.py — this catches
+      # it early and kindly, that file is what stops `--no-verify`.
+      - id: third-party-notices-inventory
+        name: dependency versions derived, not typed (leg 369)
+        entry: python3 scripts/gen_third_party_notices.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: uv-lock
+        name: uv-lock (check)
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: "^pyproject\\.toml$"
+
+      - id: requirements-pinned
+        name: requirements pinned to uv.lock
+        entry: scripts/pin-requirements.sh --check
+        language: system
+        pass_filenames: false
+        files: "^(uv\\.lock|venya-(core|executor)-requirements\\.txt|pyproject\\.toml|packages/[^/]+/pyproject\\.toml)$"
+
+      # Refs #627: `uv run` syncs the project environment, and that sync REWRITES the
+      # tracked uv.lock whenever the lock disagrees with a just-edited
+      # packages/*/pyproject.toml — which is exactly what this hook's `files:` pattern
+      # fires on. The chain therefore mutated tracked state mid-commit (revision 3 -> 5
+      # plus version lines, 16 lines nobody chose) while pip-audit itself reported "No
+      # known vulnerabilities found", so the failure text pointed at the hook instead of
+      # at the lockfile decision the committer had to own. `--locked` keeps the audit
+      # question identical and makes uv refuse to write: a stale lock now fails the
+      # commit with "run `uv lock`" instead of silently landing a re-lock. Enforcement
+      # of the assertion itself is packages/core/tests/test_pip_audit_hook_lock_safety_627.py.
+      - id: pip-audit
+        name: pip-audit (dependency CVEs, OSV feed)
+        entry: uv run --locked pip-audit --vulnerability-service osv
+        language: system
+        pass_filenames: false
+        files: "^packages/.*pyproject\\.toml$"
+
+      - id: mypy
+        name: mypy (6 packages, src only)
+        entry: uvx mypy@2.3.1 --no-error-summary packages/core/src packages/server/src packages/executor/src packages/mcp/src packages/cli/src packages/venya-contract/src
+        language: system
+        pass_filenames: false
+        files: "^packages/.*/src/"

@@ -1,0 +1,2421 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Admin operation endpoints."""
+
+import hashlib
+import hmac
+import json
+import logging
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Literal
+
+from core.utils.cert_serial import canonical_serial, serial_match_clause
+from core.utils.entropy import get_secure_token
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from .. import metrics
+from ..audit_lifecycle import (
+    ADMIN_CERT_REVOKED,
+    COMMAND_POLICY_CHANGED,
+    ENROLLMENT_TOKEN_ISSUED,
+    ENROLLMENT_TOKEN_REVOKED,
+    EXECUTOR_CERT_REVOKED,
+    EXECUTOR_ENROLLMENT_TOKEN_CREATED,
+    EXECUTOR_REVOKED,
+    KEY_VERSION_DEACTIVATED,
+    KEY_VERSION_REVOKED,
+    KEY_VERSION_ROLLED_BACK,
+    KEY_VERSION_ROTATED,
+    USER_CREATED,
+    USER_DELETED,
+    USER_REENROLLED,
+    USER_UPDATED,
+    audit_lifecycle,
+)
+from ..dependencies import enrollment_manager, get_current_user, get_db, require_admin
+from ..rate_limit import rate_limit_admin_token_gen
+from ..utils.executor_id import validate_executor_id
+from ..utils.token_binding import compute_binding_hash
+from ..utils.user_id import USER_ID_PATTERN
+
+router = APIRouter()
+logger = logging.getLogger("venya.server")
+
+
+# --- Request/Response models ---
+
+
+# --- Admin-plane string validation (#356, ruled 2026-10-02) ---------------
+# Enumerated from source (values that writers/consumers actually use):
+#   status: users lifecycle values — session_manager.is_user_active gates on
+#     "active"; "pending_enrollment" is set by enroll/create paths; "disabled"
+#     has no other writer (admin configure-user IS the disable mechanism).
+#   auth_mode (admin-plane request models): "security-key" (init/recovery/
+#     default) and "webauthn" (enroll completion). "mtls" is daemon-set on the
+#     executor registration path (executors.py) by direct ORM — intentionally
+#     NOT operator-assignable here (fail-closed: it would hand a human row a
+#     mode whose auth depends on a cert-header the caller cannot present).
+#   preset: the values the executor actually enforces (command_validator.py).
+#   user_id pattern: mirrors the alembic-009 CHECK on users.user_id
+#     (EXECUTOR_ID_PATTERN; String(64)). Route-layer reject = 422 PRE-commit,
+#     never the 500 class where junk dies inside the transaction (#289/#334
+#     lineage). The expression itself now lives in server.utils.user_id, shared
+#     with every other writer of users.user_id (#517); this module keeps
+#     importing it under the name its fields and path params already use.
+USER_ID_PATH = Annotated[str, Path(pattern=USER_ID_PATTERN)]
+UserStatus = Literal["pending_enrollment", "active", "disabled"]
+AdminAuthMode = Literal["security-key", "webauthn"]
+PolicyPreset = Literal["strict", "balanced", "permissive"]
+
+
+class AdminEnrollRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    user_id: str = Field(..., description="User ID to enroll", pattern=USER_ID_PATTERN)
+    auth_mode: AdminAuthMode = Field("security-key", description="Auth mode")
+
+
+class AdminEnrollResponse(BaseModel):
+    enrolled: bool
+    user_id: str
+    auth_mode: str
+    enrollment_token: str | None = None
+
+
+class AdminCreateUserRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    username: str = Field(..., description="User ID (e.g. 'jsmith')", pattern=USER_ID_PATTERN)
+    # #520: bounded width field — User.display_name is String(128)
+    # (models.py:49); over-width rejected 422 pre-DB, never a psycopg 500
+    # after the ceremony-free create begins (#334 posture, reused).
+    display_name: str | None = Field(None, description="Human-readable name", max_length=128)
+    roles: list[str] = Field(default_factory=list, description="Role names to assign")
+
+
+class AdminCreateUserResponse(BaseModel):
+    user_id: str
+    status: str
+    enrollment_token: str
+    expires_in_seconds: int = 900
+
+
+class AdminReEnrollResponse(BaseModel):
+    user_id: str
+    # #482 option (a): the route mutates the user to pending_enrollment and
+    # reports it, so the CLI's Status line is server truth, not a phantom key.
+    status: str
+    enrollment_token: str
+    expires_in_seconds: int = 900
+    credentials_deactivated: int = 0
+    tokens_revoked: int = 0
+
+
+class AdminUserTokenListResponse(BaseModel):
+    tokens: list[dict]
+
+
+class AdminUserTokenCreateResponse(BaseModel):
+    user_id: str
+    enrollment_token: str
+    expires_in_seconds: int = 900
+    previous_tokens_revoked: int = 0
+
+
+class AdminTokenRevokeResponse(BaseModel):
+    revoked: bool
+    token_id: int
+
+
+class AdminRemoveRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    user_id: str = Field(..., description="User ID to remove", pattern=USER_ID_PATTERN)
+
+
+class AdminRemoveResponse(BaseModel):
+    removed: bool
+    user_id: str
+
+
+class AdminUserListResponse(BaseModel):
+    users: list[dict]
+
+
+class AdminConfigureUserRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    # #520 second writer site (configure_user): same column, same bound.
+    display_name: str | None = Field(None, max_length=128)
+    status: UserStatus | None = None
+    auth_mode: AdminAuthMode | None = None
+    # #625: the `session_timeout` field is gone from this model and from the write below.
+    # The `users.session_timeout` COLUMN stays (per the ruling): it is `NOT NULL
+    # server_default="900"` (001_initial_schema.py:37), so it cannot express "unset", and
+    # dropping it is not worth a migration in the beta window. Nothing reads it — see
+    # packages/server/tests/test_admin_session_timeout_dead_write_625.py for the sweep that
+    # keeps it that way. An operator who PUTs the old key now gets a 422 (extra="forbid",
+    # #357), never a silent no-op.
+
+
+class AdminConfigureUserResponse(BaseModel):
+    configured: bool
+    user_id: str
+
+
+class AdminKeyVersionListResponse(BaseModel):
+    versions: list[dict]
+
+
+class AdminKeyVersionRotateRequest(BaseModel):
+    """Rotation takes no parameters under single-KEK bookkeeping semantics.
+
+    The former ``new_key`` field advertised per-version key material that
+    never existed (the KEK derives from the install passphrase); removed
+    with the option-2 ruling — zero callers existed.
+
+    extra="forbid" (#355, the #289 house fix): the CLI's former
+    ``new_key_path`` post was silently discarded under the default
+    ignore — unknown keys on this control-plane route are a loud 422.
+    """
+
+    model_config = {"extra": "forbid"}
+
+
+class AdminKeyVersionRotateResponse(BaseModel):
+    job_id: int
+    status: str
+    old_key_version_id: int | None
+    new_key_version_id: int | None
+    note: str = Field("", description="Rotation semantics note (single-KEK: no secret re-wrap)")
+
+
+class AdminKeyVersionRollbackRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    job_id: int
+
+
+class AdminKeyVersionRollbackResponse(BaseModel):
+    rolled_back: bool
+    job_id: int
+    restored_secrets_count: int
+
+
+class AdminSetCommandPolicyRequest(BaseModel):
+    # extra="forbid" (ticket cli-set-policy-custom-key-mismatch #289 Q4):
+    # pydantic's default-ignore silently dropped a dead CLI key while the
+    # caller saw success. Unknown keys on this control-plane route are now a
+    # 422, never a no-op.
+    model_config = {"extra": "forbid"}
+
+    preset: PolicyPreset = Field("balanced", description="Policy preset: strict, balanced, permissive")
+    custom_allowed_commands: list[str] | None = None
+    custom_dangerous_patterns: list[str] | None = None
+
+
+class AdminSetCommandPolicyResponse(BaseModel):
+    policy_name: str
+    preset: str
+    updated: bool
+
+
+class AdminAddAllowedCommandRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    command_path: str = Field(..., description="Absolute path to allowed command")
+
+
+class AdminAddAllowedCommandResponse(BaseModel):
+    added: bool
+    command_path: str
+
+
+class AdminGetCommandPolicyResponse(BaseModel):
+    policy_name: str
+    preset: str
+    allowed_commands: list[str]
+    dangerous_patterns: list[str]
+    configured: bool
+    updated_at: datetime | None = None
+
+
+class AdminKeyVersionDeactivateResponse(BaseModel):
+    deactivated: bool
+    version_id: int
+    version_label: str
+
+
+class AdminKeyVersionRevokeResponse(BaseModel):
+    revoked: bool
+    version_id: int
+    version_label: str
+
+
+class AdminKeyRotationStatusResponse(BaseModel):
+    jobs: list[dict]
+
+
+class AdminKeyRotationJobRollbackRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    job_id: int
+
+
+class AdminKeyRotationJobRollbackResponse(BaseModel):
+    rolled_back: bool
+    job_id: int
+    restored_secrets_count: int
+
+
+class AdminRevokeExecutorRequest(BaseModel):
+    """Optional body for the serial form of executor revocation."""
+
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    serial: str | None = Field(
+        default=None,
+        description=(
+            "Specific certificate serial (hex) to revoke WITHOUT revoking the "
+            "executor identity. Omit for the identity form (terminal)."
+        ),
+    )
+
+
+class AdminRevokeExecutorResponse(BaseModel):
+    revoked: bool
+    executor_id: str
+    serial_number: str | None = None
+    # #687, serial-form duplicate only: when the path executor_id disagrees with the owner the
+    # revocation row stored, `executor_id` names the STORED owner and these two carry the attempt.
+    # Both default to None and the route serializes with response_model_exclude_none, so a
+    # correctly-paired repeat answers with exactly the three keys it always sent.
+    requested_executor_id: str | None = None
+    executor_id_mismatch: bool | None = None
+
+
+class AdminRemoveExecutorResponse(BaseModel):
+    removed: bool
+    executor_id: str
+    revoked_serial: str | None = None
+
+
+class AdminEnrollExecutorResponse(BaseModel):
+    executor_id: str
+    enrollment_token: str
+    expires_in_seconds: int
+    expires_at: str
+
+
+class AdminExecutorInfo(BaseModel):
+    executor_id: str
+    serial_number: str
+    fingerprint: str
+    not_before: datetime
+    not_after: datetime
+    version: str | None = None
+
+
+class AdminExecutorListResponse(BaseModel):
+    executors: list[AdminExecutorInfo]
+
+
+# --- Helper functions ---
+
+
+# --- Endpoints ---
+
+
+@router.post(
+    "/admin/enroll",
+    response_model=AdminEnrollResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_enroll(
+    req: AdminEnrollRequest,
+    request: Request,
+    auth_user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminEnrollResponse:
+    """Enroll a new user (admin only).
+
+    Creates an enrollment token that the user can use to complete onboarding.
+    DEPRECATED: Use POST /admin/users instead.
+    """
+    try:
+
+        from core.iam.enrollment_manager import EnrollmentError
+        from core.iam.models import User
+
+        em = enrollment_manager(db, request)
+
+        # Check if user already exists
+        existing = db.query(User).filter(User.user_id == req.user_id).first()
+        if existing:
+            raise EnrollmentError(f"User '{req.user_id}' already exists")
+
+        # Create user
+        user = User(
+            user_id=req.user_id,
+            status="pending_enrollment",
+            auth_mode=req.auth_mode,
+        )
+        db.add(user)
+        db.flush()
+
+        # Create enrollment token
+        token, plaintext = em.create_enrollment_token(user.user_id)
+        config = getattr(request.app.state, "config", None)
+        if config and config.recovery_code_pepper:
+            token.binding_hash = compute_binding_hash(req.user_id, plaintext, config.recovery_code_pepper)
+        audit_lifecycle(
+            db,
+            USER_CREATED,
+            auth_user.get("user_id"),
+            {
+                "target_user_id": req.user_id,
+                "roles": [],
+                "enrollment_token_created": True,
+            },
+        )
+        db.commit()
+
+        return AdminEnrollResponse(
+            enrolled=True,
+            user_id=req.user_id,
+            auth_mode=req.auth_mode,
+            enrollment_token=plaintext,
+        )
+    except HTTPException:
+        raise
+    except EnrollmentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception:
+        logger.exception("Enrollment failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enrollment failed",
+        )
+
+
+@router.post(
+    "/admin/users",
+    response_model=AdminCreateUserResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_user(
+    req: AdminCreateUserRequest,
+    request: Request,
+    auth_user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminCreateUserResponse:
+    """Create a new user and enrollment token (admin only).
+
+    Phase 1: Admin creates user + enrollment token in one call.
+    The admin delivers the token to the user out-of-band.
+    """
+    try:
+
+        from core.iam.enrollment_manager import EnrollmentError
+        from core.iam.models import Role, User
+        from core.iam.role_manager import RoleManager, SeparationOfDutiesError
+
+        from .roles import _audit_sod_denied
+
+        em = enrollment_manager(db, request)
+        role_manager = RoleManager(db)
+
+        # Check if user already exists
+        existing = db.query(User).filter(User.user_id == req.username).first()
+        if existing:
+            raise EnrollmentError(f"User '{req.username}' already exists")
+
+        # sod-bypass-admin-create-user: memberships are minted through the
+        # ONE enforcement point (core RoleManager.add_member — SoD ruling 2'),
+        # never by direct ORM. The user + grants live in a SAVEPOINT: a
+        # mid-loop refusal rolls the partial work back WITHOUT a route-level
+        # rollback on the get_db-owned session (dependencies.get_db contract),
+        # so the denial-side commit that follows carries the event ONLY —
+        # no phantom user, no partial memberships, no user_created lifecycle
+        # row (admin-lifecycle-audit-events complete-or-nothing posture).
+        try:
+            with db.begin_nested():
+                user = User(
+                    user_id=req.username,
+                    display_name=req.display_name,
+                    status="pending_enrollment",
+                )
+                db.add(user)
+                db.flush()
+
+                # Assign roles
+                for role_name in req.roles:
+                    role = db.query(Role).filter(Role.name == role_name).first()
+                    if role is None:
+                        raise EnrollmentError(f"Role '{role_name}' not found")
+                    role_manager.add_member(user_id=user.user_id, role_id=role.id)
+        except SeparationOfDutiesError as e:
+            _audit_sod_denied(db, auth_user, action="add_member", error=e)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
+            )
+
+        # Create enrollment token
+        token, plaintext = em.create_enrollment_token(user.user_id)
+        config = getattr(request.app.state, "config", None)
+        if config and config.recovery_code_pepper:
+            token.binding_hash = compute_binding_hash(req.username, plaintext, config.recovery_code_pepper)
+        audit_lifecycle(
+            db,
+            USER_CREATED,
+            auth_user.get("user_id"),
+            {
+                "target_user_id": req.username,
+                "roles": list(req.roles or []),
+                "enrollment_token_created": True,
+            },
+        )
+        db.commit()
+        metrics.TOKEN_CREATED.labels(type="user").inc()
+
+        logger.info(
+            "Admin created user '%s' (ID: %d) with roles: %s",
+            req.username,
+            user.id,
+            req.roles,
+        )
+
+        return AdminCreateUserResponse(
+            user_id=req.username,
+            status="pending_enrollment",
+            enrollment_token=plaintext,
+            expires_in_seconds=int(em.config.token_expiry.total_seconds()),
+        )
+    except HTTPException:
+        raise
+    except EnrollmentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception:
+        logger.exception("User creation failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User creation failed",
+        )
+
+
+@router.delete(
+    "/admin/users/{user_id}",
+    response_model=AdminRemoveResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_remove(
+    user_id: USER_ID_PATH,
+    auth_user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminRemoveResponse:
+    """Remove a user (admin only).
+
+    #443 lockout guards, both answered BEFORE anything is deleted: a caller
+    cannot delete their own account, and nobody can delete the only user
+    holding the ``admin`` role — either action leaves the deployment with no
+    way to administer it. Both refusals answer 409 (the same-file precedent of
+    admin_remove_executor's refused-while-history-retained 409) and land an
+    admin_lockout_denied audit row; neither discloses who the admins are.
+    """
+    try:
+        from core.iam.models import (
+            ElevationToken,
+            EnrollmentToken,
+            ExecutionSession,
+            ExecutorCert,
+            RoleMember,
+            Secret,
+            SecretRole,
+            Session,
+            SessionSecret,
+            User,
+            WebAuthnCredential,
+        )
+        from core.iam.role_manager import AdminLockoutError, RoleManager
+        from sqlalchemy import select
+
+        from .roles import _audit_lockout_denied
+
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not found: {user_id}",
+            )
+
+        # One enforcement point for both destructive routes (#443 acceptance
+        # criterion 3): the shared core guard, not a copy of its rules here.
+        # role_id omitted = the whole user is going, every membership with it.
+        try:
+            RoleManager(db).assert_removal_keeps_admin(
+                user_id,
+                caller_user_id=auth_user.get("user_id"),
+            )
+        except AdminLockoutError as e:
+            _audit_lockout_denied(db, auth_user, action="remove_user", error=e)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
+            )
+
+        # Remove every dependent BEFORE the ORM delete, in FK-dependency
+        # order (join rows first). The user-delete flush null-outs the FKs
+        # of any relationship the ORM knows about; those columns are NOT
+        # NULL (some are primary keys), so an untouched dependent crashes
+        # the cascade (#425 DEFECT B — the credential case).
+        secret_ids = select(Secret.id).where(Secret.created_by == user.user_id)
+        exec_session_ids = select(ExecutionSession.id).where(ExecutionSession.user_id == user.user_id)
+        # Remove role memberships
+        memberships_removed = db.query(RoleMember).filter(RoleMember.user_id == user_id).delete()
+        # Remove sessions
+        sessions_revoked = db.query(Session).filter(Session.user_id == user_id).delete()
+        # Remove enrollment tokens (user_id is String FK to users.user_id)
+        tokens_revoked = db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.user_id).delete()
+        # Remove WebAuthn credentials, elevation tokens, executor certs
+        credentials_removed = db.query(WebAuthnCredential).filter(WebAuthnCredential.user_id == user.user_id).delete()
+        elevations_removed = db.query(ElevationToken).filter(ElevationToken.user_id == user.user_id).delete()
+        executor_certs_removed = db.query(ExecutorCert).filter(ExecutorCert.executor_id == user.user_id).delete()
+        # Secret/execution history: the join tables have no DB-level
+        # cascade, so they go before their parents.
+        session_secrets_removed = (
+            db.query(SessionSecret)
+            .filter(SessionSecret.secret_id.in_(secret_ids) | SessionSecret.session_id.in_(exec_session_ids))
+            .delete()
+        )
+        secret_scopes_removed = db.query(SecretRole).filter(SecretRole.secret_id.in_(secret_ids)).delete()
+        secrets_removed = db.query(Secret).filter(Secret.created_by == user.user_id).delete()
+        exec_sessions_removed = db.query(ExecutionSession).filter(ExecutionSession.user_id == user.user_id).delete()
+        # Remove the user
+        db.delete(user)
+        audit_lifecycle(
+            db,
+            USER_DELETED,
+            auth_user.get("user_id"),
+            {
+                "target_user_id": user_id,
+                "memberships_removed": memberships_removed,
+                "sessions_revoked": sessions_revoked,
+                "tokens_revoked": tokens_revoked,
+                "credentials_removed": credentials_removed,
+                "elevations_removed": elevations_removed,
+                "executor_certs_removed": executor_certs_removed,
+                "secrets_removed": secrets_removed,
+                "secret_scopes_removed": secret_scopes_removed,
+                "session_secrets_removed": session_secrets_removed,
+                "exec_sessions_removed": exec_sessions_removed,
+            },
+        )
+        db.commit()
+
+        logger.info("Admin removed user: %s", user_id)
+        return AdminRemoveResponse(removed=True, user_id=user_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("User removal failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User removal failed",
+        )
+
+
+@router.get(
+    "/admin/users",
+    response_model=AdminUserListResponse,
+)
+async def admin_list_users(
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminUserListResponse:
+    """List all registered users (admin only)."""
+    from core.iam.models import User
+
+    users = db.query(User).order_by(User.enrolled_at).all()
+    result = [
+        {
+            "user_id": u.user_id,
+            "display_name": u.display_name,
+            "status": u.status,
+            "auth_mode": u.auth_mode,
+            "enrolled_at": u.enrolled_at.isoformat() if u.enrolled_at else None,
+            "session_timeout": u.session_timeout,
+        }
+        for u in users
+    ]
+    return AdminUserListResponse(users=result)
+
+
+@router.put(
+    "/admin/users/{user_id}",
+    response_model=AdminConfigureUserResponse,
+)
+async def admin_configure_user(
+    user_id: USER_ID_PATH,
+    req: AdminConfigureUserRequest,
+    request: Request,
+    auth_user: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminConfigureUserResponse:
+    """Configure user settings (admin only).
+
+    #486: a ``status`` write is answered by the SAME lockout rule the removal
+    routes use, before anything is written. Disabling the only usable admin
+    keeps the ``admin`` roster intact, so the removal guards stay silent while
+    the login path dies — ``is_user_active`` refuses every session for that
+    account and recovery-code reissue needs an account that can still sign in.
+    The refusal answers 409 and lands an ``admin_lockout_denied`` row exactly
+    like the removal refusals, and discloses no other user id.
+    """
+    from core.iam.models import User
+    from core.iam.role_manager import AdminLockoutError, RoleManager
+
+    from .roles import _audit_lockout_denied
+
+    try:
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not found: {user_id}",
+            )
+
+        if req.status is not None:
+            # Guard BEFORE any attribute write, and inside the route's existing
+            # failure posture (the shape admin_remove uses): an unexpected
+            # internal fault stays a loud 400, never a bare 500.
+            try:
+                RoleManager(db).assert_status_change_keeps_admin(user_id, req.status)
+            except AdminLockoutError as e:
+                _audit_lockout_denied(db, auth_user, action="configure_user", error=e)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=str(e),
+                )
+
+        changed_fields: list[str] = []
+        if req.display_name is not None:
+            user.display_name = req.display_name
+            changed_fields.append("display_name")
+        if req.status is not None:
+            user.status = req.status
+            changed_fields.append("status")
+        if req.auth_mode is not None:
+            user.auth_mode = req.auth_mode
+            changed_fields.append("auth_mode")
+        # #625: no `session_timeout` write here. The column is stored but read by no
+        # expiry decision (`create_session` takes the GLOBAL session config at
+        # core/iam/session_manager.py:139 while holding the User row), so writing it
+        # produced a real DB write and an audit claim of a change with no effect.
+
+        audit_lifecycle(
+            db,
+            USER_UPDATED,
+            auth_user.get("user_id"),
+            {"target_user_id": user_id, "changed_fields": changed_fields},
+        )
+        db.commit()
+        return AdminConfigureUserResponse(configured=True, user_id=user_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("User configuration failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User configuration failed",
+        )
+
+
+@router.get(
+    "/admin/key-versions",
+    response_model=AdminKeyVersionListResponse,
+)
+async def admin_key_version_list(
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminKeyVersionListResponse:
+    """List all key versions (admin only)."""
+    from core.iam.models import KeyVersion
+
+    versions = db.query(KeyVersion).order_by(KeyVersion.created_at.desc()).all()
+    result = [
+        {
+            "id": v.id,
+            "version_label": v.version_label,
+            "active": v.active,
+            "rotation_pending": v.rotation_pending,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in versions
+    ]
+    return AdminKeyVersionListResponse(versions=result)
+
+
+NO_REWRAP_NOTE = "no re-wrap: single-KEK alpha semantics"
+
+
+@router.post(
+    "/admin/key-versions/rotate",
+    response_model=AdminKeyVersionRotateResponse,
+)
+async def admin_key_version_rotate(
+    req: AdminKeyVersionRotateRequest,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminKeyVersionRotateResponse:
+    """Rotate the active key version synchronously (admin only).
+
+    Label-boundary rotation under single-KEK alpha semantics: there is no
+    per-version key material (the KEK derives from the install passphrase)
+    and secret decryption never consults key_versions, so NO secrets are
+    re-wrapped. Existing secrets keep their stored label and remain
+    decryptable; new secrets receive the new label via
+    GET /key-versions/active. The rotation job is terminal ("completed")
+    when this request returns. The at-most-one-active invariant is enforced
+    by the uq_key_versions_single_active partial unique index (migration
+    028) — a lost concurrency race surfaces as 409, never a second active
+    version.
+    """
+    import uuid
+
+    from core.iam.models import KeyRotationJob, KeyVersion, Secret
+
+    now = datetime.now(UTC)
+    try:
+        active_version = (
+            db.query(KeyVersion).filter(KeyVersion.active.is_(True)).order_by(KeyVersion.created_at.desc()).first()
+        )
+        old_id = active_version.id if active_version else None
+
+        # Deactivate ALL active versions (normally exactly one; the partial
+        # unique index makes more unreachable on migrated databases).
+        db.query(KeyVersion).filter(KeyVersion.active.is_(True)).update(
+            {KeyVersion.active: False}, synchronize_session=False
+        )
+
+        new_version = KeyVersion(
+            version_label=f"v{uuid.uuid4().hex[:8]}",
+            active=True,
+            rotation_pending=False,
+        )
+        db.add(new_version)
+        db.flush()
+
+        job = KeyRotationJob(
+            status="completed",
+            old_key_version_id=old_id,
+            new_key_version_id=new_version.id,
+            total_secrets=db.query(Secret).count(),
+            completed_secrets=0,  # truthful: nothing is re-wrapped (single KEK)
+            failed_count=0,
+            started_at=now,
+            completed_at=now,
+        )
+        db.add(job)
+        audit_lifecycle(
+            db,
+            KEY_VERSION_ROTATED,
+            admin.get("user_id"),
+            {
+                "old_key_version_id": old_id,
+                "new_key_version_id": new_version.id,
+                "rotation_job_id": job.id,
+            },
+        )
+        db.commit()
+    except IntegrityError:
+        # Lost a concurrent-rotation race — the partial unique index caught
+        # it. get_db rolls the session back when this HTTPException escapes
+        # (routes must not touch rollback/close themselves).
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Concurrent rotation committed first; re-check GET /key-versions/active",
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Key rotation failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Key rotation failed",
+        )
+
+    logger.info(
+        "Rotated key version %s -> %s (job %d; %s)",
+        old_id,
+        new_version.version_label,
+        job.id,
+        NO_REWRAP_NOTE,
+    )
+    return AdminKeyVersionRotateResponse(
+        job_id=job.id,
+        status="completed",
+        old_key_version_id=old_id,
+        new_key_version_id=new_version.id,
+        note=NO_REWRAP_NOTE,
+    )
+
+
+def _rollback_key_rotation(db: Session, job_id: int, actor_user_id: str | None) -> int:
+    """Flip the active key version back for a completed rotation job.
+
+    Shared by both rollback routes. Under single-KEK semantics no secrets
+    were ever re-wrapped, so there is nothing to restore at the secret
+    level — rollback reactivates the job's OLD key version, deactivates the
+    new one, and marks the job rolled_back. Only the MOST RECENT job can be
+    rolled back: flipping under a newer rotation would silently undo it.
+
+    Returns the legacy re-wrap count (structurally 0 post-fix; counted for
+    pre-fix job rows whose KeyRotationSecret entries may exist).
+    """
+    from core.iam.models import KeyRotationJob, KeyRotationSecret, KeyVersion
+
+    job = db.query(KeyRotationJob).filter(KeyRotationJob.id == job_id).first()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Rotation job {job_id} not found",
+        )
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Rotation job {job_id} has status {job.status!r}; only 'completed' rotations can be rolled back",
+        )
+    latest = db.query(KeyRotationJob).order_by(KeyRotationJob.id.desc()).first()
+    if latest is not None and latest.id != job.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Rotation job {job_id} is not the most recent rotation (job {latest.id} is); "
+                "roll that one back first"
+            ),
+        )
+    if job.old_key_version_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Rotation job {job_id} created the first key version; there is no prior version to reactivate",
+        )
+    old_version = db.query(KeyVersion).filter(KeyVersion.id == job.old_key_version_id).first()
+    if old_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Prior key version {job.old_key_version_id} no longer exists",
+        )
+
+    restored = (
+        db.query(KeyRotationSecret)
+        .filter(
+            KeyRotationSecret.rotation_job_id == job_id,
+            KeyRotationSecret.status == "rotated",
+        )
+        .count()
+    )
+
+    db.query(KeyVersion).filter(KeyVersion.active.is_(True)).update(
+        {KeyVersion.active: False}, synchronize_session=False
+    )
+    old_version.active = True
+    job.status = "rolled_back"
+    job.rolled_back_at = datetime.now(UTC)
+    # #301 Q6: single audit write inside the shared helper — both rollback
+    # routes ride it; the row rides the rollback's own commit (same txn).
+    audit_lifecycle(
+        db,
+        KEY_VERSION_ROLLED_BACK,
+        actor_user_id,
+        {"rotation_job_id": job.id, "reactivated_key_version_id": old_version.id},
+    )
+    db.commit()
+
+    logger.info(
+        "Rolled back rotation job %d: reactivated key version %d "
+        "(%d re-wrapped secrets restored — none are re-wrapped under single-KEK semantics)",
+        job_id,
+        old_version.id,
+        restored,
+    )
+    return restored
+
+
+@router.post(
+    "/admin/key-versions/rollback",
+    response_model=AdminKeyVersionRollbackResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_key_version_rollback(
+    req: AdminKeyVersionRollbackRequest,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminKeyVersionRollbackResponse:
+    """Roll back the most recent completed rotation (admin only).
+
+    Reactivates the prior key version and marks the job rolled_back.
+    restored_secrets_count is 0 under single-KEK semantics (no secret was
+    ever re-wrapped). 404 for a missing job; 409 for non-completed,
+    non-latest, or first-ever rotations.
+    """
+    try:
+        restored = _rollback_key_rotation(db, req.job_id, admin.get("user_id"))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Key rotation rollback failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Key rotation rollback failed",
+        )
+    return AdminKeyVersionRollbackResponse(
+        rolled_back=True,
+        job_id=req.job_id,
+        restored_secrets_count=restored,
+    )
+
+
+@router.post(
+    "/admin/command-policy",
+    response_model=AdminSetCommandPolicyResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_set_command_policy(
+    req: AdminSetCommandPolicyRequest,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminSetCommandPolicyResponse:
+    """Set executor command policy (admin only)."""
+    try:
+        from core.iam.models import CommandPolicy
+
+        policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
+
+        if policy is None:
+            policy = CommandPolicy(
+                policy_name="default",
+                preset=req.preset,
+            )
+            db.add(policy)
+
+        policy.preset = req.preset
+        if req.custom_allowed_commands is not None:
+            policy.allowed_commands = json.dumps(req.custom_allowed_commands)
+        if req.custom_dangerous_patterns is not None:
+            policy.dangerous_patterns = json.dumps(req.custom_dangerous_patterns)
+        policy.updated_at = datetime.now(UTC)
+
+        # Audit the control-plane change (ticket
+        # command-policy-no-server-executor-propagation): the row now ENFORCES
+        # fleet-wide via heartbeat propagation, so who changed what and when
+        # is security-relevant, not cosmetic. Migrated to the single writer
+        # (#301 Q5): same event string, same fields, and the row now RIDES
+        # the action's commit instead of trailing a second one.
+        audit_lifecycle(
+            db,
+            COMMAND_POLICY_CHANGED,
+            admin.get("user_id", "unknown"),
+            {
+                "policy_name": "default",
+                "preset": req.preset,
+                "custom_allowed_commands": req.custom_allowed_commands,
+                "custom_dangerous_patterns": req.custom_dangerous_patterns,
+                "session_id": str(admin["session_id"]) if admin.get("session_id") else None,
+            },
+        )
+        db.commit()
+        return AdminSetCommandPolicyResponse(
+            policy_name="default",
+            preset=req.preset,
+            updated=True,
+        )
+    except Exception:
+        logger.exception("Command policy update failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Command policy update failed",
+        )
+
+
+@router.get(
+    "/admin/command-policy",
+    response_model=AdminGetCommandPolicyResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_get_command_policy(
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminGetCommandPolicyResponse:
+    """Read the server-stored executor command policy (admin only).
+
+    Read-only counterpart of POST /admin/command-policy — the CLI's
+    `venya admin get-command-policy` always answered 405 because only the
+    POST method was ever registered (ticket admin-get-command-policy-405).
+
+    Semantics (deliberately honest):
+    - Reports what the admin API STORED. An unconfigured policy (no row)
+      answers the built-in default shape (preset "balanced", empty custom
+      lists, configured=False); GET never mutates.
+    - Server→executor propagation IS wired (ticket
+      command-policy-no-server-executor-propagation, merged 861a682): this
+      stored row rides the ADDITIVE `command_policy` field of the
+      registration/heartbeat responses and ENFORCES fleet-wide on each
+      executor's next heartbeat (~30 s); a null dangerous list leaves the
+      executor's built-in set, a list REPLACES it. Pre-propagation daemons
+      ignore the field and keep their executor.toml policy. This route
+      reports server state, not a live per-executor read-back.
+    """
+    from core.iam.models import CommandPolicy
+
+    policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
+    if policy is None:
+        return AdminGetCommandPolicyResponse(
+            policy_name="default",
+            preset="balanced",
+            allowed_commands=[],
+            dangerous_patterns=[],
+            configured=False,
+            updated_at=None,
+        )
+    try:
+        allowed = json.loads(policy.allowed_commands) if policy.allowed_commands else []
+        patterns = json.loads(policy.dangerous_patterns) if policy.dangerous_patterns else []
+    except (ValueError, TypeError):
+        logger.exception("Stored command policy contains malformed JSON")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored command policy is malformed",
+        )
+    return AdminGetCommandPolicyResponse(
+        policy_name=policy.policy_name,
+        preset=policy.preset,
+        allowed_commands=allowed,
+        dangerous_patterns=patterns,
+        configured=True,
+        updated_at=policy.updated_at,
+    )
+
+
+@router.post(
+    "/admin/command-policy/allowed",
+    response_model=AdminAddAllowedCommandResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_add_allowed_command(
+    req: AdminAddAllowedCommandRequest,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminAddAllowedCommandResponse:
+    """Add a command to the allowlist (admin only)."""
+    try:
+        from core.iam.models import CommandPolicy
+
+        policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
+
+        already_present = False
+        if policy is None:
+            policy = CommandPolicy(
+                policy_name="default",
+                preset="balanced",
+                allowed_commands=json.dumps([req.command_path]),
+            )
+            db.add(policy)
+        else:
+            allowed = json.loads(policy.allowed_commands) if policy.allowed_commands else []
+            if req.command_path not in allowed:
+                allowed.append(req.command_path)
+                policy.allowed_commands = json.dumps(allowed)
+            else:
+                already_present = True
+
+            policy.updated_at = datetime.now(UTC)
+
+        audit_lifecycle(
+            db,
+            COMMAND_POLICY_CHANGED,
+            admin.get("user_id", "unknown"),
+            {
+                "change": "allowed_command_added",
+                "command_path": req.command_path,
+                "already_present": already_present,
+            },
+        )
+        db.commit()
+        return AdminAddAllowedCommandResponse(added=True, command_path=req.command_path)
+    except Exception:
+        logger.exception("Allowed-command update failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Allowed-command update failed",
+        )
+
+
+@router.post(
+    "/admin/key-versions/{version_id}/deactivate",
+    response_model=AdminKeyVersionDeactivateResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_key_version_deactivate(
+    version_id: int,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminKeyVersionDeactivateResponse:
+    """Deactivate a key version (admin only).
+
+    Marks the version as inactive — no longer used for new encryption.
+    """
+    try:
+        from core.iam.models import KeyVersion
+
+        version = db.query(KeyVersion).filter(KeyVersion.id == version_id).first()
+        if version is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Key version {version_id} not found",
+            )
+
+        was_active = version.active
+        version.active = False
+        audit_lifecycle(
+            db,
+            KEY_VERSION_DEACTIVATED,
+            admin.get("user_id"),
+            {"key_version_id": version_id, "was_active": was_active},
+        )
+        db.commit()
+
+        logger.info("Deactivated key version: %s", version.version_label)
+        return AdminKeyVersionDeactivateResponse(
+            deactivated=True,
+            version_id=version_id,
+            version_label=version.version_label,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Key version deactivation failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Key version deactivation failed",
+        )
+
+
+@router.post(
+    "/admin/key-versions/{version_id}/revoke",
+    response_model=AdminKeyVersionRevokeResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_key_version_revoke(
+    version_id: int,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminKeyVersionRevokeResponse:
+    """Revoke a key version (admin only).
+
+    Permanently removes the version. All secrets must have been
+    re-wrapped to a newer version first.
+    """
+    try:
+        from core.iam.models import KeyVersion, Secret
+
+        version = db.query(KeyVersion).filter(KeyVersion.id == version_id).first()
+        if version is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Key version {version_id} not found",
+            )
+
+        # Check if any secrets still reference this version
+        secret_count = db.query(Secret).filter(Secret.key_version_id == str(version_id)).count()
+        if secret_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot revoke: {secret_count} secrets still use this version",
+            )
+
+        db.delete(version)
+        audit_lifecycle(
+            db,
+            KEY_VERSION_REVOKED,
+            admin.get("user_id"),
+            {"key_version_id": version_id},
+        )
+        db.commit()
+
+        logger.info("Revoked key version: %s", version.version_label)
+        return AdminKeyVersionRevokeResponse(
+            revoked=True,
+            version_id=version_id,
+            version_label=version.version_label,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Key version revocation failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Key version revocation failed",
+        )
+
+
+@router.get(
+    "/admin/key-rotation/status",
+    response_model=AdminKeyRotationStatusResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_key_rotation_status(
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminKeyRotationStatusResponse:
+    """Show progress of active rotation jobs (admin only)."""
+    from core.iam.models import KeyRotationJob
+
+    jobs = (
+        db.query(KeyRotationJob)
+        .order_by(
+            KeyRotationJob.started_at.desc() if hasattr(KeyRotationJob, "started_at") else KeyRotationJob.id.desc()
+        )
+        .all()
+    )
+    result = [
+        {
+            "id": j.id,
+            "status": j.status,
+            "total_secrets": j.total_secrets,
+            "completed_secrets": j.completed_secrets,
+            "failed_count": j.failed_count,
+            "started_at": j.started_at.isoformat() if j.started_at else None,
+            "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+        }
+        for j in jobs
+    ]
+    return AdminKeyRotationStatusResponse(jobs=result)
+
+
+@router.post(
+    "/admin/key-rotation/{job_id}/rollback",
+    response_model=AdminKeyRotationJobRollbackResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_key_rotation_job_rollback(
+    job_id: int,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminKeyRotationJobRollbackResponse:
+    """Roll back a completed rotation by job id (admin only).
+
+    Same semantics as POST /admin/key-versions/rollback: reactivates the
+    prior key version, marks the job rolled_back, restored_secrets_count 0
+    under single-KEK semantics. 404 missing; 409 non-completed / non-latest /
+    first-ever rotation.
+    """
+    try:
+        restored = _rollback_key_rotation(db, job_id, admin.get("user_id"))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Key rotation rollback failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Key rotation rollback failed",
+        )
+    return AdminKeyRotationJobRollbackResponse(
+        rolled_back=True,
+        job_id=job_id,
+        restored_secrets_count=restored,
+    )
+
+
+@router.get(
+    "/admin/executors",
+    response_model=AdminExecutorListResponse,
+)
+async def admin_list_executors(
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminExecutorListResponse:
+    """List all registered executors with their current certificates (admin only).
+
+    Returns the latest non-revoked certificate for each executor.
+    Executors are deduplicated by executor_id — only the most recent
+    active cert per executor is returned.
+    """
+    from core.iam.models import Executor, ExecutorCert
+
+    from ..revocation import executor_revocation_state
+
+    certs = db.query(ExecutorCert).order_by(ExecutorCert.created_at.desc()).all()
+
+    # Heartbeat-reported build per executor (feature/version-surfaces);
+    # NULL = daemon predates version reporting — passthrough, never defaulted.
+    versions = {row.id: row.version for row in db.query(Executor).all()}
+
+    # Deduplicate: keep latest cert per executor_id
+    latest: dict[str, ExecutorCert] = {}
+    for cert in certs:
+        if cert.executor_id not in latest:
+            latest[cert.executor_id] = cert
+
+    # Condition 2 (executor-revocation-by-identity): revoked-ness has exactly
+    # ONE source — the shared state, consulted per candidate cert with the
+    # listed serial as the presented serial (identity flag first, then serial
+    # history). The former batch `serial NOT IN (CRL)` filter was a second
+    # implementation, blind to the identity flag.
+    result = []
+    for c in latest.values():
+        if executor_revocation_state(db, c.executor_id, presented_serial=c.serial_number).revoked:
+            continue
+        result.append(
+            {
+                "executor_id": c.executor_id,
+                "serial_number": c.serial_number,
+                "fingerprint": c.fingerprint,
+                "not_before": c.not_before,
+                "not_after": c.not_after,
+                "version": versions.get(c.executor_id),
+            }
+        )
+
+    return AdminExecutorListResponse(executors=result)
+
+
+def _revoke_record_serial(db: Session, executor_id: str, serial_number: str, revoked_at: datetime, reason: str) -> bool:
+    """Add an ExecutorCertRevocation row for a record serial unless one exists.
+
+    Shared by identity-form admin revoke and admin executor removal (ticket
+    admin-executor-row-removal-missing #391, arm (b) remove-implies-revoke —
+    one serial-revocation implementation so the two paths cannot drift).
+    Adds to `db` without committing (rides the caller's transaction).
+
+    The row is written in the ONE canonical serial form, and "already exists"
+    is decided case/padding-insensitively (ticket
+    cert-serial-canonicalization-mismatch #481) so a legacy spelling of the same
+    serial is recognized instead of inserting a second row the lookups ignore.
+
+    Returns True when a new revocation row was added, False when one was
+    already present (idempotent).
+    """
+    from core.iam.models import ExecutorCertRevocation
+
+    serial = canonical_serial(serial_number)
+    existing = (
+        db.query(ExecutorCertRevocation)
+        .filter(serial_match_clause(ExecutorCertRevocation.serial_number, serial))
+        .first()
+    )
+    if existing is not None:
+        return False
+    db.add(
+        ExecutorCertRevocation(
+            serial_number=serial,
+            executor_id=executor_id,
+            revoked_at=revoked_at,
+            reason=reason,
+        )
+    )
+    return True
+
+
+@router.post(
+    "/admin/executors/{executor_id}/revoke",
+    response_model=AdminRevokeExecutorResponse,
+    # #687: keeps the mismatch pair out of a correctly-paired response (see the model above).
+    # Every shipped return on this route passes serial_number, and that column is NOT NULL, so
+    # nothing that answers today loses a key to this flag.
+    response_model_exclude_none=True,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_revoke_executor(
+    executor_id: str,
+    req: AdminRevokeExecutorRequest | None = Body(default=None),
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminRevokeExecutorResponse:
+    """Revoke an executor certificate or identity (admin only).
+
+    Two forms (ticket executor-revocation-by-identity, ruling 1):
+
+    - IDENTITY form (no body serial): sets Executor.revoked_at — TERMINAL for
+      alpha (no un-revoke; re-enrollment requires a NEW executor_id) — and
+      adds the current record serial to the revocation list. Dial gates refuse
+      immediately; a cooperative daemon self-terminates on next poll (~30s).
+    - SERIAL form (body {"serial": "<hex>"}): kills ONE credential without
+      touching the identity — for incident response (e.g. an orphaned
+      predecessor serial whose record pointer has moved on). Note: a serial
+      form on the CURRENT record serial also refuses dial (the shared
+      revocation state checks the record serial when none is presented).
+
+    A DUPLICATE serial-form call is attributed to the owner the revocation ROW names, not to the
+    executor_id in the path it was sent to (#687): that arm answers before the population gate
+    below, so its path value is unverified, and audit_events is append-only. A caller whose path
+    value disagrees is still recorded — in `requested_executor_id`, flagged.
+    """
+    from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation
+
+    now = datetime.now(UTC)
+    serial_arg = req.serial if req is not None else None
+
+    if serial_arg is not None:
+        # --- Serial form: credential-only, identity untouched ---
+        try:
+            int(serial_arg, 16)
+            if len(serial_arg) > 64 or len(serial_arg) == 0:
+                raise ValueError("bad length")
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="serial must be hex, 1-64 chars",
+            )
+        # ONE canonical serial form (ticket cert-serial-canonicalization-mismatch
+        # #481); the duplicate check below reads case/padding-insensitively, so a
+        # legacy spelling of the same serial is an idempotent no-op, not a second row.
+        serial_arg = canonical_serial(serial_arg)
+        existing = (
+            db.query(ExecutorCertRevocation)
+            .filter(serial_match_clause(ExecutorCertRevocation.serial_number, serial_arg))
+            .first()
+        )
+        if existing is not None:
+            # Q3 (#301): the ATTEMPT is the record — the duplicate still
+            # emits, with the no-op visible in fields.
+            #
+            # #687: WHAT gets attributed is the row's owner, not the caller's path value. This
+            # arm returns before the population gate below, so `executor_id` here has been checked
+            # against nothing, and audit_events is append-only — an admin could name any executor
+            # in a permanent record. `existing.executor_id` is the value the ORIGINAL, gated
+            # revocation stored (the identity arm through _revoke_record_serial, the serial arm
+            # through its own gate, rotation through routes/executors.py), so it is the recoverable
+            # truth and it is already in hand. A disagreement stays ON the record as
+            # requested_executor_id + the mismatch flag rather than being dropped: the attempt to
+            # mis-attribute is itself evidence. The event and the response carry the same owner, so
+            # the client is not fed the value the log refused to write.
+            #
+            # executor_id is nullable on this table (alembic 002_executor_cert_revocations:31), so a
+            # row with no stored owner has no truth to prefer and the path value stands — with no
+            # mismatch flag, because there is nothing on this side to disagree with. shortcut: a
+            # NULL-owner row stays attributed to the unverified path value; upgrade if the column
+            # is ever made NOT NULL by a backfill migration.
+            owner = existing.executor_id or executor_id
+            fields = {
+                "executor_id": owner,
+                "serial_number": serial_arg,
+                "already_revoked": True,
+            }
+            mismatch = owner != executor_id
+            if mismatch:
+                fields["requested_executor_id"] = executor_id
+                fields["executor_id_mismatch"] = True
+            audit_lifecycle(db, EXECUTOR_CERT_REVOKED, admin.get("user_id"), fields)
+            db.commit()
+            return AdminRevokeExecutorResponse(
+                revoked=False,
+                executor_id=owner,
+                serial_number=serial_arg,
+                requested_executor_id=executor_id if mismatch else None,
+                executor_id_mismatch=True if mismatch else None,
+            )
+        # #685: consult the credential population BEFORE writing, the way the identity
+        # arm already does at the bottom of this route. Until this check the serial arm's
+        # only lookup was the idempotency query above, so a serial no certificate holds
+        # was accepted with 200 + a stored row, and a path executor_id present in no table
+        # was accepted too — the row was attributed to nothing and revoked nothing.
+        #
+        # Ordered AFTER the idempotency check on purpose. A predecessor serial auto-revoked
+        # at rotation (F6) has no ExecutorCert row any more — `routes/executors.py` rewrites
+        # the one record row to the new serial — so a gate in front would turn a legitimate
+        # repeat into a refusal and change idempotency semantics that #301/#481 pinned.
+        # A known-and-already-revoked serial therefore stays 200 revoked=False, unchanged.
+        #
+        # The population this binds to is `ExecutorCert`, not the `executors` status table:
+        # that is what the identity arm checks, what registration writes, and what survives
+        # a status-row gap, so a live credential stays revocable while a fabricated one is not.
+        cert = db.query(ExecutorCert).filter(serial_match_clause(ExecutorCert.serial_number, serial_arg)).first()
+        if cert is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Executor certificate not found for serial: {serial_arg}",
+            )
+        if cert.executor_id != executor_id:
+            # The serial is real but belongs to a different executor than the path names.
+            # Writing this row would attribute another credential's revocation to an
+            # executor that never held it — the same attribution defect, other direction.
+            # The sentence names the PAIRING as the unknown thing, not the executor: this
+            # executor may exist perfectly well, and a 404 reading "Executor not found"
+            # would tell the operator something false about a row that is there.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Serial {serial_arg} is not a certificate of executor {executor_id}",
+            )
+        db.add(
+            ExecutorCertRevocation(
+                serial_number=serial_arg,
+                executor_id=executor_id,
+                revoked_at=now,
+                reason="Admin revocation (serial form)",
+            )
+        )
+        audit_lifecycle(
+            db,
+            EXECUTOR_CERT_REVOKED,
+            admin.get("user_id"),
+            {"executor_id": executor_id, "serial_number": serial_arg, "already_revoked": False},
+        )
+        db.commit()
+        metrics.TOKEN_REVOKED.labels(reason="executor_serial_revoked").inc()
+        logger.info(
+            "Revoked executor cert serial (identity NOT revoked): executor_id=%s, serial=%s",
+            executor_id,
+            serial_arg,
+        )
+        return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id, serial_number=serial_arg)
+
+    # --- Identity form: terminal flag + current record serial ---
+    cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
+    if cert is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Executor not found: {executor_id}",
+        )
+
+    executor_row = db.query(Executor).filter(Executor.id == executor_id).first()
+    already = executor_row is not None and executor_row.revoked_at is not None
+    if not already and executor_row is not None:
+        executor_row.revoked_at = now
+
+    serial_revocation_present = not _revoke_record_serial(db, executor_id, cert.serial_number, now, "Admin revocation")
+    # Q3 (#301): record the attempt — an identity-form duplicate emits with
+    # already_revoked visible in fields.
+    audit_lifecycle(
+        db,
+        EXECUTOR_REVOKED,
+        admin.get("user_id"),
+        {
+            "executor_id": executor_id,
+            "form": "identity",
+            "already_revoked": already and serial_revocation_present,
+        },
+    )
+    db.commit()
+
+    if already and serial_revocation_present:
+        return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=cert.serial_number)
+
+    metrics.TOKEN_REVOKED.labels(reason=EXECUTOR_REVOKED).inc()  # same label string; single-writer pin (#301)
+    logger.info(
+        "Revoked executor identity (TERMINAL): executor_id=%s, record serial=%s",
+        executor_id,
+        cert.serial_number,
+    )
+    return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id, serial_number=cert.serial_number)
+
+
+@router.delete(
+    "/admin/executors/{executor_id}",
+    response_model=AdminRemoveExecutorResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_remove_executor(
+    executor_id: str,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminRemoveExecutorResponse:
+    """Remove an executor row (admin only) — remove-implies-revoke (#391 arm (b)).
+
+    Ruled design (ticket admin-executor-row-removal-missing #391, owner ruling
+    2026-10-03): one transaction, all guards BEFORE any write —
+
+    - unknown id → 404 (row-keyed, mirroring the revoke route's detail shape);
+    - executor WITH execution-session history → 409 refused loud: sessions are
+      append-only audit evidence, never deleted or cascaded (the
+      fk_execution_sessions_executor_id FK is NO ACTION, so the raw delete
+      would fail at the DB anyway — the route answers before the driver does);
+    - otherwise: revoke the current record serial through the shared helper
+      (same machinery as identity-form admin revoke, reason "Removed by
+      admin"), explicitly delete the executor_certs rows (they FK
+      users.user_id — they ride no cascade from the executors row), delete
+      the executors row, and emit the lifecycle audit row riding the same
+      commit.
+
+    Revocation rows and enrollment-token rows (plain string ids) survive as
+    trail. Re-registration of the same id after removal is intended
+    lifecycle — the row-based terminal identity check dies with the row
+    (server/revocation.py lifecycle note).
+    """
+    from core.iam.models import ExecutionSession, Executor, ExecutorCert
+
+    now = datetime.now(UTC)
+
+    executor_row = db.query(Executor).filter(Executor.id == executor_id).first()
+    if executor_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Executor not found: {executor_id}",
+        )
+
+    sessions_retained = db.query(ExecutionSession).filter(ExecutionSession.executor_id == executor_id).count()
+    if sessions_retained > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Executor '{executor_id}' has {sessions_retained} execution session(s) "
+                "retained as audit evidence; removal refused"
+            ),
+        )
+
+    already_revoked = executor_row.revoked_at is not None
+    cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
+    revoked_serial = cert.serial_number if cert is not None else None
+    if cert is not None:
+        _revoke_record_serial(db, executor_id, cert.serial_number, now, "Removed by admin")
+
+    certs_removed = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).delete()
+    db.delete(executor_row)
+
+    audit_lifecycle(
+        db,
+        EXECUTOR_REVOKED,
+        admin.get("user_id"),
+        {
+            "executor_id": executor_id,
+            "form": "remove",
+            "already_revoked": already_revoked,
+        },
+    )
+    db.commit()
+
+    logger.info(
+        "Removed executor row (remove-implies-revoke): executor_id=%s, revoked_serial=%s, certs_removed=%s",
+        executor_id,
+        revoked_serial,
+        certs_removed,
+    )
+    return AdminRemoveExecutorResponse(removed=True, executor_id=executor_id, revoked_serial=revoked_serial)
+
+
+@router.post(
+    "/admin/executors/{executor_id}/enroll",
+    response_model=AdminEnrollExecutorResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_enroll_executor(
+    executor_id: str,
+    request: Request,
+    _rl: None = Depends(rate_limit_admin_token_gen),
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminEnrollExecutorResponse:
+    """Generate an enrollment token for executor bootstrap registration (admin only).
+
+    Creates a token in the format `enrl_exec_{base64url}` with configurable expiry.
+    The token is hashed and stored in the database. The plaintext token is
+    returned only once.
+
+    The admin delivers the token to the executor operator out-of-band.
+    The executor includes it in the registration request.
+    """
+    # Validate executor_id format before any DB or CA operations
+    try:
+        executor_id = validate_executor_id(executor_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+    from core.iam.models import ExecutorEnrollmentToken
+
+    try:
+        config = getattr(request.app.state, "config", None)
+        ttl_seconds = config.executor_enrollment.token_ttl_seconds if config else 1800
+
+        caller = getattr(request.state, "auth_user", {})
+        admin_user_id = caller.get("user_id", "unknown")
+        session_id = caller.get("session_id")
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent")
+
+        plaintext = "enrl_exec_" + get_secure_token(32)
+        pepper = config.recovery_code_pepper if config else ""
+        token_hash = hmac.new(
+            pepper.encode("utf-8"),
+            plaintext.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=ttl_seconds)
+
+        token = ExecutorEnrollmentToken(
+            executor_id=executor_id,
+            token_hash=token_hash,
+            state="created",
+            created_by=admin_user_id,
+            created_by_session_id=str(session_id) if session_id else None,
+            created_from_ip=client_ip,
+            created_from_user_agent=user_agent,
+            expires_at=expires_at,
+        )
+        db.add(token)
+
+        # Encrypt forensic identity fields into JSON blob before flush
+        meta_dict = {
+            "ip": client_ip,
+            "ua": user_agent,
+            "sid": str(session_id) if session_id else None,
+        }
+        core = getattr(request.app.state, "core", None)
+        if core is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Core not initialized — cannot encrypt admin metadata",
+            )
+        wrapped_dek, nonce, ciphertext = core.encrypt(json.dumps(meta_dict).encode("utf-8"))
+        token.admin_meta_wrapped_dek = wrapped_dek
+        token.admin_meta_nonce = nonce
+        token.admin_meta_ciphertext = ciphertext
+
+        db.flush()
+
+        # #301 Q5-class migration to the single writer; the owner extension
+        # (2026-10-01 ruling note) DROPS token_hash_preview — no hash
+        # material in audit fields.
+        audit_lifecycle(
+            db,
+            EXECUTOR_ENROLLMENT_TOKEN_CREATED,
+            admin_user_id,
+            {
+                "executor_id": executor_id,
+                "token_id": token.id,
+                "expires_at": expires_at.isoformat(),
+                "created_by_session_id": str(session_id) if session_id else None,
+                "created_from_ip": client_ip,
+                "created_from_user_agent": user_agent,
+                "token_created_at": now.isoformat(),
+            },
+        )
+        db.commit()
+        metrics.TOKEN_CREATED.labels(type="executor").inc()
+
+        logger.info(
+            "Admin created executor enrollment token for %s (by %s, ttl=%ds)",
+            executor_id,
+            admin_user_id,
+            ttl_seconds,
+        )
+
+        return AdminEnrollExecutorResponse(
+            executor_id=executor_id,
+            enrollment_token=plaintext,
+            expires_in_seconds=ttl_seconds,
+            expires_at=expires_at.isoformat(),
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Executor enrollment failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Executor enrollment failed",
+        )
+
+
+# --- Phase 6: Re-enrollment ---
+
+
+@router.post(
+    "/admin/users/{user_id}/re-enroll",
+    response_model=AdminReEnrollResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_re_enroll(
+    user_id: USER_ID_PATH,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminReEnrollResponse:
+    """Re-enroll a user who has lost all credentials (admin only).
+
+    Phase 6: Resets user for fresh enrollment.
+    - Sets user status to pending_enrollment
+    - Revokes all active enrollment tokens
+    - Deactivates all WebAuthn credentials
+    - Generates new enrollment token
+    """
+    try:
+
+        from core.iam.enrollment_manager import EnrollmentError
+        from core.iam.models import User, WebAuthnCredential
+
+        em = enrollment_manager(db, request)
+
+        # Find user
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not found: {user_id}",
+            )
+
+        # Deactivate all active credentials
+        deactivated = (
+            db.query(WebAuthnCredential)
+            .filter(
+                WebAuthnCredential.user_id == user.user_id,
+                WebAuthnCredential.is_active.is_(True),
+            )
+            .update({"is_active": False}, synchronize_session="fetch")
+        )
+
+        # Revoke all active enrollment tokens
+        tokens_revoked = em.revoke_all_active_tokens(user.user_id)
+
+        # Set user status to pending_enrollment
+        user.status = "pending_enrollment"
+
+        # Generate new enrollment token
+        token, plaintext = em.create_enrollment_token(user.user_id)
+        config = getattr(request.app.state, "config", None)
+        if config and config.recovery_code_pepper:
+            token.binding_hash = compute_binding_hash(user_id, plaintext, config.recovery_code_pepper)
+        # #301 F4: the reset AND its fresh token are audited value-free —
+        # counts and ids only, never the plaintext.
+        audit_lifecycle(
+            db,
+            USER_REENROLLED,
+            admin.get("user_id"),
+            {
+                "target_user_id": user_id,
+                "credentials_deactivated": deactivated,
+                "tokens_revoked": tokens_revoked,
+            },
+        )
+        audit_lifecycle(
+            db,
+            ENROLLMENT_TOKEN_ISSUED,
+            admin.get("user_id"),
+            {"target_user_id": user_id, "token_id": token.id, "previous_tokens_revoked": tokens_revoked},
+        )
+        db.commit()
+
+        logger.info(
+            "Re-enrolled user '%s' (ID: %d), deactivated %d credentials, revoked %d tokens",
+            user_id,
+            user.id,
+            deactivated,
+            tokens_revoked,
+        )
+
+        return AdminReEnrollResponse(
+            user_id=user_id,
+            status=user.status,
+            enrollment_token=plaintext,
+            expires_in_seconds=int(em.config.token_expiry.total_seconds()),
+            credentials_deactivated=deactivated,
+            tokens_revoked=tokens_revoked,
+        )
+    except HTTPException:
+        raise
+    except EnrollmentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception:
+        logger.exception("Re-enrollment failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Re-enrollment failed",
+        )
+
+
+# --- Phase 7: Admin Token Management ---
+
+
+@router.get(
+    "/admin/users/{user_id}/enrollment-tokens",
+    response_model=AdminUserTokenListResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_list_user_tokens(
+    user_id: USER_ID_PATH,
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminUserTokenListResponse:
+    """List all enrollment tokens for a user (admin only).
+
+    Phase 7: Shows token states for audit/management.
+    """
+    from core.iam.models import EnrollmentToken, User
+
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User not found: {user_id}",
+        )
+
+    tokens = (
+        db.query(EnrollmentToken)
+        .filter(EnrollmentToken.user_id == user.user_id)
+        .order_by(EnrollmentToken.created_at.desc())
+        .all()
+    )
+
+    result = [
+        {
+            "id": t.id,
+            "state": t.state,
+            "created_at": t.created_at.isoformat(),
+            "expires_at": t.expires_at.isoformat(),
+            "used_at": t.used_at.isoformat() if t.used_at else None,
+        }
+        for t in tokens
+    ]
+
+    return AdminUserTokenListResponse(tokens=result)
+
+
+@router.post(
+    "/admin/users/{user_id}/enrollment-tokens",
+    response_model=AdminUserTokenCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_user_token(
+    user_id: USER_ID_PATH,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminUserTokenCreateResponse:
+    """Issue a new enrollment token for a user (admin only).
+
+    Phase 7: Revokes existing tokens and issues a new one.
+    """
+    try:
+        from core.iam.models import User
+
+        em = enrollment_manager(db, request)
+
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not found: {user_id}",
+            )
+
+        # Revoke existing active tokens
+        tokens_revoked = em.revoke_all_active_tokens(user.user_id)
+
+        # Create new token
+        token, plaintext = em.create_enrollment_token(user.user_id)
+        config = getattr(request.app.state, "config", None)
+        if config and config.recovery_code_pepper:
+            token.binding_hash = compute_binding_hash(user_id, plaintext, config.recovery_code_pepper)
+        # #301 F4: issuance audited value-free (id, counts — never plaintext).
+        audit_lifecycle(
+            db,
+            ENROLLMENT_TOKEN_ISSUED,
+            admin.get("user_id"),
+            {"target_user_id": user_id, "token_id": token.id, "previous_tokens_revoked": tokens_revoked},
+        )
+        db.commit()
+
+        return AdminUserTokenCreateResponse(
+            user_id=user_id,
+            enrollment_token=plaintext,
+            expires_in_seconds=int(em.config.token_expiry.total_seconds()),
+            previous_tokens_revoked=tokens_revoked,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Token creation failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token creation failed",
+        )
+
+
+@router.delete(
+    "/admin/enrollment-tokens/{token_id}",
+    response_model=AdminTokenRevokeResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_revoke_token(
+    token_id: int,
+    request: Request,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminTokenRevokeResponse:
+    """Revoke a specific enrollment token (admin only).
+
+    Phase 7: Revokes a single token by ID.
+    """
+    try:
+        em = enrollment_manager(db, request)
+        revoked = em.revoke_token(token_id)
+        # Q3 (#301): the attempt is the record — a no-op revoke emits with
+        # revoked:false visible in fields.
+        audit_lifecycle(
+            db,
+            ENROLLMENT_TOKEN_REVOKED,
+            admin.get("user_id"),
+            {"token_id": token_id, "revoked": revoked},
+        )
+        db.commit()
+        if revoked:
+            metrics.TOKEN_REVOKED.labels(reason="admin_revoked").inc()
+
+        return AdminTokenRevokeResponse(revoked=revoked, token_id=token_id)
+    except Exception:
+        logger.exception("Token revocation failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token revocation failed",
+        )
+
+
+@router.post(
+    "/admin/key-rotation",
+    response_model=AdminKeyVersionRotateResponse,
+)
+async def admin_key_rotation(
+    req: AdminKeyVersionRotateRequest,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminKeyVersionRotateResponse:
+    """Rotate the active key version (alias for /admin/key-versions/rotate).
+
+    Admin only. Synchronous label-boundary rotation; no secrets are
+    re-wrapped (single-KEK alpha semantics).
+    """
+    return await admin_key_version_rotate(req, admin, db)
+
+
+# --- Admin mTLS Certificate Revocation ---
+
+
+class AdminRevokeCertRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
+    serial: str = Field(..., description="Hex serial number of certificate to revoke")
+    reason: str = Field(default="unspecified", description="Revocation reason", max_length=64)
+
+
+#: The named refusal for a serial the admin-credential population does not name (#684).
+#: Kept as a module constant in the project's existing refusal-string shape (the shipped
+#: ``REFUSE_UNREGISTERED`` in ``core_relay_certs.py`` is the sibling), so a test can pin the
+#: vocabulary rather than pattern-match prose.
+REFUSE_UNREGISTERED_ADMIN_CERT = "REFUSE_UNREGISTERED_ADMIN_CERT"
+
+#: The one refusal sentence: cause, consequence, remedy.
+_ADMIN_UNREGISTERED_DETAIL = (
+    f"{REFUSE_UNREGISTERED_ADMIN_CERT}: serial {{serial}} names no admin credential this core "
+    "vouches for, so there is no certificate for this request to revoke and no consumer that "
+    "could ever honour it. Register it first: restart the core with VENYA_ADMIN_CERT pointing at "
+    "the admin credential it presents, or enroll it explicitly at "
+    "POST /api/v1/admin/certs/register. An unregistered serial is NOT treated as revoked and NOT "
+    "treated as live-by-default — revoking the unknown is how a store becomes an allowlist."
+)
+
+
+class AdminRevokeCertResponse(BaseModel):
+    serial: str
+    revoked: bool
+    reason: str
+    already_revoked: bool = False
+
+
+@router.post("/admin/certs/revoke")
+async def admin_revoke_admin_cert(
+    req: AdminRevokeCertRequest,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminRevokeCertResponse:
+    """Revoke an admin certificate by serial number.
+
+    Admin only. Idempotent — revoking the same serial twice returns success.
+
+    Default-deny on MEMBERSHIP (#684): the serial must name a credential this core
+    vouches for in ``admin_credentials``, or the verb refuses. Format was never
+    membership — the old path validated the operator's string, found no row in the
+    revocation table, and blind-inserted one anyway, exiting 0 over a credential that
+    does not exist while the live admin credential kept transacting.
+
+    Truth table (every accept paired with a reject, same shape as the shipped relay
+    route in ``core_relay_certs.py``):
+
+    | registry row for the serial | revocation row | outcome |
+    |---|---|---|
+    | present | absent | 200 ``revoked=true``, row inserted, audit written |
+    | present OR absent | present | 200 ``revoked=true, already_revoked=true`` — idempotent, unchanged (``revoked=False`` is not this route's shipped face) |
+    | ABSENT | absent | **403 ``REFUSE_UNREGISTERED_ADMIN_CERT``**, nothing written, nothing audited |
+    | — | — | malformed serial -> 400 before any lookup |
+
+    The already-revoked arm stays reachable without a registry row on purpose: a
+    credential revoked by a boot predating the 041 population is a fact already recorded,
+    and refusing the repeat would turn a truthful no-op into an error and make the
+    idempotency depend on when the row was written.
+    """
+    # Validate the OPERATOR STRING first — the 400 contract is unchanged: non-empty
+    # hex, up to 64 digits — the width the serial_number columns store (#481 made 16 a write
+    # MINIMUM, not a ceiling). Then normalize at the STORAGE BOUNDARY in the ONE
+    # canonical serial form (ticket cert-serial-canonicalization-mismatch #481,
+    # superseding the 2026-09-20 uppercase ruling B — whose stated reason was that
+    # nginx $ssl_client_serial is uppercase, and the middleware has since moved to
+    # the crypto-forwarded certificate, so it never compares a header value again).
+    # Legacy uppercase/unpadded rows keep matching: every reader compares the
+    # case/padding-insensitive match key.
+    provided = req.serial.strip()
+    try:
+        int(provided, 16)
+        if not provided or len(provided) > 64:
+            raise ValueError("bad length")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid serial format — must be hex string (up to 64 chars)",
+        )
+    serial = canonical_serial(provided)
+
+    # Check if already revoked (idempotent) — same insensitive match as the
+    # enforcement lookup, so the answer cannot disagree with what refuses.
+    from core.iam.models import AdminCertRevocation, AdminCredential
+
+    existing = (
+        db.query(AdminCertRevocation).filter(serial_match_clause(AdminCertRevocation.serial_number, serial)).first()
+    )
+
+    if existing:
+        # Q3 (#301): duplicate attempt still recorded, no-op visible.
+        audit_lifecycle(
+            db,
+            ADMIN_CERT_REVOKED,
+            admin.get("user_id"),
+            {"serial_number": serial, "reason": existing.reason, "already_revoked": True},
+        )
+        db.commit()
+        logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
+        return AdminRevokeCertResponse(serial=serial, revoked=True, reason=existing.reason, already_revoked=True)
+
+    # MEMBERSHIP, default-deny (#684). Nothing is written and NOTHING IS AUDITED on a
+    # miss: an ADMIN_CERT_REVOKED row for a serial that names no credential is the false
+    # statement this defect exists to stop, and an audit trail that asserts a revocation
+    # that never happened is worse than no answer at all.
+    known = db.query(AdminCredential).filter(serial_match_clause(AdminCredential.serial_number, serial)).first()
+    if known is None:
+        # DEFAULT DENY. Not 404 — same reasoning the relay route records: the point is that
+        # the caller is REFUSED, and a 404 reads like "nothing of that name exists
+        # anywhere" rather than "this store does not vouch for it, so I will not act on it".
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_ADMIN_UNREGISTERED_DETAIL.format(serial=serial),
+        )
+
+    # Insert new revocation
+    now = datetime.now(UTC)
+    revocation = AdminCertRevocation(serial_number=serial, reason=req.reason, revoked_at=now)
+    db.add(revocation)
+    audit_lifecycle(
+        db,
+        ADMIN_CERT_REVOKED,
+        admin.get("user_id"),
+        {"serial_number": serial, "reason": req.reason, "already_revoked": False},
+    )
+    db.commit()
+
+    logger.info("Admin cert %s revoked (reason: %s)", serial, req.reason)
+    return AdminRevokeCertResponse(serial=serial, revoked=True, reason=req.reason)
+
+
+# --- Recovery-code reissue (ticket recovery-code-reissue #296) ---
+
+
+class RecoveryCodeReissueResponse(BaseModel):
+    user_id: str
+    recovery_code: str
+
+
+@router.post(
+    "/admin/recovery-code/reissue",
+    response_model=RecoveryCodeReissueResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_reissue_recovery_code(
+    request: Request,
+    user_info: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> RecoveryCodeReissueResponse:
+    """Reissue the caller's own break-glass recovery code (admin-role members).
+
+    Gate ordering (owner rulings Q1/Q2/Q9/Q10, A1 brief record):
+      1. Bearer SESSION required. The mTLS admin identity arrives here as a
+         caller=admin dict with no user_id and holds no role memberships —
+         it can never reach the mint (ruling: cert identities must not pass).
+      2. Admin-role membership of the SESSION user (self-reissue only).
+         Auditor-tier sessions fail here structurally (SoD exclusivity:
+         an auditor never holds admin) — Q7 ruling: no bespoke auditor check.
+      3. All other fallible checks (user row, pepper) run BEFORE elevation
+         consumption (Q10): a pre-check failure never burns the token.
+      4. Elevation: X-Elevation-Token header (single-use WebAuthn-asserted
+         token). The atomic conditional UPDATE mirrors
+         credentials._verify_elevation, but the burn lands via FLUSH with
+         the final commit (not its immediate commit): token burn, hash
+         replace and audit row are ONE transaction — a failure after the
+         consume rolls the burn back (get_db; #292/H1 semantics, pinned by
+         test_post_consume_failure_rolls_back_token_burn).
+      5. Mint: generate 256-bit base62 code (server/recovery_codes.py, the
+         #296-Q8 single source), last-wins atomic replace of the single
+         String(64) hash column (Q3 — one live code by construction); a
+         NULL hash is allowed and mints fresh (Q9).
+
+    The plaintext code crosses ONLY the authenticated response boundary
+    exactly once — never logged, never stored, never in the audit row
+    (value-free fields per Q5).
+    """
+    from core.iam.models import AuditEvent, ElevationToken, Role, RoleMember, User
+    from sqlalchemy import update
+
+    from ..recovery_codes import generate_recovery_code, hash_recovery_code
+
+    # Second credential (ticket recovery-reissue-mtls-identity-collision
+    # #340, ruled A): when admin-mTLS is enabled the mint additionally
+    # requires the cert-verified-channel flag the SessionMiddleware sets
+    # AFTER crypto-verifying the presented certificate (its
+    # SESSION_REQUIRED_ADMIN_PATHS fall-through). Absent flag == absent
+    # cert: a session that never crossed the cert gate is refused here
+    # (defense-in-depth mirror of the middleware — the middleware already
+    # 403s no-cert requests when enabled).
+    config_state = getattr(request.app.state, "config", None)
+    if (
+        config_state is not None
+        and getattr(getattr(config_state, "admin_mtls", None), "enabled", False)
+        and not getattr(request.state, "admin_cert_verified", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Certificate-verified channel required to reissue a recovery code",
+        )
+
+    user_id = user_info.get("user_id")
+    if not user_id or user_info.get("caller") in ("admin", "executor"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session authentication required to reissue a recovery code",
+        )
+
+    membership = db.query(RoleMember).join(Role).filter(Role.name == "admin", RoleMember.user_id == user_id).first()
+    if membership is None:
+        # Denials are audit-logged (Q5): commit-before-raise so the event
+        # survives the get_db rollback (auditor_secret_read_denied pattern,
+        # routes/secrets.py); fail-closed-log: an audit-write failure never
+        # upgrades the denial. Value-free fields — nothing to leak here, the
+        # code has not been generated yet.
+        try:
+            db.add(
+                AuditEvent(
+                    event_type="recovery_code_reissue_denied",
+                    user_id=user_id,
+                    fields={
+                        "outcome": "denied",
+                        "reason": "admin role membership required",
+                        "actor_user_id": user_id,
+                        "target_user_id": user_id,
+                        "endpoint": "/api/v1/admin/recovery-code/reissue",
+                    },
+                    timestamp=datetime.now(UTC),
+                )
+            )
+            db.commit()
+        except Exception:
+            logger.exception("Audit write failed on recovery-code reissue deny (still denying)")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role membership required to reissue a recovery code",
+        )
+
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    pepper = getattr(
+        getattr(request.app.state, "config", None),
+        "recovery_code_pepper",
+        "",
+    )
+    if not pepper:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Recovery pepper not configured",
+        )
+
+    elevation_token = request.headers.get("X-Elevation-Token")
+    if not elevation_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Elevation token required to reissue a recovery code",
+        )
+
+    token_hash = hashlib.sha256(elevation_token.encode()).hexdigest()
+    server_config = getattr(request.app.state, "config", None)
+    tolerance = (
+        server_config.clock_skew.token_tolerance_seconds
+        if server_config and hasattr(server_config, "clock_skew")
+        else 60
+    )
+    expiry_cutoff = datetime.now(UTC) - timedelta(seconds=tolerance)
+    result = db.execute(
+        update(ElevationToken)
+        .where(
+            ElevationToken.token_hash == token_hash,
+            ElevationToken.user_id == user_id,
+            ElevationToken.used.is_(False),
+            ElevationToken.expires_at > expiry_cutoff,
+        )
+        .values(used=True)
+    )
+    # Deferred commit (point 4 of the docstring): flush only — everything
+    # below rides ONE final commit, and any raise routes through get_db's
+    # rollback, un-burning the token.
+    db.flush()
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired elevation token",
+        )
+
+    code = generate_recovery_code()
+    user.recovery_code_hash = hash_recovery_code(code, pepper)
+    db.add(
+        AuditEvent(
+            event_type="recovery_code_reissued",
+            user_id=user_id,
+            fields={
+                "outcome": "reissued",
+                "actor_user_id": user_id,
+                "target_user_id": user_id,
+                "endpoint": "/api/v1/admin/recovery-code/reissue",
+            },
+            timestamp=datetime.now(UTC),
+        )
+    )
+    db.commit()
+
+    logger.info("Recovery code reissued for %s", user_id)
+    return RecoveryCodeReissueResponse(user_id=user_id, recovery_code=code)

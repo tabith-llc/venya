@@ -1,0 +1,547 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Server configuration."""
+
+import logging
+import os
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger("venya.server")
+
+
+class DatabaseConfig(BaseModel):
+    """Database configuration."""
+
+    database_url: str | None = Field(default=None, description="PostgreSQL database URL")
+    passphrase: str | None = Field(
+        default=None, description="Core encryption passphrase for DEK/KEK key derivation (required in production)"
+    )
+    wal_mode: bool = Field(default=True, description="Enable WAL mode")
+
+
+class SessionConfig(BaseModel):
+    """Session configuration."""
+
+    session_timeout: int = Field(
+        default=900,
+        description="Idle timeout in seconds before session expires (default: 15 min)",
+    )
+    access_token_ttl: int = Field(
+        default=300,
+        description="Access token lifetime in seconds (default: 5 min)",
+    )
+    max_session_duration: int = Field(
+        default=14400,
+        description="Hard cap on session duration in seconds (default: 4 hours)",
+    )
+
+    @model_validator(mode="after")
+    def _session_timeout_within_max(self) -> SessionConfig:
+        if self.session_timeout > self.max_session_duration:
+            raise ValueError(
+                f"session.session_timeout ({self.session_timeout}s) must not exceed "
+                f"session.max_session_duration ({self.max_session_duration}s)"
+            )
+        return self
+
+
+class RateLimitConfig(BaseModel):
+    """Rate limiting configuration."""
+
+    enforce: bool = Field(
+        default=True,
+        description="Whether to enforce rate limiting",
+    )
+    max_attempts: int = Field(
+        default=5,
+        description="Maximum failed attempts before lockout",
+    )
+    window_seconds: int = Field(
+        default=300,
+        description="Time window in seconds for counting failures",
+    )
+    ip_rate_limit: int = Field(
+        default=1000,
+        description="Maximum requests per IP per minute",
+    )
+    auth_requests_per_minute: int = Field(
+        default=20,
+        description=(
+            "Maximum auth-endpoint requests per IP per minute (tighter tier — "
+            "was silently collapsed into ip_rate_limit; ticket "
+            "sec-endpoint-ratelimit-hardening #8). Env override: "
+            "VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE"
+        ),
+    )
+    break_glass_requests_per_hour: int = Field(
+        default=5,
+        description="Maximum break-glass (recovery) requests per IP per hour",
+    )
+    cert_issuance_requests_per_hour: int = Field(
+        default=5,
+        description=(
+            "Maximum admin-certificate mints per key per hour (RF-6 §2.7: single "
+            "digits, because the honest cost of one mint is one FIDO2 touch and "
+            "ruling 4a says cadence is driven by job length, not by fear of "
+            "expiry). Env override: VENYA_RATE_LIMIT__CERT_ISSUANCE_REQUESTS_PER_HOUR. "
+            "Keys the classified POST /api/v1/admin/certs/issue path."
+        ),
+    )
+    lockout_reinstate_minutes: int = Field(
+        default=15,
+        description="Minutes before a locked-out user can try again",
+    )
+
+
+class Fido2Config(BaseModel):
+    """WebAuthn/FIDO2 configuration."""
+
+    rp_id: str = Field(
+        default="localhost",
+        description="WebAuthn relying party ID",
+    )
+    rp_name: str = Field(
+        default="Venya",
+        description="WebAuthn relying party name",
+    )
+    origins: list[str] = Field(
+        default_factory=lambda: ["https://localhost"],
+        description="Allowed_origins for WebAuthn",
+    )
+    enrollment_token_ttl: int = Field(
+        default=15,
+        description="Enrollment token lifetime in minutes",
+    )
+    user_verification: str = Field(
+        default="discouraged",
+        description="Server-side WebAuthn user-verification for auth ceremonies: discouraged|preferred|required (#413)",
+    )
+
+    @field_validator("user_verification")
+    @classmethod
+    def _validate_user_verification(cls, v: str) -> str:
+        if v not in ("discouraged", "preferred", "required"):
+            raise ValueError("fido2.user_verification must be one of: discouraged, preferred, required")
+        return v
+
+
+class CRLConfig(BaseModel):
+    """Configuration for Certificate Revocation List management."""
+
+    crl_retention_days: int = Field(
+        default=90,
+        ge=1,
+        le=365,
+        description=(
+            "Days to keep revocation records before purge. On the EXECUTOR plane this window "
+            "is no longer consumed by any purge: ExecutorCertRevocation is exempt from "
+            "time-based purge (refs #685, owner ruling 2026-10-20), so the value is bound by "
+            "the validator below and checked at startup rather than driving a DELETE. "
+            "Do not read that as license to set it low: the validator refuses any value below "
+            "the longest leaf-certificate lifetime whose revocations live in the two "
+            "revocation tables — max(EXECUTOR_VALIDITY_DAYS=30, ADMIN_CERT_VALIDITY_DAYS=90) = "
+            "90 — so no config value can age out a row while the credential it names could "
+            "still be valid, even if the exemption is ever reverted and even on the admin "
+            "path whose purge is not wired today. NOTE: the field floor `ge=1` is no longer a "
+            "lawfully reachable value — 1 through 89 are refused at startup by this validator; "
+            "the bound is kept as a type guard, not as a usable range (refs #685). Env "
+            "override: VENYA_CRL__CRL_RETENTION_DAYS."
+        ),
+    )
+    crl_url: str | None = Field(
+        default=None,
+        description="CRL Distribution Point URL for CDP extension (e.g., https://crl.venya.internal/api/v1/executors/certs/crl)",
+    )
+    revocation_read_lock_timeout_ms: int = Field(
+        default=300,
+        ge=1,
+        le=30000,
+        description=(
+            "#603 AC1 bounded-time revocation read: max milliseconds a request-path read of the "
+            "lockable revocation population will WAIT on a table lock before the read is refused "
+            "in the shipped stale class (503, 'no revocation asserted'). Bounds the LOCK WAIT, not "
+            "a slow scan — statement_timeout stays as it ships and is not this knob. A read that "
+            "refuses is an availability fault, never an all-clear and never a revocation. "
+            "Uncontended baseline measured 29 ms; 300 ms is ~10x headroom. Env override: "
+            "VENYA_CRL__REVOCATION_READ_LOCK_TIMEOUT_MS. (refs #603)"
+        ),
+    )
+    revocation_read_scan_timeout_ms: int = Field(
+        default=2000,
+        ge=50,
+        le=10000,
+        description=(
+            "#654: max milliseconds one request-path read of the lockable revocation population "
+            "may take to EXECUTE before PostgreSQL cancels it (the read's own "
+            "``statement_timeout``, set inside the same savepoint as the lock deadline above and "
+            "reverted with it). This bounds the SLOW SCAN, which the lock knob does not: a read "
+            "that takes 12 s to answer raises nothing, counts nowhere, and parks the core's single "
+            "event loop for all 12 s while the executor polling it gave up at 10 s. A refusal is "
+            "the same availability fault as the lock refusal — same 503, same 'no revocation "
+            "asserted' sentence — but it is counted on its own series, "
+            "`venya_revocation_read_scan_refusals_total`. Floor 50 ms stays above the measured 29 ms "
+            "uncontended baseline; ceiling 10 s is the daemon's own request timeout, because a bound "
+            "above it would let the core answer after the caller had left, which is the disagreement "
+            "this knob exists to close. It must stay strictly ABOVE "
+            "`revocation_read_lock_timeout_ms`: ``statement_timeout`` also counts the time a "
+            "statement spends waiting for a lock, so a scan bound below the lock bound would report "
+            "every lock convoy as a slow scan and take #603 AC1's vocabulary away from it. Env "
+            "override: VENYA_CRL__REVOCATION_READ_SCAN_TIMEOUT_MS. (refs #654, #656)"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _retention_covers_revoked_population_lifetime(self) -> CRLConfig:
+        """Startup check: a retention window can never be shorter than the credential it guards.
+
+        The shipped idiom for a bound a single field cannot express is a ``model_validator`` that
+        raises — same shape as ``SessionConfig._session_timeout_within_max``,
+        ``_scan_deadline_above_lock_deadline`` below, and
+        ``revocation_snapshot.validate_snapshot_windows`` on the module-constant side. The pair
+        here is a config field against CA-plane constants, so it is checked when the core LOADS
+        its config: a value that violates it stops the process, it does not boot and then misbehave
+        on a 5-minute schedule.
+
+        Why the anchor is the MAXIMUM leaf lifetime across both revocation populations, not just
+        the wired one (lead ruling, leg 286 / F2, on the owner's own clause "even if the exemption
+        is ever reverted"): a path getting wired later IS that future change, and a guard that
+        validates only today's wired call site is dead weight the moment ``AdminCAManager`` gains a
+        caller — with nobody left to remember to add it. So:
+
+            EXECUTOR_VALIDITY_DAYS (30, executor_cert_revocations — the table #685 named)
+            ADMIN_CERT_VALIDITY_DAYS (90, admin_cert_revocations — present, unwired, unchanged)
+            -> anchor = max(30, 90) = 90
+
+        ``CA_VALIDITY_DAYS`` (3650) does NOT enter the anchor: that is the ISSUER lifetime, and no
+        code path writes a CA serial into either revocation table. Relay credentials do not enter
+        it either — ``revocation_snapshot.relay_revocation_populations`` reads
+        ``CoreRelayCredential.revoked_at`` off the registry row, not off a revocation table.
+
+        **STRICT ``>=``, NOT ``>`` — this is the load-bearing character.** The shipped default
+        (90) equals the admin anchor (90), so a strict-greater comparison would refuse the
+        DEFAULT config and stop every core on its next restart: enforcement would become an
+        outage. ``test_crl_config_max_boundary`` plus
+        ``test_shipped_default_retention_sits_on_the_anchor_and_loads`` pin both halves.
+
+        The import is deferred on purpose: ``ca.py`` imports ``config.py`` at module scope, so a
+        module-scope import here would be a real cycle. The constants are read at validation time,
+        which is after both modules are loaded.
+        """
+        from .ca import ADMIN_CERT_VALIDITY_DAYS, EXECUTOR_VALIDITY_DAYS
+
+        min_retention_days = max(EXECUTOR_VALIDITY_DAYS, ADMIN_CERT_VALIDITY_DAYS)
+        if self.crl_retention_days < min_retention_days:
+            raise ValueError(
+                f"crl.crl_retention_days ({self.crl_retention_days} days) must stay at or above "
+                f"{min_retention_days} days — max(EXECUTOR_VALIDITY_DAYS "
+                f"({EXECUTOR_VALIDITY_DAYS}), ADMIN_CERT_VALIDITY_DAYS "
+                f"({ADMIN_CERT_VALIDITY_DAYS})), the longest leaf-certificate lifetime whose "
+                "revocations live in the revocation tables: a purge window shorter than the "
+                "certificate lifetime it follows can DELETE a revocation row while the credential "
+                "it names is still inside its own validity period, which answers 'not revoked' "
+                "about a revoked executor. The executor table is exempt from time-based purge "
+                "(refs #685) and this bound is what keeps a revert — or a newly wired admin path — "
+                "from reopening that door (refs #685)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _scan_deadline_above_lock_deadline(self) -> CRLConfig:
+        """The pairing the two knobs need, not a decoration: see the field description above.
+
+        With a scan bound at or below the lock bound, a held ``ACCESS EXCLUSIVE`` would trip
+        ``statement_timeout`` before ``lock_timeout`` could answer 55P03, and every lock convoy on
+        the plane would be journalled and counted as a slow scan.
+        """
+        if self.revocation_read_scan_timeout_ms <= self.revocation_read_lock_timeout_ms:
+            raise ValueError(
+                f"crl.revocation_read_scan_timeout_ms ({self.revocation_read_scan_timeout_ms} ms) "
+                f"must stay above crl.revocation_read_lock_timeout_ms "
+                f"({self.revocation_read_lock_timeout_ms} ms): statement_timeout counts lock waits "
+                "too, so a scan bound at or below the lock bound reports every lock convoy as a "
+                "slow scan and empties the #603 refusal series it must feed"
+            )
+        return self
+
+
+class CASecurityConfig(BaseModel):
+    """CA key security configuration."""
+
+    key_passphrase_env: str = Field(
+        default="VENYA_CA_KEY_PASSPHRASE",
+        description="Environment variable containing the CA key passphrase.",
+    )
+
+
+class ExecutorEnrollmentConfig(BaseModel):
+    """Configuration for executor enrollment and registration."""
+
+    # Token lifecycle
+    token_ttl_seconds: int = Field(
+        default=1800,
+        ge=120,
+        le=86400,
+        description="Enrollment token lifetime in seconds (120–86400)",
+    )
+
+    # Authorization
+    require_token: bool = Field(
+        default=True,
+        description=(
+            "Reject executor registrations without a valid enrollment token. "
+            "Default TRUE (ticket executor-rotation-require-token-400, user ruling "
+            "2026-09-20): tokenless registration physically proven to mint full "
+            "executor identities from any host reaching the core. Set false only "
+            "for deliberately open enrollment."
+        ),
+    )
+
+    # Rate limiting
+    token_generation_per_minute: int = Field(
+        default=10,
+        description="Max enrollment tokens generated per admin per minute",
+    )
+    registration_attempts_per_minute: int = Field(
+        default=5,
+        description="Max registration attempts per IP/executor per minute",
+    )
+    registration_ip_per_minute: int = Field(
+        default=20,
+        description="Max registration attempts per source IP per minute (batch enrollment)",
+    )
+    registration_global_per_minute: int = Field(
+        default=100,
+        ge=1,
+        description="Max registration attempts per IP per minute (emergency backstop)",
+    )
+    registration_first_attempt_per_minute: int = Field(
+        default=3,
+        ge=1,
+        description="Max first-time registrations per source IP per minute",
+    )
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether to enforce executor enrollment rate limiting",
+    )
+
+    @field_validator("token_ttl_seconds")
+    @classmethod
+    def warn_extended_ttl(cls, v: int) -> int:
+        if v > 14400:
+            logger.warning(
+                "Executor enrollment token TTL is %d seconds (>4h). "
+                "Consider using shorter-lived tokens for production deployments.",
+                v,
+            )
+        return v
+
+
+class CORSConfig(BaseModel):
+    """Cross-Origin Resource Sharing configuration."""
+
+    origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost"],
+        description="Allowed CORS origins. Empty list = deny all cross-origin.",
+    )
+    allow_credentials: bool = True
+    allow_methods: list[str] = Field(
+        default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
+    )
+    allow_headers: list[str] = Field(
+        default_factory=lambda: ["Authorization", "Content-Type"],
+    )
+    expose_headers: list[str] = Field(
+        default_factory=lambda: ["X-Request-ID", "X-Total-Count"],
+        description="Response headers exposed to browser clients",
+    )
+    max_age: int = Field(default=3600, ge=0, description="Preflight cache in seconds")
+
+
+class ClockSkewConfig(BaseModel):
+    """Clock skew tolerance configuration.
+
+    Different environments have different clock sync realities:
+    - Cloud/Kubernetes: NTP reliable, 60s is fine.
+    - On-prem/edge: Physical hardware, may need 120s.
+    - High-security: May tighten to 15-30s.
+    """
+
+    token_tolerance_seconds: int = Field(
+        default=60,
+        ge=0,
+        le=300,
+        description="Clock skew tolerance for token/session expiration checks (0-300s)",
+    )
+    cert_tolerance_seconds: int = Field(
+        default=60,
+        ge=0,
+        le=600,
+        description=(
+            "Clock skew tolerance for certificate validity checks (0-600s). "
+            "Default 60s: RF-6 §5.3 sizes it against the 60-minute short-cert "
+            "life (tolerance <= lifetime/20 is asserted, not remembered)."
+        ),
+    )
+
+
+class AdminMTLSConfig(BaseModel):
+    """Configuration for admin mTLS authentication."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Require mTLS for admin endpoints",
+    )
+    ca_cert: str | None = Field(
+        default=None,
+        description="Path to admin CA certificate for verifying client certs",
+    )
+    ca_key_passphrase_env: str = Field(
+        default="VENYA_ADMIN_CA_KEY_PASSPHRASE",
+        description="Environment variable containing the admin CA key passphrase",
+    )
+    known_admin_ids: list[str] = Field(
+        default_factory=list,
+        description="Allowed admin certificate identities (SAN DNS or CN values)",
+    )
+
+
+class InnerTLSConfig(BaseModel):
+    """Inner nginx→uvicorn mTLS channel (end-to-end-mtls-header-trust-removal).
+
+    When enabled, uvicorn terminates TLS itself on the loopback bind and
+    REQUIRES a verified client certificate (the nginx client cert) on every
+    connection — a direct connect to the app port dies at the TLS handshake.
+    Client identity arrives separately as the OUTER client certificate PEM
+    that nginx forwards as HEADER CONTENT (URL-encoded, via the stock
+    ssl_client_escaped_cert variable); the middleware percent-decodes it and
+    re-verifies it cryptographically (no header trust, no filesystem path).
+
+    No default here weakens anything: ``main()`` REFUSES to start when
+    ``enabled`` is set with any material path missing, and the
+    client-cert requirement is not disableable via this surface.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Serve the app over TLS with required client certs (inner mTLS channel)",
+    )
+    cert_file: str | None = Field(
+        default=None,
+        description="Server certificate presented by uvicorn on the inner listener",
+    )
+    key_file: str | None = Field(
+        default=None,
+        description="Private key for cert_file",
+    )
+    client_ca_file: str | None = Field(
+        default=None,
+        description="CA bundle used to VERIFY the nginx client certificate (TLS layer)",
+    )
+    cert_pem_header: str = Field(
+        default="x-client-cert-pem",
+        description=(
+            "Header nginx forwards carrying the URL-encoded verified client-cert " "PEM (content, never a path)"
+        ),
+    )
+    cert_max_bytes: int = Field(
+        default=16384,
+        ge=512,
+        le=65536,
+        description="Maximum size of the PERCENT-DECODED forwarded client-cert PEM (bytes)",
+    )
+
+
+class ServerConfig(BaseSettings):
+    """Server configuration.
+
+    Loaded from environment variables and/or config file.
+    Environment variables are prefixed with VENYA_.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="VENYA_",
+        env_nested_delimiter="__",
+        env_file=os.path.join(os.environ.get("VENYA_ENV_DIR", "/opt/venya"), ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Server
+    host: str = Field(default="127.0.0.1", description="Bind address")
+    port: int = Field(default=8080, description="Bind port")
+    ssl_cert: str | None = Field(default=None, description="Path to SSL certificate file")
+    ssl_key: str | None = Field(default=None, description="Path to SSL private key file")
+    debug: bool = Field(default=False, description="Enable debug mode")
+
+    # Database
+    db_url: str | None = Field(default=None, description="PostgreSQL database URL")
+    db: DatabaseConfig = Field(default_factory=DatabaseConfig)
+
+    # Sessions
+    session: SessionConfig = Field(default_factory=SessionConfig)
+
+    # Rate limiting
+    rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
+
+    # WebAuthn
+    fido2: Fido2Config = Field(default_factory=Fido2Config)
+
+    # mTLS (executor communication)
+    mtls_cert: str | None = Field(default=None, description="Path to server mTLS certificate")
+    mtls_key: str | None = Field(default=None, description="Path to server mTLS private key")
+    ca_dir: str = Field(
+        default="/var/lib/venya/ca",
+        description="Directory for CA key/cert storage",
+    )
+
+    # CA security
+    ca_security: CASecurityConfig = Field(default_factory=CASecurityConfig)
+
+    # CRL (Certificate Revocation List)
+    crl: CRLConfig = Field(default_factory=CRLConfig)
+
+    # Executor enrollment (token TTL, auth, rate limiting)
+    executor_enrollment: ExecutorEnrollmentConfig = Field(
+        default_factory=ExecutorEnrollmentConfig,
+    )
+
+    # CORS
+    cors: CORSConfig = Field(default_factory=CORSConfig)
+
+    # Admin mTLS
+    admin_mtls: AdminMTLSConfig = Field(default_factory=AdminMTLSConfig)
+
+    # Inner nginx→uvicorn mTLS channel (#314)
+    inner_mtls: InnerTLSConfig = Field(default_factory=InnerTLSConfig)
+
+    # Clock skew tolerance
+    clock_skew: ClockSkewConfig = Field(default_factory=ClockSkewConfig)
+
+    # Trusted proxies for X-Forwarded-* handling (passed to FastAPI forwarded_allow_ips).
+    # pydantic-settings parses a JSON list from env, e.g. VENYA_TRUSTED_PROXIES='["192.0.2.1"]'
+    trusted_proxies: list[str] = Field(
+        default_factory=lambda: ["127.0.0.1"],
+        description="IPs/CIDRs trusted for X-Forwarded-* headers. Env VENYA_TRUSTED_PROXIES (JSON list).",
+    )
+
+    # Request size limits
+    max_request_body_bytes: int = Field(
+        default=1_048_576,
+        ge=1024,
+        le=104_857_600,
+        description="Maximum request body size in bytes (1024–104857600, default 1MB)",
+    )
+
+    # Recovery code pepper (server-side secret for hashing break-glass recovery codes)
+    # REQUIRED — deployment fails if not set. Only one pepper version supported;
+    # key rotation will require storing multiple peppers and trying them during verification.
+    recovery_code_pepper: str = Field(
+        description="Server-side secret for recovery code hashing. REQUIRED — deployment fails if empty.",
+    )

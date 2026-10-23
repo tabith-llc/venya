@@ -1,0 +1,64 @@
+[Unit]
+Description=Venya Core Server
+After=network.target
+
+[Service]
+Type=simple
+User=venya
+Group=venya
+ExecStart=/opt/venya/.venv/bin/venya-server
+Environment=VENYA_ENV_DIR=/opt/venya
+# #653: open the operator-readable Prometheus scrape door. The server binds this port on
+# 127.0.0.1 ONLY (server/app.py: start_metrics_server -> start_http_server(addr="127.0.0.1")),
+# it is plain unauthenticated HTTP, and it never leaves the host — do NOT routify it by
+# changing the address in code; that is a separate ruling. Not a secret, so it belongs in this
+# unit and NOT in the 0640 /etc/venya/venya-core.env, which stays passphrase-only. Override in a
+# drop-in (`systemctl edit venya-core`), never by editing the installed copy — the core
+# installer rewrites this unit on every re-run.
+#
+# A port this host cannot bind is no longer fatal. #653 also shipped Restart=always two lines
+# below, so before this change a refused bind — the Environment=VENYA_METRICS_PORT line is a
+# fact about this host, not about the value — crash-looped the whole core over an observability
+# surface. It now logs one ERROR line naming the port, the cause and this drop-in, and the core
+# serves. See packages/server/tests/test_metrics_bind_failsoft_653.py.
+#
+# 10011 is the port this unit ships, chosen by a printed rule rather than by habit: it is the
+# lowest port at or above 10000 that the IANA Service Name and Transport Protocol Port Number
+# Registry (fetched 2026-10-17; registry page last updated 2026-10-15) leaves UNASSIGNED on
+# BOTH tcp and udp, it is unprivileged (>1024, and this unit grants only CAP_IPC_LOCK, never
+# CAP_NET_BIND_SERVICE), and it is below the Linux default ephemeral floor of 32768 (read live
+# on the build box), so no outbound socket can be allocated it. It is deliberately outside the
+# bands a co-tenant is plausibly listening in on the same host: 3000-3999 (Grafana family),
+# 9090-9199 (Prometheus 9090, pushgateway 9091, Kafka 9092, Alertmanager 9093, node_exporter
+# 9100 and the exporter block), 15000-15090 (Istio sidecars) and 30000-32767 (Kubernetes
+# NodePort). The default this replaces was 9091 — a pushgateway's own default port, the most
+# likely co-tenant on exactly the hosts that run a core, and the collision this line's
+# fail-soft above now survives. 10011 is bound by nothing in this tree; the greps and the
+# full derivation are in wave30-specs-20261017/flash7-metrics-failsoft-s132-report.md.
+Environment=VENYA_METRICS_PORT=10011
+# Admin CA key passphrase (os.environ-visible; the only thing ca.py reads).
+# Leading '-' = optional: absent when admin mTLS is disabled, so the unit still
+# starts. When enabled, the installer writes this file 0640 root:venya. Never
+# inline in this 0644 unit (that leaks the secret to every local user).
+EnvironmentFile=-/etc/venya/venya-core.env
+Restart=always
+
+# Capability isolation: mlock requires CAP_IPC_LOCK
+AmbientCapabilities=CAP_IPC_LOCK
+
+# Additional hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/venya /var/log/venya /home/venya
+ReadOnlyPaths=/etc/venya
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

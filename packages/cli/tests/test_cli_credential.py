@@ -1,0 +1,781 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Tests for CLI credential list, add, and remove commands."""
+
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import httpx2
+from venya_cli.api_client import APIClient, APIClientError
+from venya_cli.commands import cmd_credential_add, cmd_credential_list, cmd_credential_remove
+
+
+def _make_mock_response(status_code=200, json_data=None):
+    """Create a mock httpx.Response."""
+    mock = MagicMock(spec=httpx2.Response)
+    mock.status_code = status_code
+    if json_data is not None:
+        mock.json.return_value = json_data
+        mock.content = json.dumps(json_data).encode()
+    else:
+        mock.content = b""
+        mock.json.return_value = {}
+    return mock
+
+
+def _make_client(mock_http=None):
+    """Create an APIClient with a mocked HTTP client.
+
+    The config carries an https server URL: #521 put the scheme guard on the
+    FIDO2 ceremony transport, and these cells reach it through ``_elevate``, so
+    the fixture has to look like a provisioned workstation (what ``venya setup``
+    writes) rather than the unconfigured localhost default — which is now a
+    refused shape by design, not something a credential-add test should depend
+    on.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        f.write(b'{"server_url": "https://test.example.com"}')
+        config_file = Path(f.name)
+
+    client = APIClient(config_file=config_file)
+    if mock_http:
+        client._http = mock_http
+    return client, config_file
+
+
+# ---------------------------------------------------------------------------
+# cmd_credential_list tests
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialList:
+    """Tests for venya credential list command."""
+
+    def test_list_credentials_success(self):
+        """List credentials shows table with all columns."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=200,
+            json_data={
+                "credentials": [
+                    {
+                        "id": 1,
+                        "label": "YubiKey 1",
+                        "created_at": "2025-01-01T00:00:00",
+                        "last_used_at": "2025-01-15T10:30:00",
+                    },
+                    {
+                        "id": 2,
+                        "label": None,
+                        "created_at": "2025-02-01T00:00:00",
+                        "last_used_at": None,
+                    },
+                ]
+            },
+        )
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.json = False
+
+        import io
+        from contextlib import redirect_stdout
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            result = cmd_credential_list(client, args)
+        assert result == 0
+        table = f.getvalue()
+        # Regression: int DB ids (the real server shape) must render, not raise
+        # TypeError in the len() width pass ("object of type 'int' has no len()")
+        assert "1" in table and "YubiKey 1" in table
+
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "GET"
+        assert call_args[0][1] == "/api/v1/credentials"
+        client.close()
+        config_file.unlink()
+
+    def test_list_credentials_json_output(self):
+        """List credentials with --json outputs raw JSON."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=200,
+            json_data={
+                "credentials": [
+                    {
+                        "id": 1,
+                        "label": "YubiKey 1",
+                        "created_at": "2025-01-01T00:00:00",
+                        "last_used_at": "2025-01-15T10:30:00",
+                    },
+                ]
+            },
+        )
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.json = True
+
+        import io
+        from contextlib import redirect_stdout
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            result = cmd_credential_list(client, args)
+
+        assert result == 0
+        output = f.getvalue()
+        parsed = json.loads(output.strip())
+        assert "credentials" in parsed
+        assert len(parsed["credentials"]) == 1
+        assert parsed["credentials"][0]["label"] == "YubiKey 1"
+        client.close()
+        config_file.unlink()
+
+    def test_list_credentials_empty(self):
+        """List credentials with no credentials prints message."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=200,
+            json_data={"credentials": []},
+        )
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.json = False
+
+        result = cmd_credential_list(client, args)
+        assert result == 0
+        client.close()
+        config_file.unlink()
+
+    def test_list_credentials_network_error(self):
+        """List credentials with network error returns 1."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_http.request.side_effect = httpx2.ConnectError("Connection refused")
+        client._http = mock_http
+
+        args = MagicMock()
+        args.json = False
+
+        result = cmd_credential_list(client, args)
+        assert result == 1
+        client.close()
+        config_file.unlink()
+
+
+# ---------------------------------------------------------------------------
+# cmd_credential_add tests
+# ---------------------------------------------------------------------------
+
+
+class TestCredentialAdd:
+    """Tests for venya credential add command."""
+
+    def _make_mock_credential(self):
+        """Create a mock credential in the REAL fido2 2.x RegistrationResponse
+        shape (.id/.raw_id + .response) that Fido2Client/WindowsClient
+        make_credential actually returns.
+
+        The legacy CredentialSelection shape (.auth_response) this replaced is
+        never produced by the pinned library — the old MagicMock encoded that
+        lie and masked an AttributeError in cmd_credential_add's formatter
+        (ticket: windows-fido2-requires-elevation, latent cross-platform bug).
+        SimpleNamespace, not MagicMock: hasattr() must discriminate branches.
+        """
+        from types import SimpleNamespace
+
+        client_data = SimpleNamespace(
+            type="webauthn.create",
+            challenge=b"test-challenge",
+            origin="https://localhost",
+            cross_origin=False,
+        )
+        response = SimpleNamespace(
+            attestation_object=b"attestation_bytes",
+            client_data=client_data,
+            transports=None,
+        )
+        return SimpleNamespace(id=None, raw_id=b"cred_id_bytes", response=response)
+
+    def test_add_credential_success(self):
+        """Add credential succeeds through elevation + registration flow."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+
+        # Credential add start response
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        start_resp.raise_for_status.return_value = None
+
+        # Credential add complete response — CredentialAddCompleteResponse
+        # shape (#482 AC3): status + credential_label, no phantom id/label.
+        complete_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "status": "ok",
+                "credential_label": "YubiKey 2",
+            },
+        )
+        complete_resp.raise_for_status.return_value = None
+
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        mock_credential = self._make_mock_credential()
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    # Fix 1 (init-pin-invalid-after-installation-reset): _get_credential
+                    # now reads key info via Ctap2 to dispatch; uv:true → the high-level
+                    # Fido2Client path this test asserts.
+                    mock_ctap2.return_value.info.options = {"uv": True}
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
+                    args = MagicMock()
+                    args.label = "YubiKey 2"
+                    args.json = False
+
+                    result = cmd_credential_add(client, args)
+                    assert result == 0
+
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "POST"
+        assert call_args[0][1] == "/api/v1/credentials/add/browser/complete"
+        client.close()
+        config_file.unlink()
+
+    def test_add_credential_elevates_twice_single_use_tokens(self):
+        """#6 option (a) ruling: elevation tokens are single-use (server burns
+        on verify), so credential-add elevates ONCE PER CALL — start and
+        complete each consume their own token (1 assertion = 1 token)."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        start_resp.raise_for_status.return_value = None
+        complete_resp = _make_mock_response(status_code=200, json_data={"status": "ok"})
+        complete_resp.raise_for_status.return_value = None
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        mock_credential = self._make_mock_credential()
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz") as mock_elev:
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    # Fix 1 (init-pin-invalid-after-installation-reset): _get_credential
+                    # now reads key info via Ctap2 to dispatch; uv:true → the high-level
+                    # Fido2Client path this test asserts.
+                    mock_ctap2.return_value.info.options = {"uv": True}
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
+                    args = MagicMock()
+                    args.label = "YubiKey 2"
+                    args.json = False
+
+                    result = cmd_credential_add(client, args)
+                    assert result == 0
+                    assert mock_elev.call_count == 2
+
+        client.close()
+        config_file.unlink()
+
+    def test_add_credential_second_touch_cancel_clean_exit(self):
+        """User closed the FIDO2 prompt at the second elevation: clean error +
+        exit 1, complete endpoint never called, no stuck flow (interlock 6)."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        start_resp.raise_for_status.return_value = None
+        mock_http.request.side_effect = [start_resp]
+        client._http = mock_http
+
+        mock_credential = self._make_mock_credential()
+
+        with patch(
+            "venya_cli.commands._elevate",
+            side_effect=["elev_token_xyz", APIClientError("Please touch your security key")],
+        ):
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    # Fix 1 (init-pin-invalid-after-installation-reset): _get_credential
+                    # now reads key info via Ctap2 to dispatch; uv:true → the high-level
+                    # Fido2Client path this test asserts.
+                    mock_ctap2.return_value.info.options = {"uv": True}
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
+                    args = MagicMock()
+                    args.label = "YubiKey 2"
+                    args.json = False
+
+                    result = cmd_credential_add(client, args)
+                    assert result == 1
+
+        # Only the start call went out — complete never fired
+        assert mock_http.request.call_count == 1
+        client.close()
+        config_file.unlink()
+
+    def test_add_credential_json_output(self):
+        """Add credential with --json outputs raw JSON."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        start_resp.raise_for_status.return_value = None
+
+        complete_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "status": "ok",
+                "credential_label": "YubiKey 2",
+            },
+        )
+        complete_resp.raise_for_status.return_value = None
+
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        mock_credential = self._make_mock_credential()
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    # Fix 1 (init-pin-invalid-after-installation-reset): _get_credential
+                    # now reads key info via Ctap2 to dispatch; uv:true → the high-level
+                    # Fido2Client path this test asserts.
+                    mock_ctap2.return_value.info.options = {"uv": True}
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
+
+                    args = MagicMock()
+                    args.label = "YubiKey 2"
+                    args.json = True
+
+                    import io
+                    from contextlib import redirect_stdout
+
+                    f = io.StringIO()
+                    with redirect_stdout(f):
+                        result = cmd_credential_add(client, args)
+
+                    assert result == 0
+                    output = f.getvalue()
+                    # Extract JSON from output (elevation messages come before JSON)
+                    json_start = output.find("{")
+                    assert json_start >= 0
+                    # --json is a byte-exact passthrough of the response (#482 AC5):
+                    # the envelope carries the real model keys, unreshaped.
+                    assert json.loads(output[json_start:]) == {
+                        "status": "ok",
+                        "credential_label": "YubiKey 2",
+                    }
+        client.close()
+        config_file.unlink()
+
+    def _drive_add(self, client, complete_json, label, json_mode=False):
+        """Run cmd_credential_add through the mocked ceremony with a given
+        complete-response body; returns (rc, stdout)."""
+        import io
+        from contextlib import redirect_stdout
+
+        mock_http = MagicMock()
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        start_resp.raise_for_status.return_value = None
+        complete_resp = _make_mock_response(status_code=200, json_data=complete_json)
+        complete_resp.raise_for_status.return_value = None
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        mock_credential = self._make_mock_credential()
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    mock_ctap2.return_value.info.options = {"uv": True}
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
+                    args = MagicMock()
+                    args.label = label
+                    args.json = json_mode
+
+                    f = io.StringIO()
+                    with redirect_stdout(f):
+                        rc = cmd_credential_add(client, args)
+        return rc, f.getvalue()
+
+    def test_add_credential_displays_server_echoed_label(self):
+        """#482 site 2: the operator must see the SERVER's stored label
+        (``credential_label`` from CredentialAddCompleteResponse), not the
+        CLI's own local variable — a server-side normalization/truncation
+        (bounded 1..64) has to be visible."""
+        client, config_file = _make_client()
+        try:
+            rc, out = self._drive_add(
+                client,
+                {"status": "ok", "credential_label": "Stored: YubiKey 2"},
+                label="YubiKey 2",
+            )
+            assert rc == 0
+            assert "Stored: YubiKey 2" in out
+            assert "Label: YubiKey 2\n" not in out
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_add_credential_falls_back_to_local_label_when_omitted(self):
+        """#482 paired negative (AC2): a complete response that omits
+        ``credential_label`` still prints the local label — the documented
+        fallback, never a blank line."""
+        client, config_file = _make_client()
+        try:
+            rc, out = self._drive_add(client, {"status": "ok"}, label="YubiKey 2")
+            assert rc == 0
+            assert "Label: YubiKey 2" in out
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_add_credential_no_fido2_device(self):
+        """Add credential with no FIDO2 device returns error."""
+        client, config_file = _make_client()
+        MagicMock()
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            with patch("venya_cli.fido2_client.list_devices", return_value=[]):
+                args = MagicMock()
+                args.label = "YubiKey 2"
+                args.json = False
+
+                result = cmd_credential_add(client, args)
+                assert result == 1
+        client.close()
+        config_file.unlink()
+
+    def test_add_credential_last_key_guard(self):
+        """Add credential 400 error (last-key guard) returns 1."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+
+        start_resp = _make_mock_response(
+            status_code=400,
+            json_data={"detail": "Cannot remove last credential"},
+        )
+        start_resp.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            "bad request", request=MagicMock(), response=start_resp
+        )
+        mock_http.request.return_value = start_resp
+        client._http = mock_http
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            args = MagicMock()
+            args.label = "YubiKey 2"
+            args.json = False
+
+            result = cmd_credential_add(client, args)
+            assert result == 1
+        client.close()
+        config_file.unlink()
+
+    # ---------------------------------------------------------------------------
+    # cmd_credential_remove tests
+    # ---------------------------------------------------------------------------
+
+    def test_add_credential_routes_through_fido2auth_with_server_url(self):
+        """Regression (option-B rewrite, found physically on win11): the inline
+        ceremony hardcoded DefaultClientDataCollector("https://localhost"), so
+        rp_id verification failed -> ClientError.BAD_REQUEST(cause=None) on any
+        real deployment, every platform. cmd_credential_add must route through
+        Fido2Auth bound to the CONFIGURED server URL, like cmd_enroll."""
+        client, config_file = _make_client()
+        client.config.server_url = "https://venya-core-1"
+        mock_http = MagicMock()
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"id": "venya-core-1", "name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        complete_resp = _make_mock_response(
+            status_code=200, json_data={"status": "ok", "credential_label": "YubiKey 2"}
+        )
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            with patch("venya_cli.fido2_client.Fido2Auth") as mock_auth_cls:
+                mock_auth = MagicMock()
+                mock_auth_cls.return_value = mock_auth
+                mock_auth._get_credential.return_value = MagicMock()
+                mock_auth._format_credential_response.return_value = {"id": "x"}
+                args = MagicMock()
+                args.label = "YubiKey 2"
+                args.json = False
+
+                result = cmd_credential_add(client, args)
+
+        assert result == 0
+        # ca_path rides along since feature/cli-setup-command (ceremony flows
+        # verify the core TLS against the setup-installed CA).
+        mock_auth_cls.assert_called_once_with("https://venya-core-1", ca_path=client.config.ca_path)
+        mock_auth._build_registration_options.assert_called_once()
+        client.close()
+        config_file.unlink()
+
+
+class TestCredentialRemove:
+    """Tests for venya credential remove command."""
+
+    def test_remove_credential_success(self):
+        """Remove credential succeeds."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=200,
+            json_data={"deleted": True},
+        )
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            args = MagicMock()
+            args.credential_id = "cred_001"
+            args.json = False
+
+            result = cmd_credential_remove(client, args)
+            assert result == 0
+
+            call_args = mock_http.request.call_args
+            assert call_args[0][0] == "DELETE"
+            assert call_args[0][1] == "/api/v1/credentials/cred_001"
+        client.close()
+        config_file.unlink()
+
+    def test_remove_credential_404_not_found(self):
+        """Remove non-existent credential returns 404."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=404,
+            json_data={"detail": "Credential not found"},
+        )
+        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            "not found", request=MagicMock(), response=mock_response
+        )
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            args = MagicMock()
+            args.credential_id = "cred_nonexistent"
+            args.json = False
+
+            result = cmd_credential_remove(client, args)
+            assert result == 1
+        client.close()
+        config_file.unlink()
+
+    def test_remove_credential_400_last_key_guard(self):
+        """Remove last credential returns 400."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=400,
+            json_data={"detail": "Cannot remove last credential"},
+        )
+        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            "bad request", request=MagicMock(), response=mock_response
+        )
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            args = MagicMock()
+            args.credential_id = "cred_last"
+            args.json = False
+
+            result = cmd_credential_remove(client, args)
+            assert result == 1
+        client.close()
+        config_file.unlink()
+
+    def test_remove_credential_no_elevation(self):
+        """Remove credential with elevation failure returns 1."""
+        client, config_file = _make_client()
+        MagicMock()
+
+        with patch("venya_cli.commands._elevate", side_effect=APIClientError("Elevation failed")):
+            args = MagicMock()
+            args.credential_id = "cred_001"
+            args.json = False
+
+            result = cmd_credential_remove(client, args)
+            assert result == 1
+        client.close()
+        config_file.unlink()
+
+    def test_remove_credential_network_error(self):
+        """Remove credential with network error returns 1."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_http.request.side_effect = httpx2.ConnectError("Connection refused")
+        client._http = mock_http
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            args = MagicMock()
+            args.credential_id = "cred_001"
+            args.json = False
+
+            result = cmd_credential_remove(client, args)
+            assert result == 1
+        client.close()
+        config_file.unlink()
+
+
+class TestElevateBearerToken:
+    """Regression for _elevate (found PHYSICALLY on win11, 2026-09-19): the
+    /auth/elevate/* routes require the session bearer token
+    (Depends(get_current_user)). Pre-fix _elevate called Fido2Auth._post, which
+    sends no Authorization header, so every elevation on every platform died
+    401 'Missing authentication token'. Both calls must go through APIClient."""
+
+    def test_elevate_sends_authorization_on_both_calls(self):
+        from venya_cli.commands import _elevate
+        from venya_cli.fido2_client import Fido2Auth
+
+        client, config_file = _make_client()
+        client.config.access_token = "test-token-abc"
+        client.config.server_url = "https://venya-core-1"
+        mock_http = MagicMock()
+        challenge_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "chal_1",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp_id": "venya-core-1",
+                    "timeout": 60000,
+                },
+            },
+        )
+        assert_resp = _make_mock_response(status_code=200, json_data={"elevation_token": "elev_tok"})
+        mock_http.request.side_effect = [challenge_resp, assert_resp]
+        client._http = mock_http
+
+        with patch.object(Fido2Auth, "_get_assertion", return_value=MagicMock()):
+            with patch.object(Fido2Auth, "_format_assertion_response", return_value={"id": "x"}):
+                token = _elevate(client)
+
+        assert token == "elev_tok"
+        assert mock_http.request.call_count == 2
+        paths = [c.args[1] for c in mock_http.request.call_args_list]
+        assert paths == ["/api/v1/auth/elevate/challenge", "/api/v1/auth/elevate/assert"]
+        for call in mock_http.request.call_args_list:
+            headers = call.kwargs.get("headers") or {}
+            assert (
+                headers.get("Authorization") == "Bearer test-token-abc"
+            ), f"elevate call to {call.args[1]} missing bearer token"
+        client.close()
+        config_file.unlink()

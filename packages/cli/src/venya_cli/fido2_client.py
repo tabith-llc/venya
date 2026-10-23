@@ -1,0 +1,1303 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Headless FIDO2/WebAuthn client for CLI authentication.
+
+Uses python-fido2 to perform WebAuthn authentication without a browser.
+The CLI acts as a headless authenticator that communicates with a FIDO2
+security key via USB HID transport.
+
+Flow:
+    1. Get challenge options from server (POST /auth/login/start)
+    2. Perform WebAuthn assertion with security key
+    3. Send assertion to server (POST /auth/login/complete)
+"""
+
+import base64
+import getpass
+import json
+import logging
+import os
+import ssl
+import sys
+from pathlib import Path
+from typing import Any
+
+import httpx2
+from fido2.client import (
+    AssertionSelection,
+    ClientError,
+    ClientPin,
+    DefaultClientDataCollector,
+    Fido2Client,
+    UserInteraction,
+    verify_rp_id,
+)
+from fido2.ctap import CtapError
+from fido2.ctap2 import Ctap2
+from fido2.hid import list_devices
+from fido2.webauthn import (
+    AttestationObject,
+    AuthenticatorData,
+    CollectedClientData,
+    CredentialCreationOptions,
+    CredentialRequestOptions,
+    PublicKeyCredentialDescriptor,
+    PublicKeyCredentialRequestOptions,
+    UserVerificationRequirement,
+)
+
+from .name_resolution import dial_failure_text
+from .webauthn import b64_decode_id as _b64_decode_id
+
+logger = logging.getLogger("venya_cli.fido2")
+
+# Enable detailed FIDO2 debug output with VENYA_FIDO2_DEBUG=1
+FIDO2_DEBUG = os.environ.get("VENYA_FIDO2_DEBUG") == "1"
+
+
+class CliInteraction(UserInteraction):
+    """CLI user interaction: prompts for PIN via stdin (getpass).
+
+    The library calls request_pin() when the authenticator requires a PIN.
+    On wrong PIN the authenticator returns PIN_INVALID / PIN_AUTH_INVALID;
+    the caller (Fido2Auth) catches CtapError and retries request_pin().
+    """
+
+    # One-shot PIN carry from the creation flow (ticket
+    # cli-fido2-pin-setup-new-key): the just-created PIN answers the
+    # ceremony's first request_pin so the operator does not type it a third
+    # time; consumed on first use, never persisted anywhere.
+    preset_pin: str | None = None
+
+    # A single CTAP operation can emit several keepalive events while the
+    # key waits for a touch; prompt_up() fires on each one. This flag keeps
+    # the touch cue to one print per operation and is reset at every new
+    # operation boundary (request_pin, including PIN retries).
+    _prompt_up_shown: bool = False
+
+    def request_pin(self, permissions: ClientPin.PERMISSION, rp_id: str | None) -> str | None:
+        """Prompt for PIN via getpass (no echo, stderr only).
+
+        Returns None if stdin is not a TTY (headless / piped).
+        """
+        self._prompt_up_shown = False
+        if self.preset_pin is not None:
+            pin = self.preset_pin
+            self.preset_pin = None
+            return pin
+        if not sys.stdin.isatty():
+            logger.warning("No TTY available — cannot prompt for PIN.")
+            return None
+        pin = getpass.getpass("\nEnter security key PIN: ")
+        return pin
+
+    def prompt_up(self) -> None:
+        """Called when the authenticator awaits a user-presence touch.
+        The key is flashing — this is the cue to touch it.
+
+        Repeated keepalive events within one operation print once; the flag
+        resets at the next request_pin() so every PIN retry shows the cue.
+        """
+        if self._prompt_up_shown:
+            return
+        self._prompt_up_shown = True
+        print(">>> Key is flashing — touch it to continue <<<", file=sys.stderr)
+
+    def request_uv(self, permissions: ClientPin.PERMISSION, rp_id: str | None) -> bool:
+        """Allow UV — the library will fall back to PIN if built-in UV
+        is not available on the authenticator. We handle MISSING_PARAMETER
+        errors in the retry loop below."""
+        return True
+
+
+def _b64url_encode(data: bytes) -> str:
+    """Encode bytes to base64url without padding."""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+class Fido2ClientError(Exception):
+    """FIDO2 client error."""
+
+
+class Fido2NotFoundError(Fido2ClientError):
+    """No FIDO2 device found."""
+
+
+class Fido2TimeoutError(Fido2ClientError):
+    """FIDO2 operation timed out."""
+
+
+class Fido2UserInteractionRequiredError(Fido2ClientError):
+    """User interaction (key touch) required."""
+
+
+def _make_webauthn_client(collector: DefaultClientDataCollector) -> Any:
+    """Return the platform-appropriate WebAuthn client.
+
+    Windows 10 1903+ restricts raw CTAP/HID access to elevated processes, so the
+    raw Fido2Client path silently fails for standard (non-admin) users with a
+    misleading "No FIDO2 devices found" — enumeration itself is admin-only. The
+    Windows platform WebAuthn API (WindowsClient) is the supported unelevated
+    path: the OS owns device enumeration, the PIN dialog, and user-presence
+    prompts. Ticket: windows-fido2-requires-elevation.
+
+    There is deliberately NO fallback to the raw path when the platform API is
+    unavailable (Windows < 10 1903, missing webauthn.dll): a fallback would
+    reproduce the silent admin-only failure this factory exists to eliminate.
+    Callers get an explicit Fido2ClientError instead.
+
+    On Linux/macOS the raw CTAP path is unchanged: enumerate HID devices, fail
+    with Fido2NotFoundError when empty, wrap the first device in Fido2Client.
+    """
+    if sys.platform == "win32":
+        # Lazy import: fido2.client.windows imports ctypes.WinDLL at module
+        # load and is unimportable on Linux/macOS.
+        from fido2.client.windows import WindowsClient
+
+        if not WindowsClient.is_available():
+            raise Fido2ClientError(
+                "Windows WebAuthn platform API is unavailable "
+                "(webauthn.dll missing or WEBAUTHN_API_VERSION == 0). "
+                "Windows 10 version 1903 or later is required for venya CLI "
+                "FIDO2 support."
+            )
+        return WindowsClient(collector)
+    devices = list(list_devices())
+    if not devices:
+        raise Fido2NotFoundError("No FIDO2 devices found")
+    return Fido2Client(devices[0], collector, user_interaction=CliInteraction())
+
+
+# Windows platform WebAuthn (webauthn.dll) HRESULT -> operator-facing message.
+# Kept evidence-driven on purpose: only codes PHYSICALLY OBSERVED on the win11
+# acceptance runs get a pinned message; unmapped codes fall through to the OS's
+# own text with a clear prefix — accurate, never invented.
+_WINDOWS_HRESULT_MESSAGES = {
+    0x8009000F: (  # NTE_EXISTS — observed 2026-09-19, `credential add` with an already-registered key
+        "This security key is already registered for the account. "
+        "Use a different key, or remove the existing credential first."
+    ),
+}
+
+
+def _translate_windows_error(exc: Exception) -> Fido2ClientError:
+    """Convert a WindowsClient ClientError into an accurate, readable message.
+
+    WindowsClient wraps OS failures as ClientError.ERR.OTHER_ERROR(OSError);
+    the HRESULT rides in OSError.winerror (signed). Acceptance requirement:
+    device-absent must read as device-absent — never a privilege error, never
+    a raw tuple like "(<ERR.OTHER_ERROR: 1>, OSError(22, ...))".
+    """
+    cause = getattr(exc, "cause", None)
+    winerror = getattr(cause, "winerror", None)
+    if winerror is not None:
+        hresult = winerror & 0xFFFFFFFF
+        message = _WINDOWS_HRESULT_MESSAGES.get(hresult)
+        if message:
+            return Fido2ClientError(message)
+        detail = getattr(cause, "strerror", None) or cause
+        return Fido2ClientError(f"Windows WebAuthn error: {detail} (HRESULT {hresult:#010x})")
+    return Fido2ClientError(f"Windows WebAuthn error: {exc}")
+
+
+class Fido2Auth:
+    """Headless FIDO2/WebAuthn client for CLI authentication.
+
+    Usage:
+        auth = Fido2Auth(server_url="http://localhost:8000")
+        result = auth.authenticate(user_id="admin")
+        # result = {"user_id": "...", "session_token": "..."}
+    """
+
+    def __init__(self, server_url: str = "http://localhost:8000", ca_path: Path | None = None) -> None:
+        # #521: the ceremony transport dials the core with the RP challenge and
+        # the assertion, and its URL comes straight from config — the same
+        # resolved value the bearer path uses. Plaintext is refused here, at the
+        # ONE seam every ceremony construction passes through (commands.py init /
+        # credential add / enroll / _elevate, and APIClient.authenticate), instead
+        # of being re-copied at each. Bare hostnames mean https exactly as
+        # `venya setup` and `exec register` already read them; an explicit scheme
+        # is NEVER rewritten — no upgrade, no downgrade.
+        if "://" not in server_url:
+            server_url = "https://" + server_url
+        if not server_url.startswith("https://"):
+            from .commands import _https_refusal
+
+            raise Fido2ClientError(
+                _https_refusal(
+                    server_url,
+                    site="the FIDO2 ceremony transport",
+                    ticket="cli-dial-sites-missing-https-guard",
+                    detail="this transport carries the WebAuthn challenge and assertion",
+                )
+            )
+        self.server_url = server_url.rstrip("/")
+        # Server-TLS verification precedence, now the SAME rule the bearer dial
+        # uses (#530, inherited by #533): SSL_CERT_FILE env wins (the operator
+        # NAMING a public-CA bundle), then the CA installed by `venya setup`.
+        # There is no third branch: with neither, `_anchor` is None and the DIAL
+        # refuses — the workstation OS trust store is never the fallback for a
+        # transport carrying the WebAuthn challenge and assertion. Resolution is
+        # cheap and non-raising at construction (`venya setup` — the repair this
+        # refusal names — constructs this object); the refusal lands at the dial.
+        self._ca_path = ca_path
+        self._anchor, self._anchor_searched = self._resolve_tls_anchor()
+
+    def _resolve_tls_anchor(self) -> tuple[str | None, str]:
+        """This ceremony transport's Venya trust anchor, or None + what was searched.
+
+        Mirrors ``APIClient._resolve_tls_anchor`` (#530). Nothing here consults
+        the host trust store, and nothing here raises.
+        """
+        env_ca = os.environ.get("SSL_CERT_FILE")
+        if env_ca:
+            return env_ca, f"SSL_CERT_FILE={env_ca!r}"
+        ca_path = self._ca_path
+        if ca_path is not None and ca_path.exists():
+            return str(ca_path), f"the config-dir CA at {ca_path}"
+        expected = str(ca_path) if ca_path is not None else "<config-dir>/ca.crt"
+        return None, f"no SSL_CERT_FILE set and no config-dir CA at {expected}"
+
+    def _dial_verify(self) -> ssl.SSLContext:
+        """The anchored TLS context for one dial — or the loud refusal, BEFORE
+        any ``httpx2.Client`` exists (AC1/AC3, #533).
+
+        Reuses the house builder ``_build_ssl_context`` (#530): a bare
+        ``PROTOCOL_TLS_CLIENT`` context loaded with ONLY the resolved anchor,
+        so ``CERT_REQUIRED`` and ``check_hostname`` stay on and the host store
+        is never consulted. A None anchor cannot reach the builder silently —
+        the ceremony raises its own error class so every caller's
+        ``except Fido2ClientError`` keeps working.
+        """
+        from .api_client import APIClientError, _anchor_refusal_text, _build_ssl_context
+
+        if self._anchor is None:
+            raise Fido2ClientError(_anchor_refusal_text(self._anchor_searched, transport="WebAuthn ceremony call"))
+        try:
+            return _build_ssl_context(cafile=self._anchor, certfile=None, keyfile=None)
+        except APIClientError as e:
+            # The corrupt/empty-anchor wrap (#439) reads right, but this transport's
+            # callers all catch Fido2ClientError — carry the same text in that class.
+            raise Fido2ClientError(str(e)) from e
+
+    def _tls_absent_hint(self, exc: BaseException) -> str:
+        """Diagnostic for a TLS verification failure on an ANCHORED dial (#439).
+
+        #533 removed the case this hint used to describe (no anchor at all —
+        that state is now refused before the dial). What remains is the real
+        one: an anchor WAS configured and the server did not verify against it
+        (a stale config-dir CA after a core reinstall is the ordinary shape).
+        Name the file that was trusted, and the repair. Suppressed when
+        SSL_CERT_FILE was set (an operator choice) or when the failure has no
+        certificate-verification cause.
+        """
+        if self._anchor is None or os.environ.get("SSL_CERT_FILE"):
+            return ""
+        cause: BaseException | None = exc
+        while cause is not None:
+            if isinstance(cause, ssl.SSLCertVerificationError):
+                break
+            cause = cause.__cause__ or cause.__context__
+        else:
+            return ""
+        state = (
+            f"the config-dir CA file {self._anchor} is no longer present"
+            if self._ca_path is not None and not Path(self._anchor).exists()
+            else f"the server certificate did not verify against the Venya CA file {self._anchor}"
+        )
+        return (
+            f" — TLS trust check: {state}, the file this workstation is configured to "
+            f"trust. Run `venya setup <core>` for this server ({self.server_url}) to reinstall "
+            f"the core CA, or set SSL_CERT_FILE to a valid trust bundle."
+        )
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Simple GET request."""
+        url = self.server_url + path
+        try:
+            with httpx2.Client(verify=self._dial_verify()) as client:
+                resp = client.get(url, params=params, timeout=30.0)
+                resp.raise_for_status()
+                return resp.json() if resp.content else {}
+        except httpx2.HTTPStatusError as e:
+            error_msg = str(e)
+            try:
+                error_data = e.response.json()
+                error_msg = error_data.get("detail", str(e))
+            except (json.JSONDecodeError, Exception):  # noqa: S110
+                pass
+            raise Fido2ClientError(error_msg)
+        except httpx2.ConnectError as e:
+            # #633: a name that does not resolve on this workstation never reached the
+            # core, so it is not a connection failure and does not carry the trust hint
+            # (which is empty for a resolver fault anyway). Every other ConnectError, TLS
+            # included, renders exactly as before.
+            raise Fido2ClientError(
+                dial_failure_text(
+                    e,
+                    url=self.server_url,
+                    default=f"Connection failed: {e}{self._tls_absent_hint(e)}",
+                )
+            )
+
+    def _post(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
+        """Simple POST request."""
+        url = self.server_url + path
+        try:
+            with httpx2.Client(verify=self._dial_verify()) as client:
+                resp = client.post(
+                    url,
+                    json=json_data,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    timeout=30.0,
+                )
+                resp.raise_for_status()
+                return resp.json() if resp.content else {}
+        except httpx2.HTTPStatusError as e:
+            # Carry the server's JSON `detail` so callers can pattern-match
+            # actionable messages (cmd_init 409 handling; wording contract:
+            # server routes/init.py "already initialized" / "pending
+            # enrollment"). f71d4c5 removed this parsing on a wrong
+            # hypothesis: "Incorrect padding" originated in _b64std_encode,
+            # and json.loads cannot raise it. Guarded — any parse failure
+            # falls back to the httpx status text.
+            error_msg = str(e)
+            try:
+                error_data = e.response.json()
+                detail = error_data.get("detail") if isinstance(error_data, dict) else None
+                if isinstance(detail, str):
+                    error_msg = detail
+                elif detail is not None:
+                    error_msg = f"{error_msg} (detail: {detail})"
+            except Exception:  # noqa: S110  # nosec B110 — deliberate: parse failure keeps raw status text
+                pass
+            raise Fido2ClientError(error_msg)
+        except httpx2.ConnectError as e:
+            # #633: a name that does not resolve on this workstation never reached the
+            # core, so it is not a connection failure and does not carry the trust hint
+            # (which is empty for a resolver fault anyway). Every other ConnectError, TLS
+            # included, renders exactly as before.
+            raise Fido2ClientError(
+                dial_failure_text(
+                    e,
+                    url=self.server_url,
+                    default=f"Connection failed: {e}{self._tls_absent_hint(e)}",
+                )
+            )
+
+    def authenticate(self, user_id: str | None = None, timeout: float = 60.0) -> dict[str, Any]:
+        """Perform WebAuthn authentication.
+
+        Args:
+            user_id: Optional user ID to target. If not provided,
+                     the user can authenticate with any enrolled key.
+            timeout: Maximum seconds to wait for user interaction.
+
+        Returns:
+            Dict with user_id and session_token.
+
+        Raises:
+            Fido2ClientError: On authentication failure.
+            Fido2NotFoundError: If no FIDO2 device is found.
+            Fido2TimeoutError: If user doesn't touch key in time.
+        """
+        # Step 1: Get challenge from server
+        logger.info("Requesting authentication challenge from server")
+        start_result = self._post(
+            "/api/v1/auth/login/start",
+            {
+                "user_id": user_id,
+            },
+        )
+        challenge_id = start_result["challenge_id"]
+        options = start_result["options"]
+
+        # Step 2: Convert server options to fido2 types
+        request_options = self._build_request_options(options)
+
+        # Step 3: Perform WebAuthn assertion (retry on wrong PIN)
+        logger.info("Waiting for security key touch...")
+        max_pin_retries = 3
+        for attempt in range(max_pin_retries):
+            try:
+                assertion = self._get_assertion(request_options, timeout=timeout)
+                break
+            except (ClientError, CtapError) as e:
+                # fido2 may surface a CTAP error wrapped in ClientError (original in
+                # e.cause); unwrap so the PIN retry below still applies.
+                if isinstance(e, ClientError) and isinstance(e.cause, CtapError):
+                    e = e.cause
+                if isinstance(e, ClientError):
+                    if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
+                        raise Fido2ClientError(
+                            "Security key has no PIN set and cannot verify the user "
+                            "another way. Venya creates a key's PIN during registration — "
+                            "run venya credential add for this key (first enrollment: "
+                            "venya enroll <token>) and enter the PIN when prompted, "
+                            "then try again."
+                        ) from e
+                    raise
+                if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
+                    if attempt < max_pin_retries - 1:
+                        logger.warning("Incorrect PIN. %d attempt(s) remaining.", max_pin_retries - 1 - attempt)
+                        continue
+                    raise Fido2ClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
+                if e.code == CtapError.ERR.PIN_BLOCKED:
+                    raise Fido2ClientError("Security key PIN is blocked. Requires power-cycle or factory reset.") from e
+                # `raise e`, not bare `raise`: e may be the REBOUND unwrapped CtapError;
+                # a bare raise re-raises the original ClientError wrapper instead.
+                raise e  # noqa: TRY201 — rebinding makes bare raise semantically wrong
+
+        # Step 4: Convert assertion to server format and complete
+        logger.info("Sending assertion to server")
+        response = self._format_assertion_response(assertion)
+        if FIDO2_DEBUG:
+            print(f"DEBUG: assertion response id being sent={response.get('id')}", file=sys.stderr)
+            try:
+                raw_id = base64.b64decode(response.get("id", ""))
+                print(f"DEBUG: assertion id raw bytes (hex)={raw_id.hex()}", file=sys.stderr)
+            except Exception as ex:
+                print(f"DEBUG: assertion id decode error={ex}", file=sys.stderr)
+        result = self._post(
+            "/api/v1/auth/login/complete",
+            {
+                "challenge_id": challenge_id,
+                "response": response,
+            },
+        )
+
+        return {
+            "user_id": result["user_id"],
+            "session_token": result["session_token"],
+            "credential_id": result["credential_id"],
+        }
+
+    def register(self, user_id: str, timeout: float = 60.0) -> dict[str, Any]:
+        """Perform WebAuthn registration (enrollment).
+
+        Used during core init to enroll the first admin's security key.
+
+        Args:
+            user_id: User ID to register.
+            timeout: Maximum seconds to wait for user interaction.
+
+        Returns:
+            Dict with the server-expected attestation response format.
+
+        Raises:
+            Fido2ClientError: On registration failure.
+            Fido2NotFoundError: If no FIDO2 device is found.
+            Fido2TimeoutError: If user doesn't touch key in time.
+        """
+        # Step 1: Get challenge from server
+        logger.info("Requesting registration challenge from server for user %s", user_id)
+        start_result = self._post(
+            "/api/v1/init",
+            {
+                "user_id": user_id,
+            },
+        )
+        challenge_id = start_result["challenge_id"]
+        options = start_result["options"]
+
+        # Step 2: Convert server options to fido2 types
+        request_options = self._build_registration_options(options)
+
+        # Step 3: Perform WebAuthn creation (retry on wrong PIN)
+        logger.info("Waiting for security key touch to register...")
+        max_pin_retries = 3
+        for attempt in range(max_pin_retries):
+            try:
+                credential = self._get_credential(request_options, timeout=timeout)
+                break
+            except (ClientError, CtapError) as e:
+                # fido2 may surface a CTAP error wrapped in ClientError (original
+                # in e.cause); unwrap so the PIN retry below still applies. This
+                # is the make_credential sibling of the authenticate() unwrap
+                # restored by da2c09a — register() was missed, so a high-level
+                # ClientError(PIN_INVALID) escaped as a raw tuple with no retry.
+                if isinstance(e, ClientError) and isinstance(e.cause, CtapError):
+                    e = e.cause
+                if isinstance(e, ClientError):
+                    if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
+                        raise Fido2ClientError(
+                            "Security key reports PIN support but has no PIN set. "
+                            "Venya creates a key's PIN during registration — "
+                            "power-cycle the key and re-run, or use a fresh key."
+                        ) from e
+                    raise
+                if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
+                    if attempt < max_pin_retries - 1:
+                        logger.warning("Incorrect PIN. %d attempt(s) remaining.", max_pin_retries - 1 - attempt)
+                        continue
+                    raise Fido2ClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
+                if e.code == CtapError.ERR.PIN_BLOCKED:
+                    raise Fido2ClientError("Security key PIN is blocked. Requires power-cycle or factory reset.") from e
+                if e.code == CtapError.ERR.OPERATION_DENIED:
+                    # Offer browser-assisted fallback for CLI-first alpha
+                    raise Fido2ClientError(
+                        "Security key denied the operation (0x27) during registration. "
+                        "Please complete enrollment via the browser instead:\n"
+                        "  1. Open https://venya-core-1/enroll\n"
+                        "  2. Paste an enrollment token (mint via admin)\n"
+                        "  3. Touch your key in the browser\n"
+                        "Your credential will be usable from the CLI immediately after."
+                    ) from e
+                # `raise e`, not bare `raise`: e may be the REBOUND unwrapped
+                # CtapError; a bare raise re-raises the original ClientError.
+                raise e  # noqa: TRY201 — rebinding makes bare raise semantically wrong
+
+        # Step 4: Convert credential to server format and complete
+        logger.info("Sending attestation to server")
+        response = self._format_credential_response(credential)
+        result = self._post(
+            "/api/v1/init/complete",
+            {
+                "user_id": user_id,
+                "challenge_id": challenge_id,
+                "response": response,
+            },
+        )
+
+        return result
+
+    def _build_registration_options(self, options: dict[str, Any]) -> CredentialCreationOptions:
+        """Convert server challenge options to fido2 CredentialCreationOptions.
+
+        Args:
+            options: WebAuthn registration options from server.
+
+        Returns:
+            CredentialCreationOptions for python-fido2.
+        """
+        norm = self.normalize_webauthn_options(options)
+        challenge = _b64_decode_id(norm["challenge"])
+
+        pub_key_cred_params = []
+        for param in norm.get("pubKeyCredParams", []):
+            pub_key_cred_params.append(
+                {
+                    "type": param.get("type", "public-key"),
+                    "alg": param.get("alg"),
+                }
+            )
+
+        exclude_credentials = []
+        for cred in norm.get("exclude_credentials", []):
+            if "id" in cred:
+                exclude_credentials.append(
+                    PublicKeyCredentialDescriptor(
+                        type=cred.get("type", "public-key"),
+                        id=cred["id"],  # already decoded bytes by normalizer
+                        transports=cred.get("transports"),
+                    )
+                )
+
+        user = norm.get("user", {})
+        user_id = _b64_decode_id(user["id"])
+
+        public_key = {
+            "rp": norm.get("rp", {}),
+            "user": {
+                "id": user_id,
+                "name": user.get("name", ""),
+                "display_name": user.get("displayName", ""),
+            },
+            "challenge": challenge,
+            "pubKeyCredParams": pub_key_cred_params,
+            "timeout": norm.get("timeout", 60000),
+            "excludeCredentials": exclude_credentials or None,
+            "attestation": norm.get("attestation", "none"),
+        }
+
+        return CredentialCreationOptions(public_key=public_key)
+
+    def _get_credential(
+        self,
+        request_options: CredentialCreationOptions,
+        timeout: float = 60.0,
+    ) -> Any:
+        """Perform WebAuthn credential creation using python-fido2.
+
+        Args:
+            request_options: Credential creation options.
+            timeout: Timeout in seconds.
+
+        Returns:
+            Credential selection from python-fido2.
+        """
+        origin = self.server_url
+        if FIDO2_DEBUG:
+            rp_id = request_options.public_key.get("rp", {}).get("id", "unknown")
+            pub_params = request_options.public_key.get("pubKeyCredParams", [])
+            print(f"DEBUG: make_credential rp_id={rp_id} pubKeyCredParams={pub_params}", file=sys.stderr)
+
+        collector = DefaultClientDataCollector(origin, verify_rp_id)
+
+        if sys.platform == "win32":
+            # Platform API path: the OS owns enumeration (admin-only on Windows)
+            # and the PIN/UV dialog — no info-based dispatch, no raw fallback
+            # (the raw-Ctap2 path needs admin-only device access). Mirrors
+            # _get_assertion's win32 branch.
+            try:
+                return _make_webauthn_client(collector).make_credential(request_options.public_key)
+            except ClientError as e:
+                raise _translate_windows_error(e) from e
+
+        devices = list(list_devices())
+        if not devices:
+            raise Fido2NotFoundError("No FIDO2 devices found")
+
+        ctap2 = Ctap2(devices[0])
+        info = ctap2.info
+        interaction = CliInteraction()
+
+        # WHY THIS PATH EXISTS — mirror of _get_assertion's info-based dispatch
+        # (ticket init-pin-invalid-after-installation-reset).
+        #
+        # fido2 2.2.1's high-level Fido2Client.make_credential mishandles
+        # clientPin-only keys (clientPin advertised, no built-in uv): its
+        # uv-negotiation path makes such authenticators return off-spec errors
+        # — observed as CTAP 0x31 PIN_INVALID on a makeCredUvNotRqd
+        # TrustKey-class key — and every failure burns one PIN-retry. For a
+        # clientPin-only key the PIN IS the user verification, so the raw Ctap2
+        # path (pinUvAuthParam, no uv option) is spec-canonical — the same
+        # deviation _get_assertion documents and relies on for login.
+        #
+        # Dispatch on the key's advertised options UP FRONT instead of trying
+        # the high-level path first and falling back only on
+        # OPERATION_DENIED/CONFIGURATION_UNSUPPORTED (which missed 0x31, so the
+        # working raw path was never reached for registration).
+        if info.options.get("uv"):
+            # built-in UV: existing high-level path
+            client = Fido2Client(devices[0], collector, user_interaction=interaction)
+            return client.make_credential(request_options.public_key)
+
+        if info.options.get("clientPin"):
+            return self._get_credential_pin_only(ctap2, request_options, interaction)
+
+        if info.options.get("clientPin") is False:
+            # Factory-fresh key: clientPin capability present, PIN NOT set
+            # (CTAP2 semantics: option false = supported-but-unset; absent =
+            # unsupported). For a clientPin-only key the PIN IS the user
+            # verification — create it now, then ride the existing raw
+            # pin-only path (ticket cli-fido2-pin-setup-new-key). The win32
+            # platform branch above is deliberately NOT covered: PIN
+            # lifecycle on Windows is the operator/vendor-tool step
+            # (2026-09-18 ruling).
+            self._setup_key_pin(ctap2, interaction)
+            return self._get_credential_pin_only(ctap2, request_options, interaction)
+
+        raise Fido2ClientError("Security key advertises neither built-in UV nor clientPin support; cannot register.")
+
+    @staticmethod
+    def _format_credential_response(
+        credential: Any,
+    ) -> dict[str, Any]:
+        """Convert python-fido2 credential to server-expected format.
+
+        Handles both the legacy CredentialSelection shape and the modern
+        RegistrationResponse / AttestationResponse shape returned by
+        Fido2Client.make_credential in python-fido2 2.x.
+        """
+        if FIDO2_DEBUG:
+            print(f"DEBUG: _format_credential_response received: {type(credential).__name__}", file=sys.stderr)
+            print(f"DEBUG: dir(credential)={dir(credential)}", file=sys.stderr)
+
+        # Modern RegistrationResponse (Fido2Client v2.x)
+        if hasattr(credential, "response"):
+            cred_id = credential.id or credential.raw_id
+            # RegistrationResponse.id / raw_id may be base64url str; convert to bytes
+            if isinstance(cred_id, str):
+                cred_id = _b64_decode_id(cred_id)
+            auth_response = credential.response
+            if FIDO2_DEBUG:
+                print(
+                    f"DEBUG: auth_response type={type(auth_response).__name__} dir={dir(auth_response)}",
+                    file=sys.stderr,
+                )
+            # AuthenticatorAttestationResponse (v2.x) only has attestation_object + client_data
+            attestation_object = getattr(auth_response, "attestation_object", None)
+            client_data = getattr(auth_response, "client_data", None)
+            # We do not have auth_data from this shape; synthesize a minimal one if needed later
+            auth_data = b""  # placeholder – server only needs attestationObject + clientDataJSON for init
+            transports = getattr(auth_response, "transports", None) or []
+        # Legacy CredentialSelection
+        elif hasattr(credential, "auth_response"):
+            auth_response = credential.auth_response
+            cred_id = auth_response.credential_id
+            auth_data = auth_response.auth_data
+            client_data = auth_response.client_data
+            attestation_object = auth_response.attestation_object
+            transports = getattr(auth_response, "transports", None) or []
+        else:
+            # Fallback – treat credential itself as the response
+            _cred_id = getattr(credential, "id", None) or getattr(credential, "credential_id", None)
+            cred_id: bytes = _cred_id if isinstance(_cred_id, (bytes, bytearray)) else b""  # type: ignore[misc,no-redef]
+            _auth_data = getattr(credential, "auth_data", None)
+            auth_data: bytes = _auth_data if isinstance(_auth_data, (bytes, bytearray)) else b""  # type: ignore[misc,no-redef]
+            _client_data = getattr(credential, "client_data", None)
+            client_data: bytes = _client_data if isinstance(_client_data, (bytes, bytearray)) else b""  # type: ignore[misc,no-redef]
+            _attestation_object = getattr(credential, "attestation_object", None)
+            attestation_object: bytes = (  # type: ignore[misc,no-redef]
+                _attestation_object if isinstance(_attestation_object, (bytes, bytearray)) else b""
+            )
+            transports = getattr(credential, "transports", None) or []
+
+        resp = {
+            "id": _b64url_encode(cred_id),
+            "rawId": _b64url_encode(cred_id),
+            "response": {
+                "clientDataJSON": _b64url_encode(_serialize_client_data(client_data)),
+                "attestationObject": _b64url_encode(attestation_object),  # type: ignore[arg-type]
+                "transports": transports,
+            },
+            "type": "public-key",
+        }
+        if auth_data:
+            resp["response"]["authenticatorData"] = _b64url_encode(_serialize_auth_data(auth_data))  # type: ignore[index]
+        return resp
+
+    def normalize_webauthn_options(self, options: dict[str, Any]) -> dict[str, Any]:
+        """Convert Venya server WebAuthn JSON (camelCase, per WebAuthn spec)
+        to python-fido2 constructor shape (snake_case keys where required).
+
+        This is the single source of truth for the wire format the server emits
+        (see fido2/manager.py). Explicit, forward-compatible, no heuristics.
+        """
+        norm: dict[str, Any] = {}
+
+        # Top-level scalar / simple fields
+        for camel, snake in [
+            ("challenge", "challenge"),
+            ("rpId", "rp_id"),
+            ("timeout", "timeout"),
+            ("userVerification", "user_verification"),
+            ("attestation", "attestation"),
+        ]:
+            if camel in options:
+                norm[snake] = options[camel]
+            elif snake in options:
+                norm[snake] = options[snake]
+
+        # rp object (registration)
+        if "rp" in options:
+            norm["rp"] = options["rp"]
+            # The browser-adapter wire shape (server/fido2/browser_adapter.py
+            # challenge_to_browser_options, emitted by e.g.
+            # /auth/elevate/challenge) folds rpId into rp.id and drops the
+            # scalar. Assertion options still need rp_id — without it the
+            # Windows platform API gets a NULL pwszRpId and fails
+            # NTE_INVALID_PARAMETER (0x80090027), found physically on win11.
+            if "rp_id" not in norm and isinstance(options["rp"], dict) and options["rp"].get("id"):
+                norm["rp_id"] = options["rp"]["id"]
+
+        # user object (registration)
+        if "user" in options:
+            norm["user"] = options["user"]
+
+        # pubKeyCredParams (registration)
+        if "pubKeyCredParams" in options:
+            norm["pubKeyCredParams"] = options["pubKeyCredParams"]
+
+        # Credential descriptor lists (decode ids to bytes immediately)
+        for camel, snake in [
+            ("allowCredentials", "allow_credentials"),
+            ("excludeCredentials", "exclude_credentials"),
+        ]:
+            raw_list = options.get(camel) or options.get(snake)
+            if raw_list:
+                decoded = []
+                for cred in raw_list:
+                    if "id" in cred:
+                        cred = dict(cred)  # copy so we don't mutate caller's dict
+                        cred["id"] = _b64_decode_id(cred["id"])
+                    decoded.append(cred)
+                norm[snake] = decoded
+
+        return norm
+
+    def _build_request_options(self, options: dict[str, Any]) -> CredentialRequestOptions:
+        """Convert server challenge options to fido2 CredentialRequestOptions.
+
+        Args:
+            options: WebAuthn challenge options from server.
+
+        Returns:
+            CredentialRequestOptions for python-fido2.
+        """
+        norm = self.normalize_webauthn_options(options)
+        challenge = _b64_decode_id(norm["challenge"])
+
+        allow_credentials = []
+        for cred in norm.get("allow_credentials", []) or []:
+            allow_credentials.append(
+                PublicKeyCredentialDescriptor(
+                    type=cred.get("type", "public-key"),
+                    id=cred["id"],  # already decoded bytes by normalizer
+                    transports=cred.get("transports"),
+                )
+            )
+
+        public_key = PublicKeyCredentialRequestOptions(
+            challenge=challenge,
+            timeout=norm.get("timeout"),
+            rp_id=norm.get("rp_id"),
+            allow_credentials=allow_credentials or None,
+            user_verification=UserVerificationRequirement.REQUIRED,
+        )
+
+        return CredentialRequestOptions(public_key=public_key)
+
+    def _get_assertion(
+        self,
+        request_options: CredentialRequestOptions,
+        timeout: float = 60.0,
+    ) -> AssertionSelection:
+        """Perform WebAuthn assertion using python-fido2.
+
+        Dispatches on authenticator capability: keys with built-in UV use the
+        high-level Fido2Client path; clientPin-only keys use a direct Ctap2
+        getAssertion call with the pin token and no uv option.
+
+        Args:
+            request_options: Credential request options.
+            timeout: Timeout in seconds.
+
+        Returns:
+            AssertionSelection from python-fido2.
+        """
+        public_key = request_options.public_key
+        rp_id = public_key.rp_id or "localhost"
+        origin = f"https://{rp_id}" if not self.server_url.startswith("http") else self.server_url
+        collector = DefaultClientDataCollector(origin, verify_rp_id)
+
+        if sys.platform == "win32":
+            # Platform API path: no enumeration (admin-only on Windows), no
+            # info-based dispatch — the OS negotiates UV/PIN via its own UI.
+            try:
+                return _make_webauthn_client(collector).get_assertion(public_key)
+            except ClientError as e:
+                raise _translate_windows_error(e) from e
+
+        devices = list(list_devices())
+        if not devices:
+            raise Fido2NotFoundError("No FIDO2 devices found")
+
+        ctap2 = Ctap2(devices[0])
+        info = ctap2.info
+        interaction = CliInteraction()
+
+        # WHY THIS PATH EXISTS — deviation from library-norm documented deliberately.
+        #
+        # Normally a client uses Fido2Client.do_get_assertion and lets the library
+        # negotiate user verification. fido2 2.2.1 _should_use_uv() treats
+        # clientPin in get_info options as UV capability, returning True for
+        # required verification. That routes the PIN through the UV-negotiation
+        # path (_get_token → get_pin_token), which then issues a
+        # _filter_creds discovery getAssertion (options={"up": false}, dummy
+        # client_data_hash) before the real assertion. Authenticators with
+        # clientPin but no built-in UV (uv absent from get_info options, e.g.
+        # TrustKey T120) reject the discovery call — observed as
+        # CTAP2_ERR_MISSING_PARAMETER (0x14), where the spec-required code is
+        # CTAP2_ERR_INVALID_OPTION. Because the firmware's error code is itself
+        # off-spec, we cannot retry on error codes; we must not send the
+        # discovery call at all.
+        #
+        # Per FIDO Alliance guidance: for a clientPin-only key, user verification
+        # is satisfied by the pinUvAuthParam (the PIN is the user verification);
+        # the "uv" option is only for built-in UV methods. Sending no "uv" option
+        # with the pin token is therefore spec-canonical, not a workaround.
+        #
+        # If upstream python-fido2 gates the uv option on info.options["uv"], this
+        # branch should be removed and Fido2Client.do_get_assertion restored for
+        # all keys. See tickets/fido2-upstream-uv-option-pin-only-keys.md.
+
+        if info.options.get("uv"):
+            # built-in UV: existing high-level path
+            client = Fido2Client(devices[0], collector, user_interaction=interaction)
+            return client.get_assertion(public_key)
+
+        if info.options.get("clientPin"):
+            return self._get_assertion_pin_only(ctap2, public_key, interaction)
+
+        raise Fido2ClientError("Security key advertises neither built-in UV nor clientPin; cannot assert.")
+
+    @staticmethod
+    def _negotiate_pin_protocol(ctap2: Ctap2) -> Any:
+        """Pick the first PIN/UV protocol both sides speak (dedupe of the
+        loop previously inline in _get_assertion_pin_only)."""
+        for proto in ClientPin.PROTOCOLS:
+            if proto.VERSION in ctap2.info.pin_uv_protocols:
+                return proto()
+        raise Fido2ClientError("No compatible PIN/UV protocol supported by the security key.")
+
+    @staticmethod
+    def _setup_key_pin(ctap2: Ctap2, interaction: CliInteraction) -> None:
+        """Create the PIN on a factory-fresh key (clientPin supported, unset).
+
+        Safety rules earned the hard way (ticket
+        init-pin-invalid-after-installation-reset): never loop-retry a device
+        failure — blind retries burn the key's PIN-retry counter to
+        PIN_AUTH_BLOCKED (full key reset). Double entry + client-side
+        validation run BEFORE any device round-trip; set_pin itself is
+        unauthenticated, so confirmation mismatches cost nothing. The PIN
+        goes straight into the CTAP2 encrypted handshake — never logged,
+        never stored, never sent to the server.
+        """
+        if not sys.stdin.isatty():
+            raise Fido2ClientError(
+                "This security key has no PIN set, and creating one requires an interactive "
+                "terminal (the prompts are hidden-input). Re-run attached to a real terminal."
+            )
+        proto = Fido2Auth._negotiate_pin_protocol(ctap2)
+        pin: str | None = None
+        for _attempt in range(3):
+            new_pin = getpass.getpass(
+                "\nThis security key has no PIN yet. Create one (4-63 characters; " "Venya never stores it): "
+            )
+            if not 4 <= len(new_pin.encode("utf-8")) <= 63:
+                print("PIN must be 4-63 bytes — try again.", file=sys.stderr)
+                continue
+            confirm = getpass.getpass("Confirm the new PIN: ")
+            if new_pin != confirm:
+                print("PINs did not match — try again.", file=sys.stderr)
+                continue
+            pin = new_pin
+            break
+        if pin is None:
+            raise Fido2ClientError("PIN creation aborted after 3 failed attempts; the key is unchanged.")
+        try:
+            ClientPin(ctap2, proto).set_pin(pin)
+        except (CtapError, ValueError) as e:
+            # Fail loud, NEVER retry in-loop (retry-counter lesson).
+            raise Fido2ClientError(
+                f"Setting the key PIN failed: {e}. The key is unchanged; re-run to try again."
+            ) from e
+        interaction.preset_pin = pin
+        print("PIN set on the security key — continuing registration.", file=sys.stderr)
+
+    def _get_assertion_pin_only(
+        self,
+        ctap2: Ctap2,
+        public_key: PublicKeyCredentialRequestOptions,
+        interaction: CliInteraction,
+    ) -> AssertionSelection:
+        """Direct Ctap2.get_assertion for clientPin-only keys.
+
+        Bypasses Fido2Client.do_get_assertion entirely. Uses the existing
+        CliInteraction.request_pin() machinery to obtain the PIN, then drives
+        Ctap2.get_assertion directly with the pin token and no uv option.
+
+        Args:
+            ctap2: The Ctap2 instance (already initialized, info cached).
+            public_key: The PublicKeyCredentialRequestOptions.
+            interaction: CliInteraction for PIN prompt.
+
+        Returns:
+            AssertionSelection wrapping the raw response.
+        """
+        # Negotiate PIN/UV protocol
+        pin_protocol = Fido2Auth._negotiate_pin_protocol(ctap2)
+
+        rp_id = public_key.rp_id or "localhost"
+        pin = interaction.request_pin(ClientPin.PERMISSION.GET_ASSERTION, rp_id)
+        if not pin:
+            raise Fido2ClientError("No PIN entered; a clientPin-only key requires the key PIN to assert.")
+
+        client_pin = ClientPin(ctap2, pin_protocol)
+        if FIDO2_DEBUG:
+            print("DEBUG: obtaining PIN token...", file=sys.stderr)
+        try:
+            token = client_pin.get_pin_token(pin, ClientPin.PERMISSION.GET_ASSERTION, rp_id)
+        except CtapError as e:
+            if FIDO2_DEBUG:
+                print(f"DEBUG: PIN token FAILED: {e}", file=sys.stderr)
+            raise Fido2ClientError(f"PIN token failed: {e}") from e
+        if FIDO2_DEBUG:
+            print("DEBUG: PIN token OK, building client data...", file=sys.stderr)
+
+        # Construct client data for the hash used in pinUvAuthParam
+        origin = f"https://{rp_id}"
+        if FIDO2_DEBUG:
+            print(f"DEBUG: client_data origin={origin}", file=sys.stderr)
+        client_data, _ = DefaultClientDataCollector(origin, verify_rp_id).collect_client_data(public_key)
+
+        pin_uv_param = pin_protocol.authenticate(token, client_data.hash)
+        pin_uv_protocol = pin_protocol.VERSION
+
+        allow_list = [{"type": c.type, "id": c.id} for c in (public_key.allow_credentials or [])] or None
+
+        if FIDO2_DEBUG:
+            if allow_list:
+                cred_ids = [c["id"].hex() for c in allow_list]
+                print(f"DEBUG: allow_list ids (hex): {cred_ids}", file=sys.stderr)
+            print(
+                f"DEBUG: calling get_assertion (allow_list={len(allow_list) if allow_list else 0} creds, rp_id={rp_id})",
+                file=sys.stderr,
+            )
+        try:
+            response = ctap2.get_assertion(
+                rp_id,
+                client_data.hash,
+                allow_list,
+                pin_uv_param=pin_uv_param,
+                pin_uv_protocol=pin_uv_protocol,
+                on_keepalive=lambda status: interaction.prompt_up(),
+            )
+        except CtapError as e:
+            if FIDO2_DEBUG:
+                print(f"DEBUG: get_assertion FAILED: {e}", file=sys.stderr)
+            if e.code == CtapError.ERR.OPERATION_DENIED:
+                raise Fido2ClientError(
+                    "Security key denied the operation (0x27). "
+                    "This usually means the credential was registered under a "
+                    "different RP ID than the one being asserted for "
+                    f"(current rp_id={rp_id}). "
+                    "Re-enroll the key or verify the stored RP ID for this user."
+                ) from e
+            raise Fido2ClientError(f"get_assertion failed: {e}") from e
+        if FIDO2_DEBUG:
+            print("DEBUG: assertion OK", file=sys.stderr)
+        return AssertionSelection(client_data, [response])
+
+    def _get_credential_pin_only(
+        self,
+        ctap2: Ctap2,
+        request_options: CredentialCreationOptions,
+        interaction: CliInteraction,
+    ) -> Any:
+        """Direct Ctap2.make_credential for clientPin-only keys.
+
+        Bypasses Fido2Client.make_credential entirely. Uses the existing
+        CliInteraction.request_pin() machinery to obtain the PIN, then drives
+        Ctap2.make_credential directly with the pin token and no uv option.
+
+        This is the production fix for 0x27 OPERATION_DENIED during registration
+        on clientPin-only keys (TrustKey T120, YubiKey, etc.).
+        """
+        # Negotiate PIN/UV protocol
+        for proto in ClientPin.PROTOCOLS:
+            if proto.VERSION in ctap2.info.pin_uv_protocols:
+                pin_protocol = proto()
+                break
+        else:
+            raise Fido2ClientError("No compatible PIN/UV protocol supported by the security key.")
+
+        public_key = request_options.public_key
+        rp = public_key.get("rp", {})
+        rp_id = rp.get("id", "localhost")
+        # Ticket cli-add-credential-ctap-unexpected-type (#294): NEVER source
+        # bytes-bearing fields via public_key Mapping reads — that re-enters
+        # python-fido2's JSON view (_JsonDataObject.__getitem__,
+        # fido2/utils.py:321-325), which re-encodes every bytes value as a
+        # base64url STRING; CTAP2 then gets text-where-bytes-required and the
+        # key answers 0x11 CBOR_UNEXPECTED_TYPE. Read the typed attributes
+        # (genuine bytes) and pass plain CTAP-form dicts — the exact
+        # convention the library's own client uses via _as_cbor before every
+        # Ctap2 call (fido2/client/__init__.py ~:863).
+        user_entity = public_key.user
+        user_id = user_entity.id
+        # Ensure user id is a proper opaque 32-byte value (CTAP2 requirement).
+        # The server currently sends the username string; we override it here
+        # for the direct Ctap2 path to satisfy strict authenticators.
+        # Length now checks BYTES (pre-fix it ran on the base64url str, which
+        # let long ids cross CTAP as strings — the same #294 bug class).
+        if len(user_id) < 16:
+            import os
+
+            user_id = os.urandom(32)
+        user = {"id": user_id}
+        if user_entity.name is not None:
+            user["name"] = user_entity.name
+        if user_entity.display_name is not None:
+            user["displayName"] = user_entity.display_name
+
+        exclude_list = None
+        if public_key.exclude_credentials:
+            exclude_list = []
+            for cred in public_key.exclude_credentials:
+                entry = {"type": cred.type, "id": cred.id}  # id: BYTES
+                if cred.transports is not None:
+                    entry["transports"] = list(cred.transports)
+                exclude_list.append(entry)
+
+        pin = interaction.request_pin(ClientPin.PERMISSION.MAKE_CREDENTIAL, rp_id)
+        if not pin:
+            raise Fido2ClientError("No PIN entered; a clientPin-only key requires the key PIN to register.")
+
+        client_pin = ClientPin(ctap2, pin_protocol)
+        if FIDO2_DEBUG:
+            print("DEBUG: obtaining PIN token (MAKE_CREDENTIAL)...", file=sys.stderr)
+        try:
+            token = client_pin.get_pin_token(pin, ClientPin.PERMISSION.MAKE_CREDENTIAL, rp_id)
+        except CtapError as e:
+            if FIDO2_DEBUG:
+                print(f"DEBUG: PIN token FAILED: {e}", file=sys.stderr)
+            raise Fido2ClientError(f"PIN token failed: {e}") from e
+        if FIDO2_DEBUG:
+            print("DEBUG: PIN token OK, building client data...", file=sys.stderr)
+
+        # Construct client data for the hash used in pinUvAuthParam
+        origin = f"https://{rp_id}"
+        if FIDO2_DEBUG:
+            print(f"DEBUG: client_data origin={origin}", file=sys.stderr)
+
+        client_data, _ = DefaultClientDataCollector(origin, verify_rp_id).collect_client_data(
+            request_options.public_key
+        )
+
+        pin_uv_param = pin_protocol.authenticate(token, client_data.hash)
+        pin_uv_protocol = pin_protocol.VERSION
+
+        if FIDO2_DEBUG:
+            print(f"DEBUG: calling make_credential (rp_id={rp_id})", file=sys.stderr)
+            print(f"DEBUG: rp={rp}", file=sys.stderr)
+            print(f"DEBUG: user={user}", file=sys.stderr)
+            print(f"DEBUG: client_data_hash (len={len(client_data.hash)})", file=sys.stderr)
+            print(f"DEBUG: pubKeyCredParams={public_key.get('pubKeyCredParams', [])}", file=sys.stderr)
+            print(f"DEBUG: exclude_list={exclude_list}", file=sys.stderr)
+            print("DEBUG: options sent to ctap2={'rk': True}", file=sys.stderr)
+        try:
+            # Some keys require "rk": True for the first credential after reset
+            response = ctap2.make_credential(
+                client_data.hash,
+                rp,
+                user,
+                public_key.get("pubKeyCredParams", []),
+                exclude_list=exclude_list,
+                options={"rk": True},
+                pin_uv_param=pin_uv_param,
+                pin_uv_protocol=pin_uv_protocol,
+                on_keepalive=lambda status: interaction.prompt_up(),
+            )
+        except CtapError as e:
+            if FIDO2_DEBUG:
+                print(f"DEBUG: make_credential FAILED: {e}", file=sys.stderr)
+            raise Fido2ClientError(f"make_credential failed: {e}") from e
+
+        if FIDO2_DEBUG:
+            print("DEBUG: make_credential OK", file=sys.stderr)
+        return self._wrap_attestation_response(response, client_data)
+
+    @staticmethod
+    def _wrap_attestation_response(response: Any, client_data: Any) -> Any:
+        """Wrap a raw CTAP2 AttestationResponse into the legacy auth_response
+        shape _format_credential_response expects.
+
+        fido2 2.x AttestationResponse exposes fmt/auth_data/att_stmt -- it has NO
+        .credential_id / .attestation_object (reading them raises AttributeError).
+        Source them correctly: credential_id from auth_data.credential_data, and
+        attestation_object via AttestationObject.create. Same bug class as the
+        already-fixed assertion twin (_format_assertion_response): a helper written
+        against an imagined response shape, masked by mocks with those attributes.
+        """
+        auth_response = type(
+            "obj",
+            (object,),
+            {
+                "credential_id": response.auth_data.credential_data.credential_id,
+                "auth_data": response.auth_data,
+                "client_data": client_data,
+                "attestation_object": AttestationObject.create(response.fmt, response.auth_data, response.att_stmt),
+            },
+        )()
+        return type(
+            "obj",
+            (object,),
+            {"auth_response": auth_response, "transports": None},
+        )()
+
+    def _format_assertion_response(
+        self,
+        assertion: AssertionSelection,
+    ) -> dict[str, Any]:
+        """Convert python-fido2 assertion to server-expected format.
+
+        Uses the real AssertionSelection API (.get_assertions(),
+        .get_response()) rather than non-existent .assertions/.client_data
+        attributes. This fixes a latent bug where the formatter used
+        attributes that do not exist on the real AssertionSelection class.
+
+        Args:
+            assertion: AssertionSelection from python-fido2.
+
+        Returns:
+            Dict in the format the server expects.
+        """
+        auth_response = assertion.get_assertions()[0]
+
+        cred_id = auth_response.credential["id"]
+        if FIDO2_DEBUG:
+            print(f"DEBUG: assertion cred_id from key (hex)={cred_id.hex()}", file=sys.stderr)
+        auth_data = auth_response.auth_data
+        signature = auth_response.signature
+        client_data = assertion.get_response(0).response.client_data
+
+        # Standard base64 WITH padding — server decodes response["id"] via
+        # base64.b64decode, which requires padded input for lengths != 0 mod 3
+        # (e.g. 64-byte credential IDs → 86 chars + '='). Stripping padding
+        # caused "Incorrect padding" → 401 on every 64-byte credential.
+        def _b64std_encode(data: bytes) -> str:
+            if FIDO2_DEBUG:
+                print(f"DEBUG: _b64std_encode input (hex)={data.hex()}", file=sys.stderr)
+            return base64.b64encode(data).decode("ascii")
+
+        if FIDO2_DEBUG:
+            print(f"DEBUG: cred_id bytes passed to _b64std_encode (hex)={cred_id.hex()}", file=sys.stderr)
+
+        encoded_id = _b64std_encode(cred_id)
+        if FIDO2_DEBUG:
+            print(f"DEBUG: _b64std_encode output={encoded_id}", file=sys.stderr)
+
+        return {
+            "id": encoded_id,
+            "rawId": encoded_id,
+            "response": {
+                "clientDataJSON": _b64url_encode(_serialize_client_data(client_data)),
+                "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data)),
+                "signature": _b64url_encode(signature),
+                "userHandle": None,
+            },
+            "type": "public-key",
+            "clientExtensionResults": {},
+        }
+
+
+def _serialize_client_data(client_data: CollectedClientData) -> bytes:
+    """Serialize CollectedClientData to JSON bytes.
+
+    Args:
+        client_data: The client data from the assertion.
+
+    Returns:
+        JSON-serialized client data bytes.
+    """
+    data = {
+        "type": client_data.type,
+        "challenge": _b64url_encode(client_data.challenge),
+        "origin": client_data.origin,
+        "crossOrigin": client_data.cross_origin,
+    }
+    return json.dumps(data, separators=(",", ":")).encode("utf-8")
+
+
+def _serialize_auth_data(auth_data: AuthenticatorData) -> bytes:
+    """Serialize AuthenticatorData to raw bytes.
+
+    Args:
+        auth_data: The authenticator data from the assertion.
+
+    Returns:
+        Raw authenticator data bytes.
+    """
+    flags_byte = bytes([auth_data.flags.value if hasattr(auth_data.flags, "value") else int(auth_data.flags)])
+    counter_bytes = auth_data.counter.to_bytes(4, byteorder="big")
+    return auth_data.rp_id_hash + flags_byte + counter_bytes

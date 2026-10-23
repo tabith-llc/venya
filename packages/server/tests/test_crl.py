@@ -1,0 +1,609 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Tests for CRL (Certificate Revocation List) functionality.
+
+Tests cover:
+- CRL generation with and without revocation entries
+- CDP (CRL Distribution Point) extension in signed certificates
+- Purge of expired revocation records
+- CRL endpoint returns valid DER-encoded CRL
+"""
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtensionOID, NameOID
+from fastapi import FastAPI
+from server.ca import CAManager
+from server.config import CRLConfig, ServerConfig
+from server.routes import executors as executors_routes
+from starlette.testclient import TestClient
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ca_dir(tmp_path):
+    """Create a temporary CA directory."""
+    d = tmp_path / "ca"
+    d.mkdir()
+    return str(d)
+
+
+@pytest.fixture
+def ca_manager(ca_dir, monkeypatch):
+    """Create and initialize a CAManager.
+
+    #537: the write path refuses to mint a CA key with no passphrase set, so the
+    fixture provides one (the valid configuration). The var is test-local.
+    """
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test_passphrase_crl")
+    manager = CAManager(ca_dir)
+    manager.initialize()
+    return manager
+
+
+@pytest.fixture
+def executor_keypair():
+    """Generate an ECDSA P-256 keypair for testing."""
+    return ec.generate_private_key(ec.SECP256R1())
+
+
+@pytest.fixture
+def executor_csr(executor_keypair):
+    """Create a CSR for testing."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+        ]
+    )
+    return x509.CertificateSigningRequestBuilder().subject_name(subject).sign(executor_keypair, hashes.SHA256())
+
+
+@dataclass
+class MockRevocation:
+    serial_number: str
+    revoked_at: datetime
+
+
+@dataclass
+class MockCRLConfig:
+    crl_retention_days: int = 90
+    crl_url: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# CRLConfig tests
+# ---------------------------------------------------------------------------
+
+
+def test_crl_config_defaults():
+    """CRLConfig should have sensible defaults."""
+    config = CRLConfig()
+    assert config.crl_retention_days == 90
+    assert config.crl_url is None
+
+
+def test_crl_config_custom():
+    """RE-PAIRED for #685/F2 (was: custom `crl_retention_days=30`).
+
+    30 is no longer a constructible value: the guard anchor is
+    `max(EXECUTOR_VALIDITY_DAYS, ADMIN_CERT_VALIDITY_DAYS)` = 90, so the old "custom value" of 30
+    is now one of the refused low values. The cell keeps its shape — a custom window plus a custom
+    CDP URL — at a value that is lawfully settable.
+    """
+    config = CRLConfig(crl_retention_days=120, crl_url="https://crl.example.com/crl")
+    assert config.crl_retention_days == 120
+    assert config.crl_url == "https://crl.example.com/crl"
+
+
+def test_crl_config_min_boundary():
+    """RE-PAIRED for #685 (was: "crl_retention_days should accept minimum value of 1").
+
+    The old assertion pinned the hazard this ticket closes. ``ge=1`` is a TYPE bound only: a
+    one-day window over populations whose credentials live 30 and 90 days would DELETE the
+    revocation row of a credential still inside its own ``not_after``, which answers "not
+    revoked" about a revoked executor. The Field floor is NOT weakened — what changed is that a
+    startup validator refuses the low half of the range
+    (``config.CRLConfig._retention_covers_revoked_population_lifetime``), so the value that used
+    to be "the minimum" cannot be loaded at all. This cell is the guard's paired negative.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="must stay at or above"):
+        CRLConfig(crl_retention_days=1)
+
+
+def test_crl_config_max_boundary():
+    """crl_retention_days should accept maximum value of 365."""
+    config = CRLConfig(crl_retention_days=365)
+    assert config.crl_retention_days == 365
+
+
+def test_retention_guard_anchor_is_the_longest_leaf_lifetime_across_both_tables():
+    """The guard binds the MAXIMUM leaf-certificate lifetime whose revocations live in the two
+    revocation tables — max(30, 90) = 90 — not the CA's 3650-day ISSUER lifetime and not the
+    365-day relay credential, which lives on a registry row, not in a revocation table (#685,
+    lead ruling on finding F2). Constants are read off their declaration, so a change to either
+    number trips this cell rather than a remembered ratio.
+    """
+    from server.ca import ADMIN_CERT_VALIDITY_DAYS, CA_VALIDITY_DAYS, EXECUTOR_VALIDITY_DAYS
+
+    assert EXECUTOR_VALIDITY_DAYS == 30
+    assert ADMIN_CERT_VALIDITY_DAYS == 90
+    anchor = max(EXECUTOR_VALIDITY_DAYS, ADMIN_CERT_VALIDITY_DAYS)
+    assert anchor == 90
+    # The issuer lifetime is NOT in the anchor, and the cell says so out loud: folding
+    # CA_VALIDITY_DAYS in would make every legal config unbootable, because the ceiling is 365
+    # and the CA lives 3650 days. The ceiling itself is asserted BEHAVIOURALLY — the `le`/`ge`
+    # pair is unchanged by this leg, and 366 still refuses while 365 still loads.
+    assert CA_VALIDITY_DAYS > anchor
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        CRLConfig(crl_retention_days=366)  # the `le=365` ceiling was NOT moved for this guard
+    assert CRLConfig(crl_retention_days=365).crl_retention_days == 365
+
+    # Boundary, both sides of the line: at the anchor it loads, one day under it does not.
+    assert CRLConfig(crl_retention_days=anchor).crl_retention_days == anchor
+    with pytest.raises(ValidationError):
+        CRLConfig(crl_retention_days=anchor - 1)
+
+
+def test_retention_guard_refuses_at_config_load_before_anything_starts():
+    """Raise-before-start, not raise-on-first-purge: the check rides config LOAD, so a bad
+    window never reaches a running core (#685)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="ADMIN_CERT_VALIDITY_DAYS"):
+        ServerConfig(crl={"crl_retention_days": 7}, recovery_code_pepper="test-pepper")
+    # And the admin half of the anchor is really what refuses 30–89 — the executor lifetime alone
+    # would have let it through, which is exactly finding F2.
+    with pytest.raises(ValidationError, match=r"max\(EXECUTOR_VALIDITY_DAYS"):
+        ServerConfig(crl={"crl_retention_days": 30}, recovery_code_pepper="test-pepper")
+
+
+def test_shipped_default_retention_sits_on_the_anchor_and_loads():
+    """THE BOUNDARY CELL the lead named, and the one character that decides enforcement versus
+    an outage (#685 / F2).
+
+    The shipped default is 90 and `ADMIN_CERT_VALIDITY_DAYS` is 90, so the default sits EXACTLY on
+    the anchor. The guard therefore has to be strict ``>=`` — i.e. refuse only BELOW it. A `>`
+    comparison would refuse the DEFAULT config, and every core on the network would fail to boot
+    on its next restart with nobody having set anything. This cell pins the three facts that make
+    that impossible: the default equals the anchor, the default loads, and a bare ServerConfig
+    loads.
+    """
+    from server.ca import ADMIN_CERT_VALIDITY_DAYS, EXECUTOR_VALIDITY_DAYS
+
+    anchor = max(EXECUTOR_VALIDITY_DAYS, ADMIN_CERT_VALIDITY_DAYS)
+    default = CRLConfig.model_fields["crl_retention_days"].default
+    assert default == anchor, (
+        f"the shipped default ({default}) no longer sits on the guard anchor ({anchor}); a "
+        "strict `>` comparison here would brick every core on restart"
+    )
+    assert CRLConfig().crl_retention_days == 90
+    assert CRLConfig(crl_retention_days=90).crl_retention_days == 90
+    assert ServerConfig(recovery_code_pepper="test-pepper").crl.crl_retention_days == 90
+
+
+# ---------------------------------------------------------------------------
+# CDP extension tests
+# ---------------------------------------------------------------------------
+
+
+def test_cdp_extension_present(ca_manager, executor_csr):
+    """Certificate should include CDP extension when crl_url is provided."""
+    cert = ca_manager.sign_csr(
+        executor_csr, "test-executor", crl_url="https://crl.venya.internal/api/v1/executors/certs/crl"
+    )
+
+    cdp_ext = cert.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
+    assert cdp_ext is not None
+    assert len(cdp_ext.value) == 1
+    assert cdp_ext.value[0].full_name[0].value == "https://crl.venya.internal/api/v1/executors/certs/crl"
+
+
+def test_cdp_extension_absent(ca_manager, executor_csr):
+    """Certificate should not include CDP extension when crl_url is None."""
+    cert = ca_manager.sign_csr(executor_csr, "test-executor", crl_url=None)
+
+    with pytest.raises(x509.ExtensionNotFound):
+        cert.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
+
+
+def test_cdp_extension_absent_by_default(ca_manager, executor_csr):
+    """Certificate should not include CDP extension by default (no crl_url arg)."""
+    cert = ca_manager.sign_csr(executor_csr, "test-executor")
+
+    with pytest.raises(x509.ExtensionNotFound):
+        cert.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
+
+
+# ---------------------------------------------------------------------------
+# CRL generation tests
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_db_session(ca_manager, revocations):
+    """Create a mock DB session that returns revocations."""
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_query.order_by.return_value.limit.return_value.all.return_value = revocations
+    mock_session.query.return_value = mock_query
+    mock_session.commit.return_value = None
+    return mock_session
+
+
+def test_generate_crl_with_entries(ca_manager):
+    """generate_crl should produce a valid DER CRL with revocation entries."""
+    now = datetime.now(UTC)
+    revocations = [
+        MockRevocation(serial_number="01a2b3c4d5e6f700", revoked_at=now - timedelta(days=1)),
+        MockRevocation(serial_number="02b3c4d5e6f70011", revoked_at=now - timedelta(days=2)),
+    ]
+    mock_session = _make_mock_db_session(ca_manager, revocations)
+
+    crl_der = ca_manager.generate_crl(mock_session)
+
+    # Should be valid DER
+    assert isinstance(crl_der, bytes)
+    assert len(crl_der) > 0
+
+    # Should be parseable as a CRL
+    crl = x509.load_der_x509_crl(crl_der)
+    assert crl is not None
+    assert len(list(crl)) == 2
+
+
+def test_generate_crl_empty(ca_manager):
+    """generate_crl should produce a valid empty CRL when no revocations."""
+    mock_session = _make_mock_db_session(ca_manager, [])
+    crl_der = ca_manager.generate_crl(mock_session)
+
+    assert isinstance(crl_der, bytes)
+    assert len(crl_der) > 0
+
+    crl = x509.load_der_x509_crl(crl_der)
+    assert crl is not None
+    assert len(list(crl)) == 0
+
+
+def test_generate_crl_max_entries(ca_manager):
+    """generate_crl should respect max_entries limit."""
+    now = datetime.now(UTC)
+    all_revocations = [
+        MockRevocation(serial_number=format(i, "016x"), revoked_at=now - timedelta(days=i)) for i in range(1, 20)
+    ]
+    # The generate_crl method queries with .order_by().limit(n).all()
+    # We mock at the session level to intercept the chain and return only the limited subset
+    limited = all_revocations[:5]
+    mock_session = MagicMock()
+    mock_session.query.return_value.order_by.return_value.limit.return_value.all.return_value = limited
+    mock_session.commit.return_value = None
+
+    crl_der = ca_manager.generate_crl(mock_session, max_entries=5)
+
+    crl = x509.load_der_x509_crl(crl_der)
+    assert len(list(crl)) == 5
+
+
+# ---------------------------------------------------------------------------
+# Purge tests — RE-PAIRED for #685 (owner ruling 2026-10-20)
+#
+# Both cells used to PIN THE PURGE ("should delete old records" / "should return 0 when no
+# records are old enough"). The behavior they asserted IS the defect. Neither `def test_` is
+# deleted: each is re-paired to the new guarantee, the house precedent being #685's own
+# test_serial_form_crls_without_identity.
+# ---------------------------------------------------------------------------
+
+
+def test_purge_expired_revocations(ca_manager):
+    """RE-PAIRED (was: "purge_expired_revocations should delete old records").
+
+    The time-based purge path is GONE from the executor CA manager rather than left in place
+    calling nothing, so no caller can age a revoked serial out on a timer — and a row far
+    older than the old 90-day window is still listed in the CRL, because this table is the
+    population, not a cache of it.
+    """
+    assert not hasattr(CAManager, "purge_expired_revocations"), (
+        "ExecutorCertRevocation is exempt from time-based purge (#685): the executor CA "
+        "manager must not expose a purge path at all"
+    )
+    assert not hasattr(ca_manager, "purge_expired_revocations")
+
+    now = datetime.now(UTC)
+    ancient = MockRevocation(serial_number="0000000000000a01", revoked_at=now - timedelta(days=400))
+    crl_der = ca_manager.generate_crl(MagicMock(), revocations=[ancient])
+    crl = x509.load_der_x509_crl(crl_der)
+    assert [c.serial_number for c in crl] == [0x0A01]
+
+
+def test_purge_expired_revocations_nothing_to_delete(ca_manager):
+    """RE-PAIRED (was: "purge_expired_revocations should return 0 when no records are old
+    enough").
+
+    This is now the SCOPE half of the pair: the exemption covers the one table the owner named.
+    `AdminCAManager.purge_expired_revocations` still EXISTS (and is still unwired into the
+    maintenance loop) — #685 did not generalise to the admin plane. Pinning the asymmetry is
+    what stops a later seat from reading "revocations are never purged" as a statement about
+    the whole CA surface, and from quietly widening behavior nobody ruled.
+    """
+    from server.ca import AdminCAManager
+
+    assert not hasattr(CAManager, "purge_expired_revocations")
+    assert hasattr(
+        AdminCAManager, "purge_expired_revocations"
+    ), "the admin twin is out of scope for #685 — it must stay exactly as it shipped"
+
+    # Paired with the admin path's own bound: the admin credential lifetime (90 days) is
+    # LONGER than the executor one the guard uses, which is finding F2 in the leg report —
+    # recorded here so a revert of the exemption cannot silently under-protect that plane.
+    from server.ca import ADMIN_CERT_VALIDITY_DAYS, EXECUTOR_VALIDITY_DAYS
+
+    assert ADMIN_CERT_VALIDITY_DAYS > EXECUTOR_VALIDITY_DAYS
+
+
+# ---------------------------------------------------------------------------
+# CRL endpoint tests
+# ---------------------------------------------------------------------------
+
+
+def _create_crl_test_app(ca_manager, config=None):
+    """Create a minimal test app with CRL endpoint."""
+    app = FastAPI()
+
+    mock_backend = MagicMock()
+    mock_backend.get_session.return_value = MagicMock()
+    app.state.backend = mock_backend
+    app.state.ca_manager = ca_manager
+
+    if config is None:
+        config = ServerConfig(crl=CRLConfig(crl_retention_days=90), recovery_code_pepper="test-pepper")
+    app.state.config = config
+
+    app.include_router(executors_routes.router, prefix="/api/v1")
+    return app
+
+
+def test_crl_endpoint_returns_der(ca_manager):
+    """GET /executors/certs/crl should return zstd-compressed DER CRL."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/executors/certs/crl")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pkix-crl"
+    assert response.headers["content-encoding"] == "zstd"
+
+    # TestClient auto-decompresses; verify Content-Encoding header is set
+    # and the decompressed content is valid DER
+    assert response.headers["content-encoding"] == "zstd"
+
+
+def test_crl_endpoint_empty_when_no_revocations(ca_manager):
+    """GET /executors/certs/crl should return zstd-compressed empty CRL."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/executors/certs/crl")
+    assert response.status_code == 200
+    assert response.headers["content-encoding"] == "zstd"
+
+
+def test_crl_compression_produces_valid_zstd():
+    """compression.zstd.compress produces valid zstd frames."""
+    import compression.zstd
+
+    # Raw DER CRL (simulated, larger data to overcome framing overhead)
+    raw_der = b"\x30" * 500 + b"\x00" * 500
+    compressed = compression.zstd.compress(raw_der, level=3)
+
+    # zstd magic number: 0x28 0xB5 0x2F 0xFD
+    assert compressed[:4] == b"\x28\xb5\x2f\xfd"
+
+    # Decompression round-trips correctly
+    decompressed = compression.zstd.decompress(compressed)
+    assert decompressed == raw_der
+
+
+def test_crl_compression_ratio_with_realistic_data():
+    """CRL compression should achieve meaningful ratio with realistic data."""
+    import compression.zstd
+
+    # Simulate a realistic CRL with many revocation entries
+    crl_data = b"\x30" * 100 + b"\x30\x81" * 500 + b"\x00" * 2000
+    compressed = compression.zstd.compress(crl_data, level=3)
+    ratio = len(compressed) / len(crl_data)
+
+    assert ratio < 0.5  # Should compress at least 50%
+    decompressed = compression.zstd.decompress(compressed)
+    assert decompressed == crl_data
+
+
+def test_crl_endpoint_503_when_ca_missing():
+    """GET /executors/certs/crl should return 503 when CA is not initialized."""
+    app = FastAPI()
+    mock_backend = MagicMock()
+    mock_backend.get_session.return_value = MagicMock()
+    app.state.backend = mock_backend
+    # No ca_manager set
+    app.state.config = ServerConfig(crl=CRLConfig(crl_retention_days=90), recovery_code_pepper="test-pepper")
+    app.include_router(executors_routes.router, prefix="/api/v1")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/api/v1/executors/certs/crl")
+    assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# CRL caching tests
+# ---------------------------------------------------------------------------
+
+
+def test_crl_endpoint_returns_etag(ca_manager):
+    """GET /executors/certs/crl should return an ETag header."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/executors/certs/crl")
+    assert response.status_code == 200
+    assert "etag" in response.headers
+
+
+def test_crl_endpoint_304_on_etag_match(ca_manager):
+    """GET /executors/certs/crl should return 304 when ETag matches."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    # First request — get the ETag
+    response1 = client.get("/api/v1/executors/certs/crl")
+    assert response1.status_code == 200
+    etag = response1.headers["etag"]
+
+    # Second request with If-None-Match — should get 304
+    response2 = client.get("/api/v1/executors/certs/crl", headers={"If-None-Match": etag})
+    assert response2.status_code == 304
+    assert response2.headers["etag"] == etag
+
+
+def test_crl_endpoint_200_on_etag_mismatch(ca_manager):
+    """GET /executors/certs/crl should return 200 when ETag differs."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/executors/certs/crl", headers={"If-None-Match": '"wrong-etag"'})
+    assert response.status_code == 200
+
+
+def test_crl_endpoint_cache_control(ca_manager):
+    """GET /executors/certs/crl should return Cache-Control header."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/executors/certs/crl")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "max-age=30"
+
+
+# ---------------------------------------------------------------------------
+# #337 — ETag over the SERVED capped population + fail-loud at the ceiling
+# ---------------------------------------------------------------------------
+
+
+def _revocation_rows(n: int, start: int = 1):
+    now = datetime.now(UTC)
+    return [
+        MockRevocation(serial_number=format(i, "016x"), revoked_at=now - timedelta(days=i))
+        for i in range(start, start + n)
+    ]
+
+
+def _crl_app(ca_manager, total: int, capped_rows):
+    """Endpoint app whose DB mock mirrors BOTH route shapes: the ordered+limited
+    query yields the SERVED rows, an unqualified .all() yields the FULL history
+    (what the pre-#337 ETag hashed), and .count() yields the full count."""
+    all_rows = list(capped_rows)
+    extra = total - len(capped_rows)
+    if extra > 0:
+        all_rows += _revocation_rows(extra, start=1001)  # the older tail beyond the cap
+    db = MagicMock()
+    query = db.query.return_value
+    query.order_by.return_value.limit.return_value.all.return_value = list(capped_rows)
+    query.count.return_value = total
+    query.all.return_value = all_rows
+    return _crl_app_with_db(ca_manager, db)
+
+
+def _crl_app_with_db(ca_manager, db):
+    app = FastAPI()
+    backend = MagicMock()
+    backend.get_session.return_value = db
+    app.state.backend = backend
+    app.state.ca_manager = ca_manager
+    app.state.config = ServerConfig(crl=CRLConfig(crl_retention_days=90), recovery_code_pepper="test-pepper")
+    app.include_router(executors_routes.router, prefix="/api/v1")
+    return app
+
+
+def _expected_capped_etag(rows) -> str:
+    import hashlib
+    import json as _json
+
+    serials = sorted(r.serial_number for r in rows)
+    return f'"{hashlib.sha256(_json.dumps(serials, sort_keys=True).encode()).hexdigest()}"'
+
+
+class TestCrlCapEtagDivergence337:
+    """RED at base: the ETag hashed the UNBOUNDED serial history while the body
+    carried only the newest-1000 — two different populations behind one cache
+    key. Fix (ruled A+B): ETag over the served capped set + loud ceiling signal."""
+
+    def test_etag_describes_served_capped_population(self, ca_manager):
+        """1005 revocations: the served population is the newest 1000; the ETag
+        must hash THAT set, not the 1005-entry history."""
+        capped = _revocation_rows(1000)  # newest-first slice the route serves
+        app = _crl_app(ca_manager, total=1005, capped_rows=capped)
+        client = TestClient(app)
+
+        response = client.get("/api/v1/executors/certs/crl")
+        assert response.status_code == 200
+        assert response.headers["etag"] == _expected_capped_etag(capped)
+
+    def test_ceiling_signal_is_loud(self, ca_manager):
+        """count > max_entries must surface: X-CRL-Truncated header + totals."""
+        capped = _revocation_rows(1000)
+        app = _crl_app(ca_manager, total=1001, capped_rows=capped)
+        client = TestClient(app)
+
+        response = client.get("/api/v1/executors/certs/crl")
+        assert response.headers["x-crl-truncated"] == "true"
+        assert response.headers["x-crl-revocations-total"] == "1001"
+        assert response.headers["x-crl-revocations-served"] == "1000"
+
+    def test_ceiling_signal_survives_conditional_get(self, ca_manager):
+        """The truncation warning must not disappear on the 304 path."""
+        capped = _revocation_rows(1000)
+        app = _crl_app(ca_manager, total=1001, capped_rows=capped)
+        client = TestClient(app)
+
+        etag = client.get("/api/v1/executors/certs/crl").headers["etag"]
+        response = client.get("/api/v1/executors/certs/crl", headers={"If-None-Match": etag})
+        assert response.status_code == 304
+        assert response.headers["x-crl-truncated"] == "true"
+
+    # paired negatives — what must NOT change
+    def test_below_cap_etag_equals_population_and_stays_silent(self, ca_manager):
+        """Under the ceiling, body and history ARE the same population; no
+        truncation headers must appear."""
+        rows = _revocation_rows(5)
+        app = _crl_app(ca_manager, total=5, capped_rows=rows)
+        client = TestClient(app)
+
+        response = client.get("/api/v1/executors/certs/crl")
+        assert response.status_code == 200
+        assert response.headers["etag"] == _expected_capped_etag(rows)
+        assert "x-crl-truncated" not in response.headers
+
+    def test_history_trim_beyond_cap_does_not_move_etag(self, ca_manager):
+        """Two histories sharing the newest-1000 must yield the SAME ETag
+        (base hashes the full history, so trimming old rows churned the cache)."""
+        capped = _revocation_rows(1000)
+        app_a = _crl_app(ca_manager, total=1005, capped_rows=capped)
+        app_b = _crl_app(ca_manager, total=1000, capped_rows=capped)
+
+        etag_a = TestClient(app_a).get("/api/v1/executors/certs/crl").headers["etag"]
+        etag_b = TestClient(app_b).get("/api/v1/executors/certs/crl").headers["etag"]
+        assert etag_a == etag_b

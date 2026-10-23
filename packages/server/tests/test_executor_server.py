@@ -1,0 +1,939 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Server-side tests for executor registration, revocation, heartbeat, and CA manager."""
+
+import hashlib
+from dataclasses import dataclass
+from datetime import UTC
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+from fastapi import FastAPI
+from server.ca import CAManager
+from server.config import ExecutorEnrollmentConfig, ServerConfig
+from server.routes import executors as executors_routes
+from starlette.testclient import TestClient
+
+from tests.test_executor_enrollment import _make_mock_token
+
+# #442 site 3 (ruling A+): these registration cells used to build apps with NO
+# app.state.config at all, which is the fault shape — the route could not read a
+# policy and used to fall through to "token not required". They now stand on the
+# ENFORCED path: the shipped default (require_token=True) plus a real enrollment
+# token per cell. The pepper is the house value _make_mock_token hashes against.
+_ENROLLMENT_PEPPER = "test-pepper-12345"
+_ENROLLMENT_TOKEN = "enrl_exec_442_executor_server"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limiters():
+    """Isolate the process-global limiter cache in server.rate_limit.
+
+    A PRESENT config switches the registration limiter on (it early-returns while
+    config is absent), and the limiter windows are shared across the whole run —
+    without this isolation the registration cells below inherit consumed slots and
+    die as 429s unrelated to the token gate. Same isolation fixture
+    test_executor_enrollment.py and test_rate_limiter.py use.
+    """
+    from server import rate_limit as _rl
+
+    saved = dict(_rl._LIMITERS)
+    _rl._LIMITERS.clear()
+    yield
+    _rl._LIMITERS.clear()
+    _rl._LIMITERS.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ca_dir(tmp_path):
+    """Create a temporary CA directory."""
+    d = tmp_path / "ca"
+    d.mkdir()
+    return str(d)
+
+
+@pytest.fixture
+def ca_manager(ca_dir, monkeypatch):
+    """Create and initialize a CAManager.
+
+    #537: the write path refuses to mint a CA key with no passphrase set, so the
+    fixture provides one (the valid configuration).
+    """
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test_passphrase_executor_server")
+    manager = CAManager(ca_dir)
+    manager.initialize()
+    return manager
+
+
+@pytest.fixture
+def executor_keypair():
+    """Generate an ECDSA P-256 keypair for testing."""
+    return ec.generate_private_key(ec.SECP256R1())
+
+
+@pytest.fixture
+def executor_csr(executor_keypair):
+    """Create a CSR for testing."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+        ]
+    )
+    csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(executor_keypair, hashes.SHA256())
+    return csr
+
+
+@pytest.fixture
+def signed_cert(ca_manager, executor_keypair):
+    """Create a signed certificate for testing."""
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-executor")]))
+        .sign(executor_keypair, hashes.SHA256())
+    )
+    return ca_manager.sign_csr(csr, "test-executor")
+
+
+# ---------------------------------------------------------------------------
+# Data classes for mock DB records
+# ---------------------------------------------------------------------------
+
+
+def _add_executor_auth(app, executor_id):
+    """Inject middleware-shaped executor auth state.
+
+    The heartbeat route now requires request.state.auth_user ==
+    {"caller": "executor", "executor_id": CN} (production: set by
+    SessionMiddleware._validate_executor_mtls — ticket
+    sec-endpoint-ratelimit-hardening #7). Route-level test apps mount the
+    router without that middleware, so they inject the same shape.
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    class _ExecutorAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.auth_user = {"caller": "executor", "executor_id": executor_id}
+            return await call_next(request)
+
+    app.add_middleware(_ExecutorAuth)
+
+
+@dataclass
+class MockExecutorCert:
+    executor_id: str
+    serial_number: str
+    not_after: object  # datetime or mock
+
+
+@dataclass
+class MockExecutorCertRevocation:
+    serial_number: str
+    # updated: the shared revocation state (executor-revocation-by-identity)
+    # surfaces the row's revoked_at — mock models the full schema.
+    revoked_at: object = None
+
+
+@dataclass
+class MockCommandPolicy:
+    """Mock of core.iam.models.CommandPolicy (ticket
+    command-policy-no-server-executor-propagation): the JSON text columns
+    carry raw strings exactly like the real row."""
+
+    policy_name: str = "default"
+    preset: str = "balanced"
+    allowed_commands: object = None  # JSON text or None
+    dangerous_patterns: object = None  # JSON text or None
+    updated_at: object = None  # datetime
+
+
+# ---------------------------------------------------------------------------
+# CAManager tests
+# ---------------------------------------------------------------------------
+
+
+class TestCAManager:
+    """Tests for CAManager."""
+
+    def test_initialize_creates_ca_files(self, ca_dir, monkeypatch):
+        monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test_passphrase_executor_server")
+        manager = CAManager(ca_dir)
+        assert not manager.has_ca
+        manager.initialize()
+        assert manager.has_ca
+        key_path = Path(ca_dir) / "ca.key"
+        cert_path = Path(ca_dir) / "ca.crt"
+        assert key_path.exists()
+        assert cert_path.exists()
+        assert oct(key_path.stat().st_mode)[-3:] == "600"
+        assert oct(cert_path.stat().st_mode)[-3:] == "644"
+
+    def test_initialize_fails_when_ca_exists(self, ca_manager):
+        with pytest.raises(RuntimeError, match="already exists"):
+            ca_manager.initialize()
+
+    def test_load_ca_returns_valid_cert_and_key(self, ca_manager):
+        cert, key = ca_manager.load_ca()
+        assert isinstance(cert, x509.Certificate)
+        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        assert bc.value.ca is True
+        assert isinstance(key, ec.EllipticCurvePrivateKey)
+
+    def test_sign_csr_produces_valid_cert(self, ca_manager, executor_keypair):
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "my-executor")]))
+            .sign(executor_keypair, hashes.SHA256())
+        )
+        cert = ca_manager.sign_csr(csr, "my-executor")
+        ca_cert, _ca_key = ca_manager.load_ca()
+        ca_cert.public_key().verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            ec.ECDSA(cert.signature_hash_algorithm),
+        )
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+
+        assert ExtendedKeyUsageOID.CLIENT_AUTH in eku.value
+        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        assert bc.value.ca is False
+        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        assert cn[0].value == "my-executor"
+
+    def test_sign_csr_replaces_csr_cn_with_executor_id(self, ca_manager, executor_keypair):
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "wrong-cn")]))
+            .sign(executor_keypair, hashes.SHA256())
+        )
+        cert = ca_manager.sign_csr(csr, "correct-executor-id")
+        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        assert cn[0].value == "correct-executor-id"
+
+    def test_sign_csr_dual_eku(self, ca_manager, executor_keypair):
+        """Executor leaf must carry both serverAuth and clientAuth EKU.
+
+        The relay listener (B0.1) presents the executor leaf as a TLS server
+        cert, while the executor also uses it as a TLS client for
+        registration/heartbeat. A clientAuth-only leaf causes
+        num=26 (unsuitable certificate purpose) on the core's outbound relay
+        context (e2e-discovered, 2026-09-02).
+        """
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ektor")]))
+            .sign(executor_keypair, hashes.SHA256())
+        )
+        cert = ca_manager.sign_csr(csr, "ektor")
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+        assert ExtendedKeyUsageOID.SERVER_AUTH in eku.value
+        assert ExtendedKeyUsageOID.CLIENT_AUTH in eku.value
+
+    def test_sign_csr_has_aki_and_ski(self, ca_manager, executor_keypair):
+        """Executor leaf must carry AKI and SKI (e2e-discovered: Python ssl
+        rejects cert chains where the intermediate/leaf lacks AKI with
+        Missing Authority Key Identifier)."""
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "aki-check")]))
+            .sign(executor_keypair, hashes.SHA256())
+        )
+        cert = ca_manager.sign_csr(csr, "aki-check")
+        # AKI points to the CA
+        aki = cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
+        assert aki.value.key_identifier is not None
+        # SKI is the leaf's own key hash
+        ski = cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
+        assert ski.value.digest is not None
+
+    def test_compute_fingerprint_matches_der_hash(self, ca_manager, signed_cert):
+        fp = ca_manager.compute_fingerprint(signed_cert)
+        der = signed_cert.public_bytes(serialization.Encoding.DER)
+        expected = hashlib.sha256(der).hexdigest()
+        assert fp == expected
+
+    def test_compute_serial_hex_format(self, ca_manager, signed_cert):
+        serial_hex = ca_manager.compute_serial_hex(signed_cert.serial_number)
+        assert len(serial_hex) == 16
+        assert serial_hex == serial_hex.lower()
+        int(serial_hex, 16)
+
+    def test_get_ca_cert_pem(self, ca_manager):
+        pem = ca_manager.get_ca_cert_pem()
+        assert pem.startswith(b"-----BEGIN CERTIFICATE-----")
+        assert pem.endswith(b"-----END CERTIFICATE-----\n")
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_db(
+    executor_certs=None, revocations=None, command_policies=None, enrollment_executor_id: str | None = None
+):
+    """Create a mock DB session for testing endpoints.
+
+    #442 site 3 (ruling A+): ``enrollment_executor_id`` arms the ENFORCED path — a
+    created, unexpired token row for that identity plus the atomic-consumption
+    answer the route reads (``rowcount == 1``). Left None, nothing is armed.
+    """
+    if executor_certs is None:
+        executor_certs = []
+    if revocations is None:
+        revocations = []
+    if command_policies is None:
+        command_policies = []
+
+    db = MagicMock()
+    db.add = MagicMock()
+    db.flush = MagicMock()
+    db.commit = MagicMock()
+
+    def mock_query(model):
+        m = MagicMock()
+
+        def filter_side_effect(*args, **kwargs):
+            result_filter = MagicMock()
+
+            def first():
+                if model.__name__ == "ExecutorCert":
+                    results = list(executor_certs)
+                elif model.__name__ == "ExecutorCertRevocation":
+                    results = list(revocations)
+                elif model.__name__ == "CommandPolicy":
+                    results = list(command_policies)
+                elif model.__name__ == "ExecutorEnrollmentToken":
+                    # Armed only for the moved registration cells; the equality filter
+                    # below still has to MATCH the token_hash the route computes, so a
+                    # wrong pepper or a wrong identity does not silently pass.
+                    if enrollment_executor_id is None:
+                        return None
+                    results = [_make_mock_token(enrollment_executor_id, _ENROLLMENT_TOKEN)]
+                elif model.__name__ == "User":
+                    return None
+                else:
+                    return None
+
+                # Apply simple equality filters from SQLAlchemy BinaryExpression
+                if args:
+                    expr = args[0]
+                    if hasattr(expr, "left") and hasattr(expr, "right") and hasattr(expr, "operator"):
+                        col = expr.left
+                        val = expr.right
+                        if hasattr(col, "prop"):
+                            attr = col.prop.key
+                            filtered = []
+                            for r in results:
+                                try:
+                                    rv = getattr(r, attr, None)
+                                    if rv is not None and rv == val:
+                                        filtered.append(r)
+                                except Exception:  # noqa: S110 — best-effort mock attribute matching
+                                    pass
+                            results = filtered
+
+                return results[0] if results else None
+
+            result_filter.first = first
+            return result_filter
+
+        m.filter = filter_side_effect
+        m.all = lambda: (
+            list(executor_certs)
+            if model.__name__ == "ExecutorCert"
+            else (list(revocations) if model.__name__ == "ExecutorCertRevocation" else [])
+        )
+        return m
+
+    db.query.side_effect = mock_query
+    # The token consumption is an atomic UPDATE; the route requires rowcount == 1.
+    db.execute.return_value = MagicMock(rowcount=1)
+    return db
+
+
+# ---------------------------------------------------------------------------
+# Executor registration endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorRegistration:
+    """Tests for POST /executors/register."""
+
+    def _make_db_with_executor(self, db, existing):
+        """Wrap db.query so Executor lookups return ``existing`` (else None)."""
+        orig = db.query.side_effect
+
+        def q(model):
+            if model.__name__ == "Executor":
+                m = MagicMock()
+                m.all = list
+                m.filter = lambda *a, **k: MagicMock(first=lambda: existing)
+                return m
+            return orig(model) if callable(orig) else MagicMock()
+
+        db.query.side_effect = q
+
+    def _create_app(self, ca_manager, db, auth_executor_id=None):
+        app = FastAPI()
+        app.state.backend = MagicMock()
+        app.state.backend.get_session.return_value = db
+        app.state.ca_manager = ca_manager
+        # #442 site 3 (ruling A+): config present on the SHIPPED default
+        # (require_token=True), so this builder's cells exercise the enforced
+        # registration path rather than the config-absent fault shape.
+        app.state.config = ServerConfig(
+            recovery_code_pepper=_ENROLLMENT_PEPPER,
+            executor_enrollment=ExecutorEnrollmentConfig(require_token=True),
+        )
+        app.include_router(executors_routes.router, prefix="/api/v1")
+        if auth_executor_id is not None:
+            _add_executor_auth(app, auth_executor_id)
+        return app
+
+    def test_register_success(self, ca_manager, executor_csr, executor_keypair):
+        db = _make_mock_db(enrollment_executor_id="test-exec-1")
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "test-exec-1", "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["executor_id"] == "test-exec-1"
+        assert data["cert_pem"].startswith("-----BEGIN CERTIFICATE-----")
+        assert data["ca_cert_pem"].startswith("-----BEGIN CERTIFICATE-----")
+        assert len(data["serial_number"]) == 16
+        assert "not_after" in data
+
+    def test_register_unresolvable_id_returns_400(self, ca_manager, executor_csr, executor_keypair, monkeypatch):
+        """Unresolvable executor_id rejected at install time (dial-address contract)."""
+        monkeypatch.setattr("server.routes.executors._dial_hostname_resolvable", lambda host: False)
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "no-such-exec", "csr_pem": csr_pem},
+        )
+        assert resp.status_code == 400
+        assert "does not resolve" in resp.json()["detail"]
+
+    def test_dial_hostname_resolvable_real(self, _executor_ids_resolvable):
+        """Real resolver: positive (localhost) + paired negative (.invalid NXDOMAIN)."""
+        assert _executor_ids_resolvable("localhost") is True
+        assert _executor_ids_resolvable("no-such-host.invalid") is False
+
+    def test_register_invalid_csr_returns_400(self, ca_manager):
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "test", "csr_pem": "not-a-valid-csr"},
+        )
+        assert resp.status_code == 400
+
+    def test_register_weak_ecdsa_curve_returns_400(self, ca_manager):
+        """CSR with weak ECDSA curve (P-192) is rejected."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app, raise_server_exceptions=False)
+        weak_key = ec.generate_private_key(ec.SECP192R1())
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "weak-ecdsa")])
+        csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(weak_key, hashes.SHA256())
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "weak-ecdsa", "csr_pem": csr_pem},
+        )
+        assert resp.status_code == 400
+        assert "curve" in resp.json()["detail"].lower() or "unsupported" in resp.json()["detail"].lower()
+
+    def test_register_auto_creates_user(self, ca_manager, executor_csr, executor_keypair):
+        db = _make_mock_db(enrollment_executor_id="new-exec")
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "new-exec", "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["executor_id"] == "new-exec"
+
+    def test_register_new_row_stores_executor_id_as_hostname(self, ca_manager, executor_csr, executor_keypair):
+        """New-row upsert stores executor_id as hostname, ignoring any supplied value."""
+        from core.iam.models import Executor
+
+        db = _make_mock_db(enrollment_executor_id="web-server-3")
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "web-server-3",
+                "csr_pem": csr_pem,
+                "hostname": "web-server-3.internal",
+                "enrollment_token": _ENROLLMENT_TOKEN,
+            },
+        )
+        assert resp.status_code == 201
+        added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
+        assert len(added) == 1
+        rec = added[0]
+        assert rec.id == "web-server-3"
+        assert rec.hostname == "web-server-3"  # executor_id, NOT the supplied hostname
+        assert rec.status == "active"
+        assert rec.enrolled_at is not None
+
+    def test_register_new_row_ignores_forwarded_address(self, ca_manager, executor_csr, executor_keypair):
+        """No/any hostname -> store executor_id, never the caller's forwarded address.
+
+        The fallback-to-forwarded-IP was the exact cause of the mTLS 503 (the cert SAN
+        is executor_id, so dialing an IP address fails verification). It must not happen.
+        """
+        from core.iam.models import Executor
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        db = _make_mock_db(enrollment_executor_id="web-server-3")
+        app = self._create_app(ca_manager, db)
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="127.0.0.1, testclient")
+        client = TestClient(app, base_url="http://127.0.0.1:8080")
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "web-server-3",
+                "csr_pem": csr_pem,
+                "enrollment_token": _ENROLLMENT_TOKEN,
+            },  # no hostname
+            headers={"X-Forwarded-For": "192.0.2.14"},
+        )
+        assert resp.status_code == 201
+        added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
+        assert len(added) == 1
+        # executor_id is the dial address; the forwarded IP is never stored.
+        assert added[0].hostname == "web-server-3"
+        assert added[0].hostname != "192.0.2.14"
+
+    def test_register_upsert_sets_existing_hostname_to_executor_id(self, ca_manager, executor_csr, executor_keypair):
+        """Existing-row upsert rewrites hostname to executor_id (idempotent on rotation)."""
+        from datetime import datetime
+
+        from core.iam.models import Executor
+
+        existing = Executor(id="web-server-3", hostname="192.0.2.14", status="active")
+        existing.enrolled_at = datetime(2026, 1, 1, tzinfo=UTC)
+        db = _make_mock_db(enrollment_executor_id="web-server-3")
+        self._make_db_with_executor(db, existing)
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "web-server-3",
+                "csr_pem": csr_pem,
+                "hostname": "web-server-3.internal",
+                "enrollment_token": _ENROLLMENT_TOKEN,
+            },
+        )
+        assert resp.status_code == 201
+        # Re-registration updates the existing row in place, does not add a new one.
+        added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
+        assert added == []
+        assert existing.hostname == "web-server-3"  # rewritten to executor_id
+        assert existing.status == "active"
+
+    def test_heartbeat_does_not_modify_hostname(self, ca_manager):
+        """Heartbeat must only liveness-stamp; it must not rewrite the dial address."""
+        from core.iam.models import Executor
+
+        existing = Executor(id="web-server-3", hostname="venya-exec-1", status="active")
+        db = _make_mock_db()
+        self._make_db_with_executor(db, existing)
+        app = self._create_app(ca_manager, db, auth_executor_id="web-server-3")
+        client = TestClient(app)
+        resp = client.post("/api/v1/heartbeat", json={"executor_id": "web-server-3"})
+        assert resp.status_code == 200
+        assert existing.hostname == "venya-exec-1"  # unchanged by heartbeat
+        assert existing.status == "active"
+
+
+# ---------------------------------------------------------------------------
+# Revocation list endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestRevocationList:
+    """Tests for GET /executors/certs/revocation-list."""
+
+    def _create_app(self, ca_manager, db):
+        app = FastAPI()
+        app.state.backend = MagicMock()
+        app.state.backend.get_session.return_value = db
+        app.state.ca_manager = ca_manager
+        app.include_router(executors_routes.router, prefix="/api/v1")
+        return app
+
+    def test_empty_revocation_list(self, ca_manager):
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.get("/api/v1/executors/certs/revocation-list")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["revoked_serials"] == []
+        # READ-ONLY pin, RE-PAIRED for #685 (was: "the public GET no longer purges — the purge
+        # is a maintenance-loop pass now", proven with a mock attribute that would have caught a
+        # call). There is now NO purge path on the executor CA manager at any call site, so the
+        # guarantee is structural rather than behavioral: the attribute the old pin watched for
+        # does not exist to be called. That is the stronger half of the #685 exemption.
+        assert not hasattr(CAManager, "purge_expired_revocations"), (
+            "#685: ExecutorCertRevocation is exempt from time-based purge — a purge attribute on "
+            "the executor CA manager is the hazard this row closed, at any call site"
+        )
+
+    def test_revocation_list_with_entries(self, ca_manager):
+        revocations = [
+            MockExecutorCertRevocation(serial_number="abc123def4560001"),
+            MockExecutorCertRevocation(serial_number="abc123def4560002"),
+        ]
+        db = _make_mock_db(revocations=revocations)
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.get("/api/v1/executors/certs/revocation-list")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data["revoked_serials"]) == {"abc123def4560001", "abc123def4560002"}
+
+    def test_revocation_list_returns_etag(self, ca_manager):
+        """GET /executors/certs/revocation-list should return an ETag header."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.get("/api/v1/executors/certs/revocation-list")
+        assert resp.status_code == 200
+        assert "etag" in resp.headers
+
+    def test_revocation_list_304_on_etag_match(self, ca_manager):
+        """GET /executors/certs/revocation-list should return 304 when ETag matches."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+
+        resp1 = client.get("/api/v1/executors/certs/revocation-list")
+        assert resp1.status_code == 200
+        etag = resp1.headers["etag"]
+
+        resp2 = client.get("/api/v1/executors/certs/revocation-list", headers={"If-None-Match": etag})
+        assert resp2.status_code == 304
+        assert resp2.headers["etag"] == etag
+
+    def test_revocation_list_cache_control(self, ca_manager):
+        """GET /executors/certs/revocation-list should return Cache-Control header."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.get("/api/v1/executors/certs/revocation-list")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "max-age=300"
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat endpoint tests
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeat:
+    """Tests for POST /heartbeat."""
+
+    def _create_app(self, ca_manager, db, auth_executor_id=None):
+        app = FastAPI()
+        app.state.backend = MagicMock()
+        app.state.backend.get_session.return_value = db
+        app.state.ca_manager = ca_manager
+        app.include_router(executors_routes.router, prefix="/api/v1")
+        if auth_executor_id is not None:
+            _add_executor_auth(app, auth_executor_id)
+        return app
+
+    def test_heartbeat_no_executor(self, ca_manager):
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db, auth_executor_id="unknown-exec")
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "unknown-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["revoked"] is False
+        assert data["new_cert_required"] is False
+
+    def test_heartbeat_revoked_executor(self, ca_manager):
+        from datetime import datetime, timedelta
+
+        cert_record = MockExecutorCert(
+            executor_id="test-exec",
+            serial_number="abc123",
+            not_after=datetime.now(UTC) + timedelta(days=365),
+        )
+        revocation = MockExecutorCertRevocation(serial_number="abc123")
+        db = _make_mock_db(executor_certs=[cert_record], revocations=[revocation])
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["revoked"] is True
+
+    def test_heartbeat_cert_expiring_soon(self, ca_manager):
+        from datetime import datetime, timedelta
+
+        cert_record = MockExecutorCert(
+            executor_id="test-exec",
+            serial_number="abc123",
+            not_after=datetime.now(UTC) + timedelta(days=1),
+        )
+        db = _make_mock_db(executor_certs=[cert_record])
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["new_cert_required"] is True
+
+    def test_heartbeat_cert_not_expiring(self, ca_manager):
+        from datetime import datetime, timedelta
+
+        cert_record = MockExecutorCert(
+            executor_id="test-exec",
+            serial_number="abc123",
+            not_after=datetime.now(UTC) + timedelta(days=20),
+        )
+        db = _make_mock_db(executor_certs=[cert_record])
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["new_cert_required"] is False
+
+    def test_heartbeat_updates_last_heartbeat_when_executor_exists(self, ca_manager):
+        """F3: the public heartbeat stamps last_heartbeat (drives 'online')."""
+        from datetime import datetime
+
+        from core.iam.models import Executor
+
+        before = datetime.now(UTC)
+        row = Executor(id="test-exec", hostname="test-exec.internal", status="active")
+        row.last_heartbeat = None
+
+        db = _make_mock_db()
+        orig = db.query.side_effect
+
+        def q(model):
+            if model.__name__ == "Executor":
+                m = MagicMock()
+                m.all = list
+                m.filter = lambda *a, **k: MagicMock(first=lambda: row)
+                return m
+            return orig(model) if callable(orig) else MagicMock()
+
+        db.query.side_effect = q
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 200
+        assert row.last_heartbeat is not None
+        assert row.last_heartbeat >= before
+        assert row.status == "active"
+        db.commit.assert_called()
+
+    def test_heartbeat_no_row_is_noop(self, ca_manager):
+        """F3: no Executor row -> no last_heartbeat write, no commit, still 200."""
+        db = _make_mock_db()  # _make_mock_db yields None for Executor lookups
+        app = self._create_app(ca_manager, db, auth_executor_id="ghost-exec")
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "ghost-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 200
+        db.commit.assert_not_called()
+
+    def test_heartbeat_requires_executor_auth(self, ca_manager):
+        """#7 negative (route-level defense-in-depth): no executor auth state
+        → 403, no writes. Production: SessionMiddleware rejects with 401/403
+        BEFORE the route (no cert / unregistered CN)."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)  # no auth injected
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 403
+        db.commit.assert_not_called()
+
+    def test_heartbeat_binding_mismatch_403(self, ca_manager):
+        """#7 negative (CN binding): cert CN 'exec-a' cannot stamp row
+        'exec-b' — the forged-liveness oracle is closed."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db, auth_executor_id="exec-a")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "exec-b", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 403
+        db.commit.assert_not_called()
+
+    def test_dead_alpha_id_heartbeat_route_removed(self, ca_manager):
+        """The dead alpha variant POST /executors/{id}/heartbeat
+        (require_role("none"), zero production callers — daemon AND CLI use
+        /api/v1/heartbeat with the executor cert) is GONE → 404."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/executors/test-exec/heartbeat")
+        assert resp.status_code == 404
+
+
+class TestCommandPolicyPropagation:
+    """Ticket command-policy-no-server-executor-propagation (owner ruling (a)
+    2026-09-26): the core's 'default' CommandPolicy row rides the heartbeat +
+    registration responses as an ADDITIVE optional field. Truth table: carried
+    when set, null when unset, and a corrupt row must NEVER poison the beat
+    (fail-soft: logged, not propagated, still 200)."""
+
+    def _create_app(self, ca_manager, db, auth_executor_id=None):
+        app = FastAPI()
+        app.state.backend = MagicMock()
+        app.state.backend.get_session.return_value = db
+        app.state.ca_manager = ca_manager
+        # #442 site 3 (ruling A+): shipped-default config so the two registration
+        # cells in this class exercise the enforced path, not the config-absent fault shape.
+        app.state.config = ServerConfig(
+            recovery_code_pepper=_ENROLLMENT_PEPPER,
+            executor_enrollment=ExecutorEnrollmentConfig(require_token=True),
+        )
+        app.include_router(executors_routes.router, prefix="/api/v1")
+        if auth_executor_id is not None:
+            _add_executor_auth(app, auth_executor_id)
+        return app
+
+    def _beat(self, ca_manager, db):
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        return TestClient(app).post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+
+    def test_heartbeat_carries_default_policy(self, ca_manager):
+        from datetime import UTC, datetime
+
+        row = MockCommandPolicy(
+            preset="strict",
+            allowed_commands='["/usr/bin/ssh", "/usr/bin/scp"]',
+            dangerous_patterns=None,
+            updated_at=datetime(2026, 9, 26, 1, 2, 3, tzinfo=UTC),
+        )
+        resp = self._beat(ca_manager, _make_mock_db(command_policies=[row]))
+        assert resp.status_code == 200
+        policy = resp.json()["command_policy"]
+        assert policy["preset"] == "strict"
+        assert policy["allowed_commands"] == ["/usr/bin/ssh", "/usr/bin/scp"]
+        assert policy["dangerous_patterns"] is None
+        assert policy["updated_at"] == "2026-09-26T01:02:03+00:00"
+
+    def test_heartbeat_policy_null_when_unset(self, ca_manager):
+        """Paired negative: no policy row -> null field, beat unaffected."""
+        resp = self._beat(ca_manager, _make_mock_db())
+        assert resp.status_code == 200
+        assert resp.json()["command_policy"] is None
+
+    def test_heartbeat_corrupt_policy_json_not_propagated(self, ca_manager):
+        """Corrupt JSON text column -> fail-soft: 200, null policy (the beat
+        must never die because an admin row is broken)."""
+        row = MockCommandPolicy(preset="strict", allowed_commands="NOT-JSON", updated_at=None)
+        resp = self._beat(ca_manager, _make_mock_db(command_policies=[row]))
+        assert resp.status_code == 200
+        assert resp.json()["command_policy"] is None
+
+    def test_heartbeat_wrong_shape_policy_not_propagated(self, ca_manager):
+        """Paired negative on shape: valid JSON of the WRONG type (dict, not
+        list of strings) -> null, not a crash and not a partial payload."""
+        row = MockCommandPolicy(preset="strict", allowed_commands='{"a": 1}', updated_at=None)
+        resp = self._beat(ca_manager, _make_mock_db(command_policies=[row]))
+        assert resp.status_code == 200
+        assert resp.json()["command_policy"] is None
+
+    def test_register_carries_default_policy(self, ca_manager, executor_csr):
+        from datetime import UTC, datetime
+
+        row = MockCommandPolicy(
+            preset="balanced",
+            allowed_commands=None,
+            dangerous_patterns='["curl "]',
+            updated_at=datetime(2026, 9, 26, tzinfo=UTC),
+        )
+        db = _make_mock_db(command_policies=[row], enrollment_executor_id="test-exec-1")
+        app = self._create_app(ca_manager, db)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = TestClient(app).post(
+            "/api/v1/executors/register",
+            json={"executor_id": "test-exec-1", "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN},
+        )
+        assert resp.status_code == 201
+        policy = resp.json()["command_policy"]
+        assert policy["preset"] == "balanced"
+        assert policy["allowed_commands"] == []
+        assert policy["dangerous_patterns"] == ["curl "]
+
+    def test_register_policy_null_when_unset(self, ca_manager, executor_csr):
+        db = _make_mock_db(enrollment_executor_id="test-exec-1")
+        app = self._create_app(ca_manager, db)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = TestClient(app).post(
+            "/api/v1/executors/register",
+            json={"executor_id": "test-exec-1", "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["command_policy"] is None

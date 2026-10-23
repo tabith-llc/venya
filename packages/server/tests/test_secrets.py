@@ -1,0 +1,2180 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Tests for secrets CRUD endpoints."""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+from core.engine.core import CoreAccessError
+from fastapi import FastAPI
+from server.dependencies import get_current_user
+from server.routes import secrets as secrets_routes
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.testclient import TestClient
+
+TEST_USER = {"user_id": "test-user", "roles": ["devops"], "caller": "human"}
+
+# #449: the role gate's stated refusal reason for an executor-class caller. Asserted
+# as TEXT, not just a status: these routes can answer 403 for several different
+# reasons (gate refusal, tier deny, the route's own identity checks) and a
+# status-only cell cannot tell them apart.
+EXECUTOR_GATE_REFUSAL = "Executor callers are not permitted on role-gated routes"
+
+
+@pytest.fixture(autouse=True)
+def _default_role_permissions():
+    """Default: every user holds a read-write role.
+
+    All secrets CRUD routes enforce require_role (C-06 adoption). This
+    fixture lets existing tests pass the check; tests that need a
+    different mapping re-patch server.dependencies.RoleManager.
+    """
+    rm = MagicMock()
+    rm.get_user_permissions.side_effect = lambda uid: {1: "read-write"}
+    with patch("server.dependencies.RoleManager", return_value=rm):
+        yield rm
+
+
+def _create_test_app(core=None, backend=None, auth_user=None):
+    """Create a minimal test app with secrets routes.
+
+    Args:
+        core: Core instance mock. Pass None to test "core not initialized".
+        backend: Backend instance mock. Defaults to a MagicMock so the
+            require_role dependency can resolve get_backend.
+        auth_user: User dict to set on request state, or None to skip auth.
+    """
+    app = FastAPI()
+    if core is not None:
+        app.state.core = core
+
+    if backend is None:
+        backend = MagicMock()
+    backend.get_session.return_value = MagicMock()
+    app.state.backend = backend
+
+    app.include_router(secrets_routes.router, prefix="/api/v1")
+
+    # Override get_current_user so require_role doesn't need a Bearer token.
+    # The real get_current_user checks for an Authorization: Bearer header
+    # first; the override bypasses that check and returns a fixed user dict.
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+
+    return app
+
+
+def _make_mock_core():
+    """Create a mock core with realistic behavior."""
+    core = MagicMock()
+
+    core.put.return_value = MagicMock(
+        id=42,
+        key="test-key",
+        role_names=["dev"],
+        replaced=False,
+    )
+
+    core.get.return_value = "\u2022" * 8
+
+    core.list.return_value = [
+        MagicMock(
+            id=42,
+            key="test-key",
+            key_version_id="v1",
+            created_by="user1",
+            created_at=None,
+            role_names=["dev"],
+            encrypted_value=b"encrypted",
+            nonce=b"nonce",
+            wrapped_dek=b"wrapped",
+        )
+    ]
+
+    core.delete.return_value = True
+
+    return core
+
+
+def _build_orm_backed_app(tmp_path):
+    """Build a test app with a REAL Core + Backend over SQLite (zero mocks).
+
+    Exercises the exact path the unit mocks hid: core.list() returns real
+    SecretRecord objects into the shared response loop. A MagicMock record
+    auto-generates .meta and masks the AttributeError a real record raised.
+
+    Backend._create_engine is bypassed: it issues PostgreSQL-only SET pragmas
+    that break SQLite. The real engine + session factory are injected instead.
+    """
+    from core.engine.backend import Backend, BackendConfig
+    from core.engine.encryption import KEK_SIZE, encrypt_secret
+    from core.iam.models import Base, Role, RoleMember, Secret, SecretRole, User
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    db_path = tmp_path / "list_meta.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    kek = b"k" * KEK_SIZE
+    s = SessionLocal()
+    wrapped_dek, nonce, ciphertext = encrypt_secret(kek, b"top-secret")
+    user = User(user_id="user1")
+    test_user = User(user_id="test-user")
+    role = Role(name="dev", permissions="read-write")
+    s.add_all([user, test_user, role])
+    s.flush()
+    s.add(RoleMember(user_id="test-user", role_id=role.id))
+    secret = Secret(
+        key="db-password",
+        encrypted_value=ciphertext,
+        nonce=nonce,
+        wrapped_dek=wrapped_dek,
+        key_version_id="v1",
+        created_by="user1",
+        meta={"executor": "web-server-3", "purpose": "ssh_login"},
+    )
+    s.add(secret)
+    s.flush()
+    s.add(SecretRole(secret_id=secret.id, role_id=role.id))
+    s.commit()
+    s.close()
+
+    backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+    backend._engine = engine
+    backend._session_factory = SessionLocal
+    core = backend.get_core()
+
+    # Build the app directly: the shared _create_test_app patch-mocks
+    # backend.get_session, which a real Backend must not have replaced.
+    app = FastAPI()
+    app.state.core = core
+    app.state.backend = backend
+    app.include_router(secrets_routes.router, prefix="/api/v1")
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    return app, engine
+
+
+def _build_scoped_app(tmp_path, member_role: str):
+    """ORM-backed app for role-scoping tests (ticket secret-role-scoping-unenforced).
+
+    Dataset: 'admin-credentials' created by admin-user, scoped to role 'admin'.
+    TEST_USER ('test-user') is a member of `member_role` ('admin' or 'user').
+    Real core.list enforcement — no mocks in the visibility path.
+    """
+    from core.engine.backend import Backend, BackendConfig
+    from core.engine.encryption import KEK_SIZE, encrypt_secret
+    from core.iam.models import Base, Role, RoleMember, Secret, SecretRole, User
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    db_path = tmp_path / "scoped.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    kek = b"k" * KEK_SIZE
+    s = SessionLocal()
+    wrapped_dek, nonce, ciphertext = encrypt_secret(kek, b"top-secret")
+    admin_role = Role(name="admin", permissions="read-write")
+    user_role = Role(name="user", permissions="read")
+    s.add_all([User(user_id="admin-user"), User(user_id="test-user"), admin_role, user_role])
+    s.flush()
+    member = admin_role if member_role == "admin" else user_role
+    s.add(RoleMember(user_id="test-user", role_id=member.id))
+    secret = Secret(
+        key="admin-credentials",
+        encrypted_value=ciphertext,
+        nonce=nonce,
+        wrapped_dek=wrapped_dek,
+        key_version_id="v1",
+        created_by="admin-user",
+        meta={"executor": "web-server-3"},
+    )
+    s.add(secret)
+    s.flush()
+    s.add(SecretRole(secret_id=secret.id, role_id=admin_role.id))
+    s.commit()
+    s.close()
+
+    backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+    backend._engine = engine
+    backend._session_factory = SessionLocal
+
+    app = FastAPI()
+    app.state.core = backend.get_core()
+    app.state.backend = backend
+    app.include_router(secrets_routes.router, prefix="/api/v1")
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    return app, engine
+
+
+class TestSecretsCreate:
+    """Tests for secret creation endpoint."""
+
+    def test_create_success(self):
+        """POST /secrets should create a secret via core.put()."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "super-secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+            },
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["key"] == "db-password"
+        assert data["role_names"] == ["dev"]
+        assert data["id"] == 42
+
+        core.put.assert_called_once_with(
+            key="db-password",
+            value=b"super-secret",
+            user_id="test-user",
+            role_names=["dev"],
+            key_version_id="v1",
+            meta={},
+            # caller_roles resolved fresh from the DB via RoleManager (upsert
+            # visibility context); the mocked role wiring yields []. Real
+            # role semantics: TestSecretUpsertRoute + core TestSecretUpsertSqlite.
+            caller_roles=[],
+        )
+
+    def test_create_unauthenticated(self):
+        """POST /secrets should return 401 without auth."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        # Remove the override to test unauthenticated access
+        del app.dependency_overrides[get_current_user]
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_create_core_not_initialized(self):
+        """POST /secrets should return 503 if core not initialized."""
+        app = _create_test_app(core=None)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+            },
+        )
+        assert resp.status_code == 503
+        assert "Core not initialized" in resp.json()["detail"]
+
+    def test_create_core_error(self):
+        """POST /secrets should return 400 on core error."""
+        core = MagicMock()
+        core.put.side_effect = CoreAccessError("Role not found: invalid-role")
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["invalid-role"],
+                "key_version_id": "v1",
+            },
+        )
+        assert resp.status_code == 400
+        assert "Role not found" in resp.json()["detail"]
+
+    def test_create_internal_error_not_leaked(self):
+        """A non-CoreAccessError exception gets the static detail — internals never echoed."""
+        core = MagicMock()
+        core.put.side_effect = RuntimeError("connection postgresql://user:pass@db-host/venya refused")
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["invalid-role"],
+                "key_version_id": "v1",
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Secret creation failed"
+        assert "postgresql://" not in resp.text
+        assert "db-host" not in resp.text
+
+
+class TestSecretsGet:
+    """Tests for secret retrieval endpoint."""
+
+    def test_get_success_human_masked(self):
+        """GET /secrets/{key} should return masked value for human."""
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["key"] == "db-password"
+        assert data["value"] == "\u2022" * 8
+        assert data["masked"] is True
+
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=False,
+            user_id="test-user",
+            # secrets-get-forgets-role-names: role names now reach core.get
+            # (mocked role wiring yields [] — real semantics ORM cells below).
+            role_names=[],
+        )
+
+    def test_get_human_unmask_without_token_403(self):
+        """Ticket sec-secret-caller-param-plaintext-bypass (bare-unmask half):
+        `?unmask=true` WITHOUT an elevation token is a loud 403. The old
+        fall-through forwarded unmask=True to core.get and returned plaintext
+        — a bypass the former test_get_success_human_unmasked pinned POSITIVE.
+        Tests can institutionalize a vulnerability as confidently as they can
+        catch one; this rewrite is the paired negative."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password", params={"unmask": True})
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Elevation token required to unmask"
+        core.get.assert_not_called()
+
+    def test_get_caller_query_param_ignored(self):
+        """Ticket sec-secret-caller-param-plaintext-bypass (ticket half):
+        `?caller=executor` was client-controlled identity → plaintext (pinned
+        POSITIVE by the former test_get_success_executor). The param is GONE
+        from the route surface: unknown query params drop, caller stays human,
+        output stays masked."""
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password", params={"caller": "executor"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["value"] == "\u2022" * 8
+        assert data["masked"] is True
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=False,
+            user_id="test-user",
+            role_names=[],
+        )
+
+    def test_get_caller_param_plus_unmask_still_403(self):
+        """Paired negative — the exact old attack string
+        `?caller=executor&unmask=true` from a bearer: human unmask gate →
+        403, no core.get, no plaintext in the body."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"caller": "executor", "unmask": True},
+        )
+        assert resp.status_code == 403
+        assert "plaintext-secret" not in resp.text
+        core.get.assert_not_called()
+
+    def test_get_executor_auth_context_refused_at_the_gate(self):
+        """#449 SUPERSEDES the #448-era reachability assumption this pin recorded.
+
+        Formerly a DEAD-BRANCH PIN (user ruling 2026-09-20) asserting that an
+        executor-shaped auth context still got a 200 MASKED answer, because the
+        route carried no executor branch to forward — its own docstring said
+        "Production note: the middleware never grants that shape off the session
+        paths". That reachability prose is now retired: an executor-class caller
+        is refused by the role gate BEFORE the body runs, so the invariant it
+        guarded ("no plaintext to an executor") holds one layer earlier and
+        strictly better — the route is never entered at all.
+
+        Stronger than the old cell: it pins the refusal's stated reason (not just
+        a 403), asserts ``core.get`` is NEVER called (the old cell asserted it WAS
+        called, with ``user_id=None``), and asserts no plaintext in the body.
+        """
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/secrets/db-password")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        core.get.assert_not_called()
+        assert "plaintext" not in resp.text and "db-password" not in resp.json()["detail"]
+
+    def test_get_unmask_with_valid_token_returns_plaintext(self):
+        """Positive: valid unconsumed elevation token (atomic UPDATE
+        rowcount==1) → token burned, plaintext returned, masked=False. This
+        route's elevation path had NO test coverage before this ticket."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        backend = MagicMock()
+        app = _create_test_app(core=core, backend=backend)
+        db = backend.get_session.return_value
+        db.execute.return_value.rowcount = 1
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-token-xyz"},  # header transport (#13)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["value"] == "plaintext-secret"
+        assert data["masked"] is False
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=True,
+            user_id="test-user",
+            role_names=[],
+        )
+        db.commit.assert_called()
+
+    def test_get_unmask_token_used_or_expired_refused(self):
+        """Paired negative, #442 site 1 (assertion cleared by ruling R2): a
+        consumed/expired/foreign token (rowcount==0) is REFUSED with 401.
+
+        This cell used to pin the loose behavior — 200 with a masked value — which
+        is exactly the fail-open #442 removes: a caller who FAILED elevation got a
+        successful-looking answer. Both guards the old cell carried are kept and
+        tightened here: no plaintext escapes (the route never reaches core.get at
+        all now), and no burn commit happens."""
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        backend = MagicMock()
+        app = _create_test_app(core=core, backend=backend)
+        db = backend.get_session.return_value
+        db.execute.return_value.rowcount = 0
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "stale-token"},  # header transport (#13)
+        )
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Elevation token is invalid, expired, or already used"
+        # No plaintext AND no masked value: the refusal precedes any retrieval.
+        assert "value" not in resp.json()
+        core.get.assert_not_called()
+        # The burned/foreign token is not treated as consumed by this request.
+        db.commit.assert_not_called()
+
+    def test_get_not_found(self):
+        """GET /secrets/{key} should return 404 for missing secret."""
+        core = MagicMock()
+        core.get.side_effect = Exception("Secret not found: missing-key")
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/missing-key")
+        assert resp.status_code == 404
+
+    def test_get_unmask_header_elevation_consumes_token(self):
+        """#13: elevation rides the X-Elevation-Token HEADER and the token is
+        consumed via the atomic conditional UPDATE (rowcount 1 = burned)."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core)
+        db = app.state.backend.get_session.return_value
+        db.execute.return_value = MagicMock(rowcount=1)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "tok-header-123"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["masked"] is False
+        assert db.execute.call_count == 1  # the conditional burn ran
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=True,
+            user_id="test-user",
+            role_names=[],
+        )
+
+    def test_get_elevation_query_param_is_dead_transport(self):
+        """#13 negative (merged with #3): elevation_token as a QUERY PARAM is
+        not a transport — it persisted tokens in nginx + uvicorn access logs.
+        Post-#3 the route is human-only and tokenless unmask is a loud 403
+        (sec-secret-caller-param-plaintext-bypass), so the query param now
+        lands in the 403 gate with no consume attempted."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core)
+        db = app.state.backend.get_session.return_value
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True, "elevation_token": "tok-query-123"},
+        )
+        assert resp.status_code == 403
+        db.execute.assert_not_called()  # no burn — query param is not a transport
+
+
+class TestSecretsList:
+    """Tests for secrets listing endpoint."""
+
+    def test_list_success(self):
+        """GET /secrets should return list of secrets."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["key"] == "test-key"
+        assert data["secrets"][0]["id"] == 42
+        assert data["secrets"][0]["role_names"] == ["dev"]
+
+        core.list.assert_called_once_with(
+            prefix=None,
+            role_names=[],
+            user_id="test-user",
+            executor=None,
+            purpose=None,
+            username=None,
+        )
+
+    def test_list_with_prefix(self):
+        """GET /secrets?prefix= should filter by prefix."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"prefix": "db-"})
+        assert resp.status_code == 200
+
+        core.list.assert_called_once_with(
+            prefix="db-",
+            role_names=[],
+            user_id="test-user",
+            executor=None,
+            purpose=None,
+            username=None,
+        )
+
+    def test_list_empty(self):
+        """GET /secrets should return empty list when no secrets."""
+        core = MagicMock()
+        core.list.return_value = []
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets")
+        assert resp.status_code == 200
+        assert resp.json()["secrets"] == []
+
+    def test_list_no_filter_returns_metadata_orm_backed(self, tmp_path):
+        """Bare GET /secrets (no filters) returns metadata via the real core.list path.
+
+        Regression: SecretRecord had no .meta field, so the shared response
+        loop's `r.meta if r.meta is not None else {}` raised AttributeError ->
+        HTTP 500 on the bare-list path. Unit tests used a MagicMock record
+        (which auto-generates .meta) and masked the bug; the physical 4d run
+        caught it.
+        """
+        app, engine = _build_orm_backed_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        secret = data["secrets"][0]
+        assert secret["key"] == "db-password"
+        assert secret["metadata"] == {"executor": "web-server-3", "purpose": "ssh_login"}
+        engine.dispose()
+
+
+class TestSecretsDelete:
+    """Tests for secret deletion endpoint."""
+
+    def test_delete_success(self):
+        """DELETE /secrets/{key} should delete the secret."""
+        core = _make_mock_core()
+        core.delete.return_value = True
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.delete("/api/v1/secrets/db-password")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["deleted"] is True
+        assert data["key"] == "db-password"
+
+        core.delete.assert_called_once_with(
+            key="db-password",
+            user_id="test-user",
+        )
+
+    def test_delete_not_found(self):
+        """DELETE /secrets/{key} returns 404 for missing or non-owned secret.
+
+        Same response whether the secret doesn't exist or exists under a
+        different owner — avoids leaking existence.
+        """
+        core = MagicMock()
+        core.delete.return_value = False
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.delete("/api/v1/secrets/missing-key")
+        assert resp.status_code == 404
+
+    def test_delete_core_error(self):
+        """DELETE /secrets/{key} should return 503 if core not initialized."""
+        app = _create_test_app(core=None)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.delete("/api/v1/secrets/db-password")
+        assert resp.status_code == 503
+
+
+class TestSecretsRoleEnforcement:
+    """Tests for require_role adoption on secrets CRUD routes (C-06).
+
+    Verifies the dependency is actually wired to the routes: the wrong
+    permission tier must be rejected before any core call is made.
+    """
+
+    def test_create_denied_for_read_only_user(self):
+        """POST /secrets requires read-write; a read-only user gets 403."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {1: "read"}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_test_app(core=core)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/secrets",
+                json={
+                    "key": "db-password",
+                    "value": "secret",
+                    "roles": ["dev"],
+                    "key_version_id": "v1",
+                },
+            )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Read-write permission required"
+        core.put.assert_not_called()
+
+    def test_delete_denied_for_read_only_user(self):
+        """DELETE /secrets/{key} requires read-write; a read-only user gets 403."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {1: "read"}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_test_app(core=core)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.delete("/api/v1/secrets/db-password")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Read-write permission required"
+        core.delete.assert_not_called()
+
+    def test_get_denied_for_user_with_no_roles(self):
+        """GET /secrets/{key} requires any role; zero roles gets 403."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_test_app(core=core)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/secrets/db-password")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Insufficient permissions"
+        core.get.assert_not_called()
+
+    def test_list_denied_for_user_with_no_roles(self):
+        """GET /secrets requires any role; zero roles gets 403."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_test_app(core=core)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/secrets")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Insufficient permissions"
+        core.list.assert_not_called()
+
+    def test_executor_refused_by_role_check(self):
+        """#449: an executor-class caller is REFUSED on this role-gated route.
+
+        This cell used to pin the blanket pass by name ("Executor (mTLS) passes the
+        role check"). The pass is the defect: it waved an executor through EVERY
+        ``require_role`` route in the tree, including all five ``read-write`` ones.
+        Stronger than the old assertion, in three ways: the refusal is the GATE's 403
+        with its stated reason (not a role deny, not a 500), the route body never
+        runs, and ``core.list`` is never reached — so a whole-vault listing cannot
+        happen even if the visibility filter downstream were ever widened.
+        """
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = AssertionError("role lookup must not run for executors")
+        app = _create_test_app(core=core)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/secrets")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        core.list.assert_not_called()
+        rm.get_user_permissions.assert_not_called()
+
+
+class TestRevokeSessionSecrets:
+    """Tests for session secret revocation endpoint."""
+
+    def test_revoke_executor_success(self):
+        """POST /sessions/{id}/secrets/revoke works for executor and reports the
+        rows actually removed (#411: count is the DELETE rowcount, not len(ids)).
+
+        The session row is part of the shape now (#440 gate 2): the endpoint reads
+        execution_sessions to confirm the session is bound to the calling executor
+        before it deletes, so the stub hands back a session owned by "exec1" — the
+        same identity the auth middleware attaches."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        session = MagicMock()
+        # #411: the endpoint now deletes the session's execution_session_secrets
+        # rows; the bulk-delete chain returns the honest rowcount. Set AFTER
+        # _create_test_app — it replaces get_session.return_value unconditionally.
+        app = _create_test_app(core=core, backend=backend)
+        session.query.return_value.filter.return_value.delete.return_value = 2
+        session.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            id="sess-123",
+            executor_id="exec1",
+        )
+        backend.get_session.return_value = session
+
+        # Mock AuditEvent import (import is local to the endpoint function)
+        mock_audit_event = MagicMock()
+        with patch("core.iam.models.AuditEvent", mock_audit_event):
+            # Simulate executor auth via request state
+            class ExecutorAuthMiddleware(BaseHTTPMiddleware):
+                async def dispatch(self, request: Request, call_next):
+                    request.state.auth_user = {
+                        "caller": "executor",
+                        "executor_id": "exec1",
+                    }
+                    return await call_next(request)
+
+            app.add_middleware(ExecutorAuthMiddleware)
+            client = TestClient(app, raise_server_exceptions=False)
+
+            resp = client.post(
+                "/api/v1/sessions/sess-123/secrets/revoke",
+                json={"secret_ids": ["1", "2"]},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["revoked"] is True
+            assert data["count"] == 2
+            assert data["session_id"] == "sess-123"
+            # Audit attribution (sec-executor-session-path-no-auth side effect):
+            # the middleware now sets executor_id, so audit events carry the
+            # real executor identity instead of the historical always-None.
+            assert mock_audit_event.call_count == 2
+            assert all(c.kwargs["user_id"] == "exec1" for c in mock_audit_event.call_args_list)
+
+    def test_revoke_non_executor_denied(self):
+        """POST /sessions/{id}/secrets/revoke should deny non-executor."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        backend.get_session.return_value = MagicMock()
+        app = _create_test_app(core=core, backend=backend)
+
+        mock_audit_event = MagicMock()
+        with patch("core.iam.models.AuditEvent", mock_audit_event):
+            client = TestClient(app, raise_server_exceptions=False)
+
+            resp = client.post(
+                "/api/v1/sessions/sess-123/secrets/revoke",
+                json={"secret_ids": ["sec-1"]},
+            )
+            assert resp.status_code == 403
+            assert "Executor mTLS authentication required" in resp.json()["detail"]
+
+    def test_get_active_key_version_success(self):
+        """GET /key-versions/active should return active key version."""
+        backend = MagicMock()
+        mock_version = MagicMock()
+        mock_version.version_label = "kv-2026-08-16"
+        mock_version.created_at = None
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.first.return_value = mock_version
+        mock_query.filter.return_value = mock_filtered
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        backend.get_session.return_value = mock_session
+        app = _create_test_app(backend=backend)
+        # Re-set after _create_test_app which overwrites it
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/key-versions/active")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["key_version_id"] == "kv-2026-08-16"
+        assert "created_at" in data
+
+    def test_get_active_key_version_not_found(self):
+        """GET /key-versions/active should return 503 if no active version."""
+        backend = MagicMock()
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = None
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        backend.get_session.return_value = mock_session
+        app = _create_test_app(backend=backend)
+        # Re-set after _create_test_app which overwrites it
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/key-versions/active")
+
+        assert resp.status_code == 503
+        assert "No active key version" in resp.json()["detail"]
+
+
+class TestSecretsMetadata:
+    """Tests for secret metadata feature."""
+
+    def test_post_secret_with_metadata(self):
+        """POST /secrets should store and return metadata."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_query = MagicMock()
+        mock_session.query.return_value = mock_query
+        backend.get_session.return_value = mock_session
+        app = _create_test_app(core=core, backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {"executor": "web-server-3", "purpose": "ssh_login"},
+            },
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["key"] == "db-password"
+        assert data["metadata"] == {"executor": "web-server-3", "purpose": "ssh_login"}
+
+    def test_post_secret_without_metadata(self):
+        """POST /secrets without metadata should return None."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        backend.get_session.return_value = mock_session
+        app = _create_test_app(core=core, backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+            },
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["key"] == "db-password"
+        assert data["metadata"] == {}
+
+    def test_create_metadata_with_custom_fields(self):
+        """Create with standard + custom metadata fields. extra='allow' survives."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {
+                    "executor": "web-server-3",
+                    "custom_port": 5432,
+                    "environment": "prod",
+                },
+            },
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["metadata"]["executor"] == "web-server-3"
+        assert data["metadata"]["custom_port"] == 5432
+        assert data["metadata"]["environment"] == "prod"
+
+    def test_create_metadata_invalid_type_returns_422(self):
+        """Create with non-string executor → 422, not a silent store."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {"executor": 123},
+            },
+        )
+
+        assert resp.status_code == 422
+
+    def test_filter_by_executor(self):
+        """GET /secrets?executor= hands the filter to core.list (enforcement point).
+
+        Real-DB filtering behavior: core suite TestSecretVisibilitySqlite.
+        """
+        core = _make_mock_core()
+        rec = MagicMock()
+        rec.id = 1
+        rec.key = "secret-1"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = {"executor": "web-server-3"}
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["key"] == "secret-1"
+        assert data["secrets"][0]["metadata"] == {"executor": "web-server-3"}
+        assert core.list.call_args.kwargs["executor"] == "web-server-3"
+
+    def test_filter_by_purpose(self):
+        """GET /secrets?purpose= hands the filter to core.list."""
+        core = _make_mock_core()
+        rec = MagicMock()
+        rec.id = 1
+        rec.key = "api-key"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = {"purpose": "api_key"}
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"purpose": "api_key"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["key"] == "api-key"
+        assert core.list.call_args.kwargs["purpose"] == "api_key"
+
+    def test_filter_combined_executor_and_purpose(self):
+        """GET /secrets?executor=&purpose= AND-combines — both reach core.list."""
+        core = _make_mock_core()
+        rec = MagicMock()
+        rec.id = 1
+        rec.key = "ssh-key"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets",
+            params={"executor": "web-server-3", "purpose": "ssh_login"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["key"] == "ssh-key"
+        kwargs = core.list.call_args.kwargs
+        assert kwargs["executor"] == "web-server-3"
+        assert kwargs["purpose"] == "ssh_login"
+
+    def test_patch_metadata_merge(self):
+        """PATCH /secrets/{key}/metadata should merge with existing metadata."""
+        core = MagicMock()
+        core.get.return_value = "\u2022" * 8
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "db-password"
+        mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"username": "bot"}},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["metadata"]["executor"] == "web-server-3"
+        assert data["metadata"]["purpose"] == "ssh_login"
+        assert data["metadata"]["username"] == "bot"
+
+    def test_patch_metadata_overwrites(self):
+        """PATCH /secrets/{key}/metadata should overwrite existing fields."""
+        core = MagicMock()
+        core.get.return_value = "\u2022" * 8
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "db-password"
+        mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"purpose": "api_key"}},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["metadata"]["executor"] == "web-server-3"
+        assert data["metadata"]["purpose"] == "api_key"
+
+    def test_patch_metadata_not_found(self):
+        """PATCH /secrets/{key}/metadata should return 404 for missing secret."""
+        core = MagicMock()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = None
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/missing-key/metadata",
+            json={"metadata": {"executor": "web-server-3"}},
+        )
+
+        assert resp.status_code == 404
+
+    def test_patch_metadata_scoped_out_idor_404_no_mutation(self):
+        """IDOR negative (sec-auth-elevation-authz-hardening #5, interlock 3):
+        scoped-out secret + valid read-write user → 404 indistinguishable from
+        nonexistent, and the metadata writer is NEVER touched (no Secret
+        query, no meta mutation, no commit) — enforce-first ordering."""
+        from core.engine.core import CoreAccessError
+
+        core = MagicMock()
+        core.get.side_effect = CoreAccessError("Secret not found: scoped-key")
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.meta = {"executor": "web-server-3"}
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/scoped-key/metadata",
+            json={"metadata": {"purpose": "pwned"}},
+        )
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Secret not found"
+        # enforce-first: the metadata writer never ran (the role-resolution
+        # probe may query, but nothing is mutated or committed)
+        mock_session.commit.assert_not_called()
+        assert mock_secret.meta == {"executor": "web-server-3"}
+        # the visibility probe consulted the single enforcement point
+        assert core.get.call_count == 1
+        assert core.get.call_args.kwargs["secret_key"] == "scoped-key"  # pragma: allowlist secret
+
+    def test_patch_metadata_db_error_returns_500(self):
+        """PATCH triggering a DB failure → 500, not 'Secret not found'."""
+        core = MagicMock()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "db-password"
+        mock_secret.meta = {"executor": "web-server-3"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        mock_session.commit.side_effect = Exception("constraint violation")
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"username": "bot"}},
+        )
+
+        assert resp.status_code == 500
+        assert "Secret not found" not in resp.text
+
+    def test_list_secrets_returns_metadata(self):
+        """GET /secrets should include metadata in response."""
+        core = _make_mock_core()
+        rec = MagicMock()
+        rec.id = 42
+        rec.key = "test-key"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["metadata"]["executor"] == "web-server-3"
+        assert data["secrets"][0]["metadata"]["purpose"] == "ssh_login"
+
+    def test_cross_user_visibility_requires_shared_role(self, tmp_path):
+        """Cross-user visibility is role-scoped (ticket secret-role-scoping-unenforced).
+
+        REPLACES the old pin ("any user with read permission sees all secrets
+        regardless of creator") — that semantics was the bug: it made
+        --roles scoping decorative. A secret created by another user is
+        visible iff one of the caller's roles is in its scope (or the caller
+        created it). ORM-backed: real core.list enforcement path.
+        """
+        app, engine = _build_scoped_app(tmp_path, member_role="admin")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
+
+        assert resp.status_code == 200
+        keys = [s["key"] for s in resp.json()["secrets"]]
+        assert "admin-credentials" in keys
+        engine.dispose()
+
+    def test_cross_user_out_of_scope_secret_hidden(self, tmp_path):
+        """Paired negative: without a scoped role the other user's secret is
+        invisible — the list simply omits it (indistinguishable from nonexistent)."""
+        app, engine = _build_scoped_app(tmp_path, member_role="user")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets")
+
+        assert resp.status_code == 200
+        keys = [s["key"] for s in resp.json()["secrets"]]
+        assert "admin-credentials" not in keys
+        assert keys == []
+        engine.dispose()
+
+    def test_list_null_meta_returns_empty_object(self):
+        """List where stored meta is NULL → {}, not missing key or null."""
+        core = _make_mock_core()
+        rec = MagicMock()
+        rec.id = 1
+        rec.key = "legacy-secret"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = None  # NULL from DB (legacy row)
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert "metadata" in data["secrets"][0]
+        assert data["secrets"][0]["metadata"] == {}
+
+
+class TestSecretUpsertRoute:
+    """Route-level upsert loop (ticket cli-store-force-field-ignored option-2).
+
+    Real Backend over SQLite, real secrets router, real require_role chain —
+    2×POST closes the loop at the endpoint, not just the engine.
+    """
+
+    def _build_app(self, tmp_path):
+        from core.engine.backend import Backend, BackendConfig
+        from core.engine.encryption import KEK_SIZE
+        from core.iam.models import Base, Role, RoleMember, User
+        from fastapi import FastAPI
+        from server.dependencies import get_current_user
+        from server.routes import secrets as secrets_routes
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from starlette.testclient import TestClient
+
+        db_path = tmp_path / "upsert_route.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+
+        kek = b"k" * KEK_SIZE
+        s = SessionLocal()
+        role = Role(name="dev", permissions="read-write")
+        s.add_all([User(user_id="test-user"), role])
+        s.flush()
+        s.add(RoleMember(user_id="test-user", role_id=role.id))
+        s.commit()
+        s.close()
+
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+
+        app = FastAPI()
+        app.state.backend = backend
+        app.state.core = backend.get_core()
+        app.include_router(secrets_routes.router, prefix="/api/v1")
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "test-user"}
+        return TestClient(app, raise_server_exceptions=False), SessionLocal, kek
+
+    def _payload(self, value, **over):
+        body = {"key": "rotating-pw", "value": value, "roles": ["dev"], "key_version_id": "v1"}
+        body.update(over)
+        return body
+
+    def test_double_post_replaces_in_place(self, tmp_path):
+        from core.engine.encryption import decrypt_secret
+        from core.iam.models import Secret
+
+        client, SessionLocal, kek = self._build_app(tmp_path)
+        r1 = client.post("/api/v1/secrets", json=self._payload("first-value"))
+        assert r1.status_code == 201, r1.text
+        b1 = r1.json()
+        assert b1["replaced"] is False
+
+        r2 = client.post("/api/v1/secrets", json=self._payload("second-value"))
+        assert r2.status_code == 201, r2.text
+        b2 = r2.json()
+        assert b2["replaced"] is True
+        assert b2["id"] == b1["id"], "row id must be stable across replace (injection-path contract)"
+
+        with SessionLocal() as s:
+            rows = s.query(Secret).filter(Secret.key == "rotating-pw").all()
+            assert len(rows) == 1, "replace must not duplicate the row"
+            assert decrypt_secret(kek, rows[0].wrapped_dek, rows[0].nonce, rows[0].encrypted_value) == b"second-value"
+
+    def test_scoped_out_caller_inserts_second_row_no_clobber(self, tmp_path):
+        """Paired negative at the endpoint: a caller who cannot see the row
+        gets a plain insert (identical 201 shape — no existence leak) and the
+        original is untouched."""
+        from core.engine.encryption import decrypt_secret
+        from core.iam.models import Role, RoleMember, Secret, User
+
+        client, SessionLocal, kek = self._build_app(tmp_path)
+        r1 = client.post("/api/v1/secrets", json=self._payload("owner-value"))
+        assert r1.status_code == 201 and r1.json()["replaced"] is False
+
+        # Second identity: member of a different role, same key string.
+        with SessionLocal() as s:
+            other_role = Role(name="other", permissions="read-write")
+            s.add(other_role)
+            s.add(User(user_id="other-user"))
+            s.flush()
+            s.add(RoleMember(user_id="other-user", role_id=other_role.id))
+            s.commit()
+        from server.dependencies import get_current_user
+
+        app = client.app
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "other-user"}
+        r2 = client.post("/api/v1/secrets", json=self._payload("intruder-value", roles=["other"]))
+        assert r2.status_code == 201
+        assert r2.json()["replaced"] is False
+        assert r2.json()["id"] != r1.json()["id"]
+
+        with SessionLocal() as s:
+            rows = s.query(Secret).filter(Secret.key == "rotating-pw").order_by(Secret.id).all()
+            assert len(rows) == 2
+            assert decrypt_secret(kek, rows[0].wrapped_dek, rows[0].nonce, rows[0].encrypted_value) == b"owner-value"
+
+
+class TestSecretWriteNamespaceScoping:
+    """Write-side namespace door (ticket secret-write-namespace-scoping #451).
+
+    The read side of the namespace model has one enforcement point
+    (_resolve_secret_in) and it holds; the write side never consulted it, so a
+    caller holding the read-write tier in ANY group could store a key into a
+    group they do not belong to — require_role("read-write") is a global tier
+    test and never asks WHICH group. These cells ride the real route: Backend
+    over SQLite, real secrets router, real require_role chain, and the caller's
+    roles read fresh from the DB by the route itself (no mock in the path).
+    """
+
+    def _build_app(self, tmp_path, member_roles: list[str]):
+        from core.engine.backend import Backend, BackendConfig
+        from core.engine.encryption import KEK_SIZE
+        from core.iam.models import Base, Role, RoleMember, User
+        from fastapi import FastAPI
+        from server.dependencies import get_current_user
+        from server.routes import secrets as secrets_routes
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from starlette.testclient import TestClient
+
+        db_path = tmp_path / "write_scope.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+
+        kek = b"k" * KEK_SIZE
+        s = SessionLocal()
+        web = Role(name="web-ops", permissions="read-write")
+        dev = Role(name="dev-ops", permissions="read-write")
+        s.add_all([User(user_id="test-user"), web, dev])
+        s.flush()
+        for name in member_roles:
+            role = web if name == "web-ops" else dev
+            s.add(RoleMember(user_id="test-user", role_id=role.id))
+        s.commit()
+        s.close()
+
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+
+        app = FastAPI()
+        app.state.backend = backend
+        app.state.core = backend.get_core()
+        app.include_router(secrets_routes.router, prefix="/api/v1")
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "test-user"}
+        return TestClient(app, raise_server_exceptions=False), SessionLocal, engine
+
+    def _payload(self, roles: list[str], **over):
+        body = {"key": "ssh-target", "value": "s3cret", "roles": roles, "key_version_id": "v1"}
+        body.update(over)
+        return body
+
+    def _stored_rows(self, SessionLocal, key: str):
+        """(created_by, sorted scope names) for every row holding `key`."""
+        from core.iam.models import Role, Secret, SecretRole
+
+        with SessionLocal() as s:
+            out = []
+            for row in s.query(Secret).filter(Secret.key == key).all():
+                names = [
+                    r.name
+                    for r in s.query(Role)
+                    .join(SecretRole, SecretRole.role_id == Role.id)
+                    .filter(SecretRole.secret_id == row.id)
+                    .all()
+                ]
+                out.append((row.created_by, sorted(names)))
+            return out
+
+    def test_store_into_a_group_the_caller_is_not_in_is_refused_and_writes_nothing(self, tmp_path):
+        """The required negative half (AC-4): a web-ops-only member attempting
+        roles=[web-ops, dev-ops] gets a 400 that NAMES dev-ops, and NOTHING is
+        written — not the foreign row, and not the allowed one either (a refused
+        request never partially commits)."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops"])
+        try:
+            resp = client.post("/api/v1/secrets", json=self._payload(["web-ops", "dev-ops"]))
+            assert resp.status_code == 400, resp.text
+            detail = resp.json()["detail"]
+            assert "dev-ops" in detail, f"refusal must name the offending group: {detail}"
+            assert "web-ops" not in detail, "the caller's own group must not be named"
+            assert self._stored_rows(SessionLocal, "ssh-target") == [], "refused write must leave no row"
+        finally:
+            engine.dispose()
+
+    def test_store_into_only_a_foreign_group_is_refused(self, tmp_path):
+        """Same door, the wholly-foreign shape: one requested name, none held."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops"])
+        try:
+            resp = client.post("/api/v1/secrets", json=self._payload(["dev-ops"]))
+            assert resp.status_code == 400, resp.text
+            assert "dev-ops" in resp.json()["detail"]
+            assert self._stored_rows(SessionLocal, "ssh-target") == []
+        finally:
+            engine.dispose()
+
+    def test_store_into_two_groups_the_caller_holds_succeeds(self, tmp_path):
+        """Positive half (AC-4): the same request from a member of BOTH groups
+        stores, with both namespace links present."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops", "dev-ops"])
+        try:
+            resp = client.post("/api/v1/secrets", json=self._payload(["web-ops", "dev-ops"]))
+            assert resp.status_code == 201, resp.text
+            assert resp.json()["replaced"] is False
+            assert self._stored_rows(SessionLocal, "ssh-target") == [("test-user", ["dev-ops", "web-ops"])]
+        finally:
+            engine.dispose()
+
+    def test_single_role_store_within_membership_still_succeeds(self, tmp_path):
+        """No-regression half (AC-4): the ordinary one-group store — the shape
+        every existing cell in this file rides — keeps working unchanged."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops"])
+        try:
+            resp = client.post("/api/v1/secrets", json=self._payload(["web-ops"]))
+            assert resp.status_code == 201, resp.text
+            assert self._stored_rows(SessionLocal, "ssh-target") == [("test-user", ["web-ops"])]
+        finally:
+            engine.dispose()
+
+    def test_metadata_patch_path_is_unchanged_by_the_door(self, tmp_path):
+        """Unchanged-behaviour half (AC-4): the PATCH/metadata route — which
+        already derived caller_roles from the DB and fed the visibility
+        primitive — still merges metadata for the owner after the door lands."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops"])
+        try:
+            store = client.post(
+                "/api/v1/secrets",
+                json=self._payload(["web-ops"], metadata={"purpose": "ssh_login"}),
+            )
+            assert store.status_code == 201, store.text
+            resp = client.patch("/api/v1/secrets/ssh-target/metadata", json={"metadata": {"username": "bot"}})
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["metadata"] == {"purpose": "ssh_login", "username": "bot"}
+            # the merge landed on the caller's own row, in its own namespace
+            assert self._stored_rows(SessionLocal, "ssh-target") == [("test-user", ["web-ops"])]
+        finally:
+            engine.dispose()
+
+
+class TestShapeMetadata:
+    """shape/usage metadata convention (ticket secret-shape-metadata).
+
+    Paired cells per the truth-table rule: every accept has a reject twin.
+    The reject half is the security-bearing one — a usage template that
+    interpolates the secret VALUE must die at authoring time with an
+    actionable 400 (institutionalization rule: never bless a bypass shape).
+    Warnings are loud-not-fatal (forward-compat for custom shapes).
+    """
+
+    def _store(self, metadata):
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+        return client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "shaped-secret",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": metadata,
+            },
+        )
+
+    def _patch_client(self):
+        core = MagicMock()
+        core.get.return_value = "\u2022" * 8
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "db-password"
+        mock_secret.meta = {"executor": "web-server-3"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        return TestClient(app, raise_server_exceptions=False), mock_secret, mock_session
+
+    def test_builtin_shape_and_usage_accepted_without_warnings(self):
+        resp = self._store(
+            {
+                "shape": "ssh-password",
+                "usage": "sshpass -f {secret_path} ssh {user}@{host} systemctl restart httpd",
+            }
+        )
+        assert resp.status_code == 201
+        assert resp.json()["metadata_warnings"] == []
+
+    def test_env_shape_accepted_without_warning(self):
+        # env mechanism SHIPPED (secret-shape-env-injection): env: is a builtin
+        # taxonomy prefix — the former declarative-only warning left with it.
+        resp = self._store({"shape": "env:AWS_SECRET_ACCESS_KEY"})
+        assert resp.status_code == 201
+        assert resp.json()["metadata_warnings"] == []
+
+    def test_sudo_stdin_shape_accepted_without_warning(self):
+        # Mechanism SHIPPED (narrow redirect allowance, ticket
+        # secret-shape-sudo-remote option (a)) — the declarative-only warning
+        # left with the last MECHANISM_PENDING_SHAPES member.
+        resp = self._store({"shape": "sudo-stdin"})
+        assert resp.status_code == 201
+        assert resp.json()["metadata_warnings"] == []
+
+    def test_mechanism_pending_set_is_empty_pinned(self):
+        # Deliberate pin: the pending set is EMPTY — re-adding a shape to it
+        # requires a ruling (comment at MECHANISM_PENDING_SHAPES).
+        from server.routes.secrets import MECHANISM_PENDING_SHAPES
+
+        assert MECHANISM_PENDING_SHAPES == frozenset()
+
+    def test_env_shape_multiline_value_rejected_400(self):
+        # The env-file format is line-based — catch multi-line values at
+        # authoring time (loudest, earliest point), before persistence.
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "multi",
+                "value": "line1\nline2",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {"shape": "env:MY_TOKEN"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "single-line" in resp.json()["detail"]
+        core.put.assert_not_called()  # rejected before persistence
+
+    def test_file_arg_shapes_never_warn_mechanism(self):
+        # File injection ships today; tool availability is a deployment
+        # property (sandbox template) the server cannot know — file shapes
+        # must stay warning-free.
+        for shape in (
+            "ssh-password",
+            "ssh-key",
+            "http-netrc",
+            "http-header-file",
+            "mysql-defaults",
+            "ipmi-passfile",
+        ):
+            resp = self._store({"shape": shape})
+            assert resp.status_code == 201, shape
+            assert resp.json()["metadata_warnings"] == [], shape
+
+    def test_custom_shape_accepted_with_teaching_warning(self):
+        resp = self._store({"shape": "internal-secret-store-cli"})
+        assert resp.status_code == 201
+        warnings = resp.json()["metadata_warnings"]
+        assert len(warnings) == 1
+        assert "CUSTOM shape" in warnings[0]
+        # the warning teaches the fix: add a usage template
+        assert "usage" in warnings[0] and "{secret_path}" in warnings[0]
+
+    def test_custom_shape_with_usage_omits_the_nag(self):
+        resp = self._store(
+            {"shape": "internal-secret-store-cli", "usage": "secret-store --cred-file {secret_path} run"}
+        )
+        assert resp.status_code == 201
+        warnings = resp.json()["metadata_warnings"]
+        assert len(warnings) == 1
+        assert "Add 'usage'" not in warnings[0]
+
+    def test_value_placeholder_rejected_400_with_actionable_detail(self):
+        for bad in ("{value}", "{secret_value}", "{plaintext}", "{password}", "{token}", "{credential}"):
+            resp = self._store({"shape": "ssh-password", "usage": f"tool --pass {bad} run"})
+            assert resp.status_code == 400, bad
+            detail = resp.json()["detail"]
+            assert "{secret_path}" in detail  # names the right way
+            assert "UNMASKED" in detail  # names the WHY
+
+    def test_unknown_placeholder_warns_not_fails(self):
+        resp = self._store({"shape": "ssh-password", "usage": "tool -f {secret_path} --port {port}"})
+        assert resp.status_code == 201
+        assert any("{port}" in w for w in resp.json()["metadata_warnings"])
+
+    def test_non_string_shape_rejected_400(self):
+        resp = self._store({"shape": 42})
+        assert resp.status_code == 400
+        assert "non-empty string" in resp.json()["detail"]
+
+    def test_no_shape_keys_unchanged_behavior(self):
+        resp = self._store({"executor": "web-server-3"})
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["metadata"] == {"executor": "web-server-3"}
+        assert data["metadata_warnings"] == []
+
+    def test_patch_value_placeholder_rejected_before_mutation(self):
+        client, mock_secret, mock_session = self._patch_client()
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"usage": "tool --pass {value} run"}},
+        )
+        assert resp.status_code == 400
+        assert "{secret_path}" in resp.json()["detail"]
+        # enforce-before-mutate: the row is untouched and nothing committed
+        assert mock_secret.meta == {"executor": "web-server-3"}
+        mock_session.commit.assert_not_called()
+
+    def test_patch_custom_shape_warns_and_merges(self):
+        client, *_ = self._patch_client()
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"shape": "internal-secret-store-cli", "usage": "secret-store -f {secret_path}"}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["metadata"]["shape"] == "internal-secret-store-cli"
+        assert data["metadata"]["executor"] == "web-server-3"  # merge preserved
+        assert len(data["metadata_warnings"]) == 1
+        assert "CUSTOM shape" in data["metadata_warnings"][0]
+
+
+class TestUnmaskAuditorValueDeny:
+    """Auditor-role rework (rulings 1b/1c-i): auditor-only callers are
+    AFFIRMATIVELY denied secret VALUES at the unmask chokepoint, BEFORE the
+    elevation token is consumed. Mock harness pins the code order
+    (no core.get, no token-burn UPDATE); the ORM-backed cell pins the real
+    token row intact."""
+
+    def _app_with_tier(self, tier_map):
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        backend = MagicMock()
+        app = _create_test_app(core=core, backend=backend)
+        db = backend.get_session.return_value
+        db.execute.return_value = MagicMock(rowcount=1)  # token would burn
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: tier_map
+        patcher = patch("server.dependencies.RoleManager", return_value=rm)
+        patcher.start()
+        self._patchers.append(patcher)
+        return app, core, db
+
+    def setup_method(self):
+        self._patchers = []
+
+    def teardown_method(self):
+        for p in self._patchers:
+            p.stop()
+
+    def test_auditor_only_valid_token_403_token_never_burned(self):
+        """LOAD-BEARING: auditor-only + VALID token → 403, core.get never
+        reached, and the atomic token-burn UPDATE never runs (token row
+        intact — deny precedes consumption in code)."""
+        app, core, db = self._app_with_tier({1: "auditor"})
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-auditor-1"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "insufficient role: auditor cannot read secret values"
+        core.get.assert_not_called()
+        db.execute.assert_not_called()
+
+    def test_audit_write_failure_still_denies_403(self):
+        """H1: if the denial AuditEvent commit blows up, the request is
+        STILL 403 — the deny is the control, the log is the loud
+        side-effect; a broken audit store must never flip the gate to
+        allow (200) or to a 500."""
+        app, core, db = self._app_with_tier({1: "auditor"})
+        db.commit.side_effect = RuntimeError("audit store down")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-auditor-1"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "insufficient role: auditor cannot read secret values"
+        core.get.assert_not_called()
+
+    def test_union_caller_adds_no_deny_event(self):
+        """N1: the union pass (auditor+read unmasks) writes ZERO
+        auditor_secret_read_denied events — the log is a deny trail, not
+        a request trail."""
+        from core.iam.models import AuditEvent
+
+        app, _core, db = self._app_with_tier({1: "auditor", 2: "read"})
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-union-1"},
+        )
+        assert resp.status_code == 200
+        added = [c.args[0] for c in db.add.call_args_list]
+        assert not any(isinstance(o, AuditEvent) and o.event_type == "auditor_secret_read_denied" for o in added)
+
+    def test_plain_read_unmask_success_adds_no_deny_event(self):
+        """N2: a normal non-auditor success path (read tier + valid token)
+        writes zero deny events."""
+        from core.iam.models import AuditEvent
+
+        app, _core, db = self._app_with_tier({1: "read"})
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-read-1"},
+        )
+        assert resp.status_code == 200
+        added = [c.args[0] for c in db.add.call_args_list]
+        assert not any(isinstance(o, AuditEvent) and o.event_type == "auditor_secret_read_denied" for o in added)
+
+    def test_auditor_read_union_keeps_value_access(self):
+        """1b union paired positive: auditor+read holds a non-auditor
+        membership → value access passes with a valid token (token burns)."""
+        app, core, db = self._app_with_tier({1: "auditor", 2: "read"})
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-union-1"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["masked"] is False
+        core.get.assert_called_once()
+        assert db.execute.call_count == 1
+
+    def test_masked_get_unaffected_for_auditor(self):
+        """Paired positive: the deny targets VALUES only — auditor metadata
+        (masked) reads keep the read-tier behavior (200, masked)."""
+        app, core, _ = self._app_with_tier({1: "auditor"})
+        core.get.return_value = "\u2022" * 8
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/secrets/db-password")
+        assert resp.status_code == 200
+        assert resp.json()["masked"] is True
+
+
+class TestUnmaskAuditorDenyTokenIntactORM:
+    """Zero-mock interlock for the deny ordering claim: a REAL
+    ElevationToken row must still be unused after the 403 (mocks cannot
+    prove the burn UPDATE was skipped — only the real UPDATE can)."""
+
+    def _build_auditor_app(self, tmp_path):
+        from core.engine.backend import Backend, BackendConfig
+        from core.engine.encryption import KEK_SIZE, encrypt_secret
+        from core.iam.models import Base, Role, RoleMember, Secret, SecretRole, User
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        db_path = tmp_path / "auditor_unmask.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+
+        kek = b"k" * KEK_SIZE
+        s = SessionLocal()
+        wrapped_dek, nonce, ciphertext = encrypt_secret(kek, b"top-secret")
+        auditor_role = Role(name="audit-view", permissions="auditor")
+        s.add_all([User(user_id="test-user"), auditor_role])
+        s.flush()
+        s.add(RoleMember(user_id="test-user", role_id=auditor_role.id))
+        secret = Secret(
+            key="db-password",
+            encrypted_value=ciphertext,
+            nonce=nonce,
+            wrapped_dek=wrapped_dek,
+            key_version_id="v1",
+            created_by="test-user",
+            meta={},
+        )
+        s.add(secret)
+        s.flush()
+        s.add(SecretRole(secret_id=secret.id, role_id=auditor_role.id))
+        s.commit()
+        s.close()
+
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+        core = backend.get_core()
+
+        from fastapi import FastAPI
+        from server.dependencies import get_current_user
+
+        app = FastAPI()
+        app.state.core = core
+        app.state.backend = backend
+        app.include_router(secrets_routes.router, prefix="/api/v1")
+        app.dependency_overrides[get_current_user] = lambda: dict(TEST_USER)
+        return app, SessionLocal
+
+    def test_denied_unmask_leaves_real_token_row_unused(self, tmp_path):
+        import hashlib
+        from datetime import UTC, datetime, timedelta
+
+        from core.iam.models import ElevationToken
+
+        app, SessionLocal = self._build_auditor_app(tmp_path)
+        token = "auditor-intact-token"
+        s = SessionLocal()
+        s.add(
+            ElevationToken(
+                token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                user_id="test-user",
+                expires_at=datetime.now(UTC) + timedelta(seconds=60),
+            )
+        )
+        s.commit()
+        s.close()
+
+        # _checker's gate map: auditor-only (fixture re-patch, house pattern).
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {1: "auditor"}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get(
+                "/api/v1/secrets/db-password",
+                params={"unmask": True},
+                headers={"X-Elevation-Token": token},
+            )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "insufficient role: auditor cannot read secret values"
+
+        s = SessionLocal()
+        rows = s.query(ElevationToken).all()
+        assert len(rows) == 1
+        assert rows[0].used is False
+
+        # P1 (ruling 2026-09-30: denials are audit-logged): exactly ONE
+        # real auditor_secret_read_denied row, committed on the raise path
+        # (commit-before-raise survives get_db's rollback). H2 hygiene: the
+        # serialized fields carry NO secret value and NO token literal —
+        # the compliance trail is value-free by construction.
+        from core.iam.models import AuditEvent
+
+        events = s.query(AuditEvent).filter(AuditEvent.event_type == "auditor_secret_read_denied").all()
+        assert len(events) == 1
+        event = events[0]
+        assert event.user_id == "test-user"
+        assert '"outcome": "denied"' in event.fields
+        assert '"reason": "auditor-only role"' in event.fields
+        assert '"secret_key": "db-password"' in event.fields
+        assert "top-secret" not in event.fields
+        assert token not in event.fields
+        s.close()
+
+
+class TestSecretsGetRoleNames:
+    """Ticket secrets-get-forgets-role-names: GET /secrets/{key} must carry
+    the caller's role NAMES into core.get (LIST already does; GET forgot —
+    every role-scoped secret 404'd for non-creators while LIST showed it).
+
+    Truth table per A2 — paired negatives guard the no-enumeration design
+    (scoped-out keys stay indistinguishable from nonexistent ones).
+    ORM-backed cells reuse _build_scoped_app (real core enforcement, zero
+    mocks in the visibility path); N3 pins the injection-plane shape at the
+    route with mocks.
+    """
+
+    def _add_token(self, engine, token):
+        import hashlib
+        from datetime import UTC, datetime, timedelta
+
+        from core.iam.models import ElevationToken
+        from sqlalchemy.orm import sessionmaker
+
+        s = sessionmaker(bind=engine)()
+        s.add(
+            ElevationToken(
+                token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                user_id="test-user",
+                expires_at=datetime.now(UTC) + timedelta(seconds=60),
+            )
+        )
+        s.commit()
+        s.close()
+
+    def _token_used(self, engine):
+        from core.iam.models import ElevationToken
+        from sqlalchemy.orm import sessionmaker
+
+        s = sessionmaker(bind=engine)()
+        try:
+            return s.query(ElevationToken).one().used
+        finally:
+            s.close()
+
+    def test_p1_non_creator_role_holder_masked_get_200(self, tmp_path):
+        """P1: non-creator HOLDING the scoped role -> masked GET 200
+        (value redacted). Pre-fix this 404'd: GET never passed role_names."""
+        app, engine = _build_scoped_app(tmp_path, member_role="admin")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/admin-credentials")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"key": "admin-credentials", "value": "\u2022" * 8, "masked": True}
+        engine.dispose()
+
+    def test_p2_role_holder_unmask_200_token_consumed_once(self, tmp_path):
+        """P2: same non-creator role-holder + valid elevation token ->
+        unmask 200 plaintext, token consumed ONCE (used=True committed on
+        the success path)."""
+        app, engine = _build_scoped_app(tmp_path, member_role="admin")
+        token = "elev-p2-token"
+        self._add_token(engine, token)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/admin-credentials",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": token},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"key": "admin-credentials", "value": "top-secret", "masked": False}
+        assert self._token_used(engine) is True
+        engine.dispose()
+
+    def test_n1_scoped_out_404_indistinguishable_from_missing(self, tmp_path):
+        """N1: caller WITHOUT the scoped role and not creator -> 404, same
+        shape as the nonexistent-key 404 (no cross-role key enumeration)."""
+        app, engine = _build_scoped_app(tmp_path, member_role="user")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        r_scoped = client.get("/api/v1/secrets/admin-credentials")
+        r_missing = client.get("/api/v1/secrets/no-such-key")
+
+        assert r_scoped.status_code == 404
+        assert r_missing.status_code == 404
+        assert r_scoped.json()["detail"].replace("admin-credentials", "KEY") == r_missing.json()["detail"].replace(
+            "no-such-key", "KEY"
+        )
+        engine.dispose()
+
+    def test_n2_creator_with_no_roles_still_visible(self, tmp_path):
+        """N2: creator holding NO roles keeps the ownership path (the fix
+        must not regress creator access)."""
+        app, engine = _build_scoped_app(tmp_path, member_role="user")
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "admin-user",
+            "roles": [],
+            "caller": "human",
+        }
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/admin-credentials")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["masked"] is True
+        engine.dispose()
+
+    def test_n3_injection_plane_shape_is_refused_at_the_gate(self):
+        """#449 re-anchors the #448 N3 cell: the injection-plane shape is now
+        REFUSED, so the role-lookup skip it pinned happens at the gate instead of
+        inside the route.
+
+        The #448-era prose ("GET resolves NO roles, passes user_id=None and
+        role_names=None") described a request that REACHED the body — that only
+        happened because of the blanket pass this ticket removes. The reachability
+        claim is retired here rather than left as 2026-09 prose. What survives,
+        strengthened: RoleManager is still never constructed (now because the gate
+        refuses first), ``core.get`` is never called, and the refusal carries the
+        gate's stated reason instead of a silent 200.
+        """
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
+        rm_cls = MagicMock()
+        with patch("core.iam.role_manager.RoleManager", rm_cls):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        core.get.assert_not_called()
+        rm_cls.assert_not_called()
+
+    def test_h1_visibility_404_on_unmask_does_not_burn_token(self, tmp_path):
+        """H1 (A0 pin — fleet-sheet verdict 2026-09-30: used=FALSE after the
+        unmask-path 404; flush-then-raise + get_db rollback model confirmed):
+        a REAL ElevationToken row stays unused when the fetch 404s on
+        visibility. Zero-mock interlock — mocks cannot prove a rolled-back
+        UPDATE stayed rolled back; only the real UPDATE can."""
+        app, engine = _build_scoped_app(tmp_path, member_role="user")
+        token = "elev-h1-token"
+        self._add_token(engine, token)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/admin-credentials",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": token},
+        )
+
+        assert resp.status_code == 404
+        assert self._token_used(engine) is False
+        engine.dispose()
+
+
+class TestLockoutMapsTo429:
+    """#421: core account lockout surfaces as HTTP 429 + Retry-After, never
+    a 500. Each arm is exercised on the get/elevation/metadata paths; the
+    paired negatives prove non-rate failures keep their prior status."""
+
+    def test_get_lockout_returns_429_with_retry_after(self):
+        """Positive: core.get raises the armed-limiter error mid-window."""
+        from core.engine.rate_limiter import RateLimitExceededError
+
+        core = _make_mock_core()
+        core.get.side_effect = RateLimitExceededError("locked out", retry_after_seconds=840)
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "840"
+
+    def test_get_lockout_no_retry_after_value_defaults_1(self):
+        """NEGATIVE: an unlock error with no retry_after_seconds still gets a
+        numeric Retry-After (>=1), never a missing header / 500."""
+        from core.engine.rate_limiter import RateLimitExceededError
+
+        core = _make_mock_core()
+        core.get.side_effect = RateLimitExceededError("locked out")  # no value
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 429
+        assert int(resp.headers["Retry-After"]) >= 1
+
+    def test_get_non_rate_500_unchanged(self):
+        """Paired NEGATIVE: a generic retrieval failure is NOT remapped to 429
+        — it keeps the pre-#421 shape (masked GET swallows to 404)."""
+        core = _make_mock_core()
+        core.get.side_effect = RuntimeError("boom")
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 404  # generic except, unchanged by #421
+        assert "Retry-After" not in resp.headers
+
+    def test_get_success_path_unchanged(self):
+        """Paired NEGATIVE: a normal retrieval still 200s, no 429 leakage."""
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 200
+        assert "Retry-After" not in resp.headers
+
+    def test_metadata_patch_lockout_returns_429(self):
+        """Positive: the metadata PATCH (which calls core.get first) surfaces
+        lockout as 429 + Retry-After, not the generic 500."""
+        from core.engine.rate_limiter import RateLimitExceededError
+
+        core = _make_mock_core()
+        core.get.side_effect = RateLimitExceededError("locked out", retry_after_seconds=300)
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"username": "bot"}},
+        )
+
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "300"

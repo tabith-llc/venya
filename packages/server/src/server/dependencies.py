@@ -1,0 +1,470 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Database session + auth dependencies for FastAPI."""
+
+from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from core.iam.enrollment_manager import EnrollmentManager
+
+from core.engine.backend import Backend, BackendConfig
+from core.iam.models import Session as SessionModel
+from core.iam.role_manager import RoleManager
+
+from .ca import PLANE_HUMAN
+from .utils.time import is_expired
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def init_db(db_config: BackendConfig, db_url: str | None = None) -> Backend:
+    """Initialize the database backend.
+
+    Uses database_url for PostgreSQL connection.
+
+    Args:
+        db_config: Database configuration (passphrase only).
+        db_url: PostgreSQL database URL.
+
+    Returns:
+        Configured Backend instance.
+    """
+    import os
+
+    database_url = db_url or os.environ.get("VENYA_DB_URL")
+    if not database_url:
+        raise RuntimeError("No database URL configured. Set VENYA_DB_URL or config.db_url")
+
+    config = BackendConfig(
+        database_url=database_url,
+        passphrase=db_config.passphrase if db_config.passphrase else None,
+    )
+    return Backend(config)
+
+
+def enrollment_manager(db: Session, request: Request) -> EnrollmentManager:
+    """EnrollmentManager wired to the configured enrollment-token TTL.
+
+    Single construction point for every route that builds an enrollment
+    manager (ticket fido2-enrollment-ttl-config-dead): reads
+    ServerConfig.fido2.enrollment_token_ttl (minutes) from app state, so
+    VENYA_FIDO2__ENROLLMENT_TOKEN_TTL takes effect on every mint path and
+    response lifetimes are derived, not hardcoded. Falls back to the
+    EnrollmentConfig default (15 minutes) when no config is on app state
+    (minimal test apps).
+    """
+    # Function-local import: matches the route-module idiom and keeps
+    # call-time patching of core.iam.enrollment_manager.EnrollmentManager
+    # (the codebase's established mock point) effective.
+    from core.iam.enrollment_manager import EnrollmentConfig, EnrollmentManager
+
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        return EnrollmentManager(db)
+    return EnrollmentManager(
+        db,
+        EnrollmentConfig(token_expiry=timedelta(minutes=config.fido2.enrollment_token_ttl)),
+    )
+
+
+def get_backend(request: Request) -> Backend:
+    """FastAPI dependency that yields the backend from app state."""
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend not initialized",
+        )
+    return backend
+
+
+def get_db(backend: Backend = Depends(get_backend)) -> Generator[Session]:
+    """FastAPI dependency that yields a DB session.
+
+    Owns the session lifecycle for the route layer: rollback on any exception
+    escaping the route, close on all paths. Routes must never call
+    db.rollback() or db.close() on this session.
+    """
+    session = backend.get_session()
+    try:
+        yield session
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def get_current_session(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> tuple[Session, SessionModel] | None:
+    """FastAPI dependency that returns (db, session) from cookie.
+
+    DB session remains open until request completes.
+
+    Args:
+        request: The FastAPI request (for cookie access).
+        db: DB session from get_db dependency.
+
+    Returns:
+        Tuple of (db, SessionModel) if valid, None otherwise.
+    """
+    token = request.cookies.get("venya_access_token")
+    if not token:
+        return None
+
+    session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
+    if session is None:
+        return None
+
+    # Check expiry
+    from core.iam.session_manager import SessionConfig
+
+    server_config = getattr(request.app.state, "config", None)
+    tolerance = (
+        server_config.clock_skew.token_tolerance_seconds
+        if server_config and hasattr(server_config, "clock_skew")
+        else 60
+    )
+    # Operator-configured hard cap (seconds), core default (4h) if unset —
+    # same source and fallback order as maintenance.py (M-28 class).
+    operator_max = getattr(getattr(server_config, "session", None), "max_session_duration", None)
+    max_session_duration = (
+        timedelta(seconds=operator_max) if operator_max is not None else SessionConfig().max_session_duration
+    )
+    now = datetime.now(UTC)
+    session_created_at = session.created_at
+    if session_created_at + max_session_duration < now:
+        return None
+    if is_expired(session.expires_at, tolerance):
+        return None
+
+    return (db, session)
+
+
+async def get_current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> dict:
+    """FastAPI dependency that validates the session token and returns user info.
+
+    Returns:
+        Dict with user_id, roles, session_id.
+
+    Raises:
+        HTTPException: If token is invalid or expired.
+    """
+    # If middleware already authenticated (mTLS admin/executor), use it
+    auth_user = getattr(request.state, "auth_user", None)
+    if auth_user is not None:
+        return auth_user
+
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Look up session by token JTI in app state
+    # The session middleware should have validated and attached user info
+    user_info = getattr(request.state, "auth_user", None)
+    if user_info is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user_info
+
+
+get_current_user._venya_guard = "auth"  # type: ignore[attr-defined]
+
+
+def require_role(permission: str):
+    """Dependency factory that requires a specific permission tier.
+
+    Args:
+        permission: Required permission — "none", "read", "auditor", or
+            "read-write".
+            "none" accepts any authenticated caller without role checks.
+            "read" passes with any role membership;
+            "auditor" requires at least one auditor or read-write role
+            (audit-visibility tier, ticket auditor-role — read-write exceeds
+            it so admins, seeded read-write, keep audit-log access; plain
+            "read" memberships are DENIED: audit access is auditor-scoped);
+            "read-write" requires at least one read-write role. EXECUTOR-class
+            callers (mTLS) are REFUSED on every tiered gate (#449) — the only
+            thing that lets an executor certificate reach a route is the
+            middleware PATH MATCHER (server/middleware/auth.py), never this
+            factory; see the single-source note in ``_checker``.
+
+    Returns:
+        Dependency that allows the request only when the authenticated
+        user holds at least one role whose permission tier meets the
+        required level.
+
+    Raises:
+        ValueError: If permission is not "none", "read", "auditor", or
+            "read-write". Raised at factory call time (app startup), not
+            per request.
+    """
+    if permission not in ("none", "read", "auditor", "read-write"):
+        raise ValueError(f"Invalid permission: {permission}. Must be 'none', 'read', 'auditor', or 'read-write'")
+
+    async def _checker(
+        user_info: dict = Depends(get_current_user),
+        backend: Backend = Depends(get_backend),
+    ) -> dict:
+        # "none" — any authenticated caller passes without role checks.
+        # ZERO PRODUCTION CALLERS TODAY, and the wording this line carried was stale:
+        # the heartbeat route it pointed at was the alpha ``POST /executors/{id}/heartbeat``,
+        # REMOVED with sec-endpoint-ratelimit-hardening #7 (guard cell:
+        # ``test_executor_server.py::test_dead_alpha_id_heartbeat_route_removed`` → 404),
+        # so there was never a "Phase 3" hardening of THIS tier to wait for. The live beat
+        # is ``POST /api/v1/heartbeat``, which does not use ``require_role`` at all: it is
+        # executor-mTLS gated in ``middleware/auth.py`` and binds body ``executor_id`` to
+        # the verified cert CN route-side (``routes/executors.py`` ``heartbeat``).
+        #
+        # Its pass-through of a REVOKED-but-verified executor is DELIBERATE and is NOT this
+        # gate's doing — the middleware runs that path with ``reject_revoked=False`` under
+        # owner ruling B1 (2026-09-20), so the 200 ``{revoked: true}`` RESPONSE is the fast
+        # cooperative-stop channel. Do not "harden" it to ``reject_revoked=True`` or to
+        # 401/403: that kills the ruled channel (guard:
+        # ``test_heartbeat_revoked_still_200_cooperative_channel_b1``).
+        if permission == "none":
+            return user_info
+
+        # --- #449: executor-class callers are REFUSED here, not waved through.
+        #
+        # SINGLE SOURCE (AC4): the middleware PATH MATCHER decides what an
+        # executor certificate may reach — server/middleware/auth.py
+        # (_is_executor_session_path + the /api/v1/heartbeat and
+        # /api/v1/audit/ingest grants in dispatch). This gate is the second
+        # half of that control and it grants NOTHING: an executor identity
+        # carries no user_id, so there is no role to check and nothing this
+        # tier can honestly pass. Adding an executor-reachable route is NOT
+        # this gate's job — it is a matcher change, and it must arrive with
+        # the route's own in-body identity re-check (the #440 binding shape),
+        # never by re-widening this refusal.
+        #
+        # require_admin (further down this module) already denies executors
+        # outright; the blanket pass here was the odd one out. Deny BEFORE any
+        # role lookup: indexing user_info["user_id"] here would raise KeyError
+        # and surface as a 500 instead of this 403.
+        if user_info.get("caller") == "executor":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Executor callers are not permitted on role-gated routes",
+            )
+
+        db = backend.get_session()
+        try:
+            rm = RoleManager(db)
+            # AC2 (#449): a tiered gate needs an identity the role table can
+            # answer for. An executor is refused above; any OTHER identity
+            # without a user_id used to reach `user_info["user_id"]` here and
+            # raise KeyError, which FastAPI surfaces as a 500 — an
+            # authorization failure dressed as a server fault (and a stack
+            # trace to a caller that should simply be refused). Clean 403.
+            caller_user_id = user_info.get("user_id")
+            if caller_user_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Caller identity carries no user to authorize",
+                )
+            permissions = rm.get_user_permissions(caller_user_id)
+
+            if permission == "read":
+                # MEMBERSHIP test, not a tier comparison (documentation-only note
+                # from the role-read-surface-enumeration-oracle #448 ruling 5):
+                # this branch passes on ANY non-empty role map. That is equivalent
+                # to "tier >= read" ONLY because "read" is the FLOOR of the closed
+                # tier vocabulary — read / auditor / read-write, validated in both
+                # layers (core/iam/role_manager.py create + update, and the
+                # Literal[...] extra="forbid" request models). The day a tier BELOW
+                # "read" is introduced (a pending-approval group, say), every
+                # require_role("read") gate opens to it silently — 7 live gate
+                # sites, verified by grep at this tip: routes/roles.py x3 (list,
+                # get, members), routes/secrets.py x3 (get, list, key-versions)
+                # and routes/executors.py x1 (list).
+                # A tier requirement that a route needs belongs in THAT route (see
+                # role_members_list's membership/oversight scoping), not in a
+                # tree-wide widening of this shared gate.
+                if not permissions:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Insufficient permissions",
+                    )
+            elif permission == "auditor":
+                # Audit-visibility tier (ticket auditor-role): auditor OR
+                # read-write memberships pass (read-write exceeds — admin
+                # keeps audit access); plain "read" is denied.
+                if not any(p in ("auditor", "read-write") for p in permissions.values()):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Auditor permission required",
+                    )
+            else:  # "read-write"
+                if not any(p == "read-write" for p in permissions.values()):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Read-write permission required",
+                    )
+
+            # Auditor-role rework (ruled 1b/1c): attach the role map already
+            # fetched here so value-gating handlers (secrets_get unmask deny)
+            # reuse it request-scoped instead of re-querying.
+            user_info["_role_permissions"] = permissions
+            return user_info
+        except HTTPException:
+            raise
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    _checker._venya_guard = permission  # type: ignore[attr-defined]
+    return _checker
+
+
+# --- #449 AC2: the route-side identity guard ---------------------------------
+#
+# Every user_id INDEX in the secret and executor routes sits in a body behind
+# require_role, and this module now refuses (a) any executor-class caller and
+# (b) any identity carrying no user_id. That makes those index sites
+# UNREACHABLE-AT-TIP. The guard is still written and kept, because AC2 is
+# behavioral -- "an identity without user_id reaches a clean refusal, never a
+# traceback-driven 500" -- and a route body must not depend on a dependency's
+# ordering for that guarantee. If a future caller class arrives without a
+# user_id, or a route loses its gate, this is what keeps the answer a 403.
+UNREACHABLE_AT_TIP = "UNREACHABLE-AT-TIP, guard retained as defense-in-depth"
+
+
+def require_user_identity(user_info: dict) -> dict:
+    """Return ``user_info`` when it names a person the role table can answer for.
+
+    #449 AC2: an identity with no ``user_id`` must be refused cleanly and must
+    never reach a ``user_info["user_id"]`` index (a KeyError there is a 500
+    traceback for what is an authorization decision). Route bodies call this as
+    their first statement so the guarantee lives in the body, not in gate
+    ordering.
+
+    Raises:
+        HTTPException 403: the caller carries no user identity.
+    """
+    if user_info.get("user_id") is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Caller identity carries no user to authorize",
+        )
+    return user_info
+
+
+def auditor_only_permissions(permissions: dict[int, str]) -> bool:
+    """True iff the caller holds memberships and EVERY one is auditor-tier.
+
+    Ruling 1b (union): a caller with ANY non-auditor membership keeps value
+    access (auditor+read keeps read's rights). An empty membership map is
+    False — this helper never grants anything; read-gated routes reject
+    no-membership callers before it is consulted.
+    """
+    return bool(permissions) and all(p == "auditor" for p in permissions.values())
+
+
+def require_admin(
+    user_info: dict = Depends(get_current_user),
+    backend: Backend = Depends(get_backend),
+) -> dict:
+    """FastAPI dependency that requires the admin ROLE, on every use.
+
+    Ruling 2 (RF-6 §3.3, refs RF-7 chunk 2) is that the credential names a
+    PERSON and the role is checked each time it is used — so revocation is
+    behavioral (remove the role → the next request is refused) instead of
+    lifetime-shaped. The former ``caller == "admin"`` short-circuit stated the
+    premise ruling 2 replaces ("already verified by nginx + middleware"); it is
+    now scoped to the MACHINE plane only, which ruling 1 keeps slot-shaped on
+    purpose (machines have no person, and a role table lookup on a loopback hop
+    would add a DB dependency for no authorization benefit).
+
+    Returns:
+        The caller dict on success.
+
+    Raises:
+        HTTPException 403: Executor (mTLS) callers are denied outright — they
+            carry no user_id and admin routes are human-only. A HUMAN caller
+            without the admin role, or whose user row no longer exists, is
+            denied the same way, and that denial is the point: a certificate
+            still inside its validity window does not outlive the role.
+    """
+    # Executors (mTLS) carry no user_id; the role lookup below would raise
+    # KeyError and surface as a 500. Admin routes are human-only, so deny
+    # cleanly. Mirrors require_role's executor branch (dependencies.py:195),
+    # which passes executors; here we deny them instead.
+    if user_info.get("caller") == "executor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin permission required",
+        )
+
+    # MACHINE plane only: a crypto-verified Admin-CA certificate naming an
+    # enumerated known_admin_ids slot. The middleware performed the chain
+    # verify, the revocation lookup, the plane-marker parse (§3.2) and this
+    # plane's slot check, and the mint that produced it is the installer's
+    # loopback path — no person, no role row, no lookup (§3.2, ruling 1).
+    #
+    # A caller dict with `caller == "admin"` and NO plane key is treated as
+    # machine. That state is unreachable from the real middleware, which always
+    # writes the plane after §3.2's fail-closed parse; it exists only in
+    # hand-built test doubles, and defaulting them to the long-standing
+    # behavior keeps this change from silently reclassifying a fixture into the
+    # stricter path. The certificate itself can never arrive without a marker —
+    # the middleware refuses that before this dependency is ever consulted
+    # (cells: TestPlaneMarkerMiddlewareConsumption).
+    if user_info.get("caller") == "admin" and user_info.get("plane") != PLANE_HUMAN:
+        return user_info
+
+    # Everything else — a bearer/cookie SESSION, or a HUMAN-plane certificate —
+    # runs the same lookup. This is the bypass dying for the human plane, not a
+    # new check being added to the machine plane.
+    db = backend.get_session()
+    try:
+        from core.iam.role_manager import RoleManager
+
+        rm = RoleManager(db)
+        admin_role = rm.get_role_by_name("admin")
+        if admin_role is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin role not found",
+            )
+        has_admin = rm.has_permission(user_info["user_id"], admin_role.id, "read-write")
+        if not has_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin permission required",
+            )
+        return user_info
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+require_admin._venya_guard = "admin"  # type: ignore[attr-defined]

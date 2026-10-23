@@ -1,0 +1,322 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Output filtering endpoint for executor."""
+
+import base64
+import hashlib
+import logging
+
+from core.engine.backend import Backend
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from ..dependencies import get_backend, get_db
+
+router = APIRouter()
+logger = logging.getLogger("venya.server")
+
+
+# --- Request/Response models ---
+
+
+class FilterRequest(BaseModel):
+    """Request from executor.
+
+    SIGN-OFF INVARIANT (ticket executor-stage2-plaintext-signoff, ruling
+    2026-09-20): the body carries plaintext-equivalent (base64) UNFILTERED
+    command output BY DESIGN — Stage-2 is the definitive filter and must see
+    pre-Stage-1 bytes to be authoritative over Stage-1 misses. Transport
+    protection is mutual mTLS only; request/response bodies at this hop must
+    NEVER be logged on either side. Any future logger touching bodies here
+    is a REGRESSION.
+
+    Note: no `secrets` field by design — the handler reconstructs plaintext
+    from the server's own DB via KEK. Legacy daemons that still send a
+    `secrets` key are tolerated (pydantic drops undeclared keys; pinned by
+    test_legacy_payload_with_secrets_field_tolerated_and_dropped).
+    """
+
+    # #357 ruled exemption (explicit, was implicit default): legacy daemons
+    # MUST keep getting 200 with the dead `secrets` key (2026-09-20
+    # compat ruling stands — no override). Extra keys drop loudly-by-test,
+    # never by surprise.
+    model_config = {"extra": "ignore"}
+
+    stdout: str = Field(..., description="Base64-encoded stdout bytes")
+    stderr: str = Field(..., description="Base64-encoded stderr bytes")
+
+
+class FilterResponse(BaseModel):
+    """Filter response with sanitized output."""
+
+    stdout: str  # Base64-encoded sanitized bytes
+    stderr: str  # Base64-encoded sanitized bytes
+    masked_count: int = 0
+    masked_hashes: list[str] = []
+
+
+# --- Filtering logic ---
+
+
+def compute_detection_hashes(value: bytes) -> list[str]:
+    """Compute SHA-256 hashes for secret value in multiple encodings.
+
+    Same implementation as in secrets.py — DRY would require
+    moving to a shared module.
+    """
+    import base64 as b64
+
+    hashes = []
+    hashes.append(hashlib.sha256(value).hexdigest())
+    hashes.append(hashlib.sha256(b64.b64encode(value)).hexdigest())
+    hashes.append(hashlib.sha256(value.hex().encode()).hexdigest())
+    trimmed = value.strip()
+    if trimmed != value:
+        hashes.append(hashlib.sha256(trimmed).hexdigest())
+    return hashes
+
+
+def filter_output(
+    output: bytes,
+    secret_hashes: dict[str, bytes],
+) -> tuple[bytes, list[str]]:
+    """Filter secret values from output using hash matching.
+
+    Performs substring matching against known secret hashes.
+
+    Args:
+        output: The raw output bytes to filter.
+        secret_hashes: Dict mapping hash_hex -> secret_bytes.
+
+    Returns:
+        Tuple of (filtered_output, list of masked hash prefixes).
+    """
+    masked_hashes: list[str] = []
+
+    for hash_hex, secret_bytes in secret_hashes.items():
+        # Skip empty secret values to avoid matching every position
+        if not secret_bytes:
+            continue
+
+        # Try raw bytes matching
+        if secret_bytes in output:
+            output = output.replace(
+                secret_bytes,
+                f"[REDACTED:{hash_hex[:8]}]".encode(),
+            )
+            masked_hashes.append(hash_hex[:8])
+
+        # Try base64 matching
+        import base64 as b64
+
+        b64_secret = b64.b64encode(secret_bytes)
+        if b64_secret in output:
+            output = output.replace(
+                b64_secret,
+                f"[REDACTED:{hash_hex[:8]}]".encode(),
+            )
+            masked_hashes.append(hash_hex[:8])
+
+        # Try hex matching
+        hex_secret = secret_bytes.hex().encode()
+        if hex_secret in output:
+            output = output.replace(
+                hex_secret,
+                f"[REDACTED:{hash_hex[:8]}]".encode(),
+            )
+            masked_hashes.append(hash_hex[:8])
+
+    # Deduplicate masked hashes
+    unique = list(dict.fromkeys(masked_hashes))
+    return output, unique
+
+
+# --- Endpoints ---
+
+
+def _decode_required_b64(field: str, value: str, session_id: str) -> bytes:
+    """Decode one required base64 stage-2 body field, refusing junk (refs #452).
+
+    The former handler swallowed decode failures into ``b""`` and answered
+    HTTP 200 with ``masked_count=0`` — the route could not tell "nothing
+    matched" from "I could not parse you", and the executor adopts a 200 over
+    its own Stage-1 masking, so the empty answer shipped unmasked knowledge.
+    One check, one wording (the ``_https_refusal`` family's house shape):
+    ``validate=True`` so silently-dropped non-alphabet junk is refused too,
+    a ``logger.warning`` naming session id + field (AC3 — no silent branch),
+    and a 400 the executor's existing non-200 fallback already handles
+    ("Stage 2 filter failed — using Stage 1 results"). An empty string is
+    LEGAL base64 (decodes to ``b""``) and still answers 200-with-zero.
+    """
+    import binascii
+
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning(
+            "Stage-2 filter refused session %s: field '%s' is not valid base64",
+            session_id,
+            field,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Field '{field}' must be valid base64",
+        ) from None
+
+
+@router.post(
+    "/sessions/{session_id}/filter",
+    response_model=FilterResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def filter_session_output(
+    session_id: str,
+    req: FilterRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    backend: Backend = Depends(get_backend),
+) -> FilterResponse:
+    """Filter secret values from captured process output.
+
+    Definitive masking endpoint. Called by executor after Stage 1 local filtering.
+
+    Args:
+        session_id: The executor session ID — an ``execution_sessions`` row id.
+        req: Base64-encoded stdout/stderr to filter.
+        request: The FastAPI request (mTLS caller state).
+
+    Returns:
+        Sanitized output with masked secrets.
+    """
+    from core.iam.models import Secret
+
+    # Verify caller is executor (mTLS) — mirrors routes/secrets.py revoke.
+    # The middleware is the choke point that VERIFIES the identity
+    # (sec-executor-session-path-no-auth); this check is defense-in-depth so
+    # the route is never naked if mounted without the middleware, and it runs
+    # BEFORE any secret is decrypted or hash-compared (no pre-auth oracle).
+    caller = getattr(request.state, "auth_user", {})
+    if caller.get("caller") != "executor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Executor mTLS authentication required",
+        )
+    caller_executor_id = caller.get("executor_id")
+
+    # RESOLVE EXECUTION SESSIONS ONLY (secret-session-authorization-scoping #440,
+    # gate 4). The former shape integer-parsed session_id and, on a hit, queried
+    # the AUTH session table (core.iam.models.Session) and then decrypted EVERY
+    # secret that session's user owns. ExecutionSession.id is a String UUID while
+    # the auth Session.id is an Integer, so an integer that reached this route (the
+    # reaper/dir-filename path) resolved the WRONG session kind and masked against
+    # an unrelated — and much larger — secret set, handing plaintext-equivalent
+    # knowledge to a caller never bound to those secrets. Execution-session ids
+    # never collide with auth-session ids, so the auth table is not consulted here
+    # at all: an id that is not an execution-session id resolves nothing.
+    from core.engine.encryption import DecryptionError
+    from core.engine.encryption import decrypt_secret as _decrypt_secret_impl
+    from core.iam.models import ExecutionSession, SessionSecret
+
+    # FAIL CLOSED on unknown sessions (ticket
+    # stage2-filter-unknown-session-unmasked-passthrough): this route is the
+    # DEFINITIVE masker and the executor adopts its answer over its own
+    # Stage-1 masking — an empty-knowledge 200 therefore ships RAW output to
+    # the caller. Vanished sessions are a PROVEN real occurrence (the 10-min
+    # TTL reaper deletes rows mid-run — execute-stale-session-update-500), so
+    # unknown → 404 → the executor's existing "Stage 2 filter failed — using
+    # Stage 1 results" fallback keeps masking at one stage, never zero. A
+    # session that EXISTS with zero bindings still returns 200 (legitimately
+    # nothing to mask). The same 404 shape covers the integer-id case above:
+    # an id with no execution_sessions row is unknown here, fail-closed.
+    exec_session = db.query(ExecutionSession).filter(ExecutionSession.id == session_id).first()
+    if exec_session is None:
+        logger.warning(
+            "Filter called for unknown session %s — refusing empty-knowledge passthrough",
+            session_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+
+    # CALLER-BINDING CHECK (#440 gate 3): class alone was not enough — any
+    # authenticated executor could ask this route whether a secret it is not
+    # bound to appears in ANOTHER executor's session output, and the
+    # masked_count/masked_hashes answer is the oracle. The session row names
+    # its executor (execution_sessions.executor_id); a mismatch is a flat 403
+    # BEFORE any decryption or hash comparison, so a foreign session yields no
+    # knowledge at all (routes/secrets.py revoke carries the same binding check).
+    if exec_session.executor_id != caller_executor_id:
+        logger.warning(
+            "Filter called by executor %s for session %s bound to executor %s — refusing",
+            caller_executor_id,
+            session_id,
+            exec_session.executor_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session belongs to another executor",
+        )
+
+    # DECODE-AND-VALIDATE FIRST (refs #452): an undecodable body is refused
+    # with 400 BEFORE any secret is decrypted — no decryption work is spent
+    # (or leaked through timing/behavior) for a request that gets no answer.
+    # The secrets walk below now runs only for well-formed bodies.
+    stdout = _decode_required_b64("stdout", req.stdout, session_id)
+    stderr = _decode_required_b64("stderr", req.stderr, session_id)
+
+    session_secrets: dict[str, bytes] = {}
+    bindings = db.query(SessionSecret).filter(SessionSecret.session_id == session_id).all()
+
+    if not bindings:
+        logger.warning(
+            "Session %s has no secret bindings — masking will be a no-op",
+            session_id,
+        )
+    else:
+        for binding in bindings:
+            secret = db.query(Secret).filter(Secret.id == binding.secret_id).first()
+            if secret is None:
+                logger.warning(
+                    "Secret %s bound to session %s not found in DB — skipping",
+                    binding.secret_id,
+                    session_id,
+                )
+                continue
+            kek_cache = backend.kek_cache
+            if not kek_cache.is_populated:
+                logger.warning(
+                    "No KEK configured, cannot decrypt secret %s for session %s",
+                    binding.secret_id,
+                    session_id,
+                )
+                continue
+            try:
+                with kek_cache.view() as kek:
+                    plaintext = _decrypt_secret_impl(kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value)
+            except DecryptionError:
+                logger.warning(
+                    "Failed to decrypt secret %s for session %s",
+                    binding.secret_id,
+                    session_id,
+                )
+                continue
+            hash_hex = hashlib.sha256(plaintext).hexdigest()
+            session_secrets[hash_hex] = plaintext
+
+    filtered_stdout, stdout_hashes = filter_output(stdout, session_secrets)
+    filtered_stderr, stderr_hashes = filter_output(stderr, session_secrets)
+
+    all_hashes = stdout_hashes + stderr_hashes
+
+    return FilterResponse(
+        stdout=base64.b64encode(filtered_stdout).decode("ascii"),
+        stderr=base64.b64encode(filtered_stderr).decode("ascii"),
+        masked_count=len(all_hashes),
+        masked_hashes=all_hashes,
+    )

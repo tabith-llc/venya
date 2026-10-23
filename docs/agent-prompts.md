@@ -1,0 +1,94 @@
+# Venya — Agent Prompts (paste-ready operating contract)
+
+**This page is for the human wiring an AI agent to Venya.** Paste the block
+below into the instruction file your agent framework reads at every session:
+
+| Framework | Paste into |
+|---|---|
+| opencode | `AGENTS.md` |
+| pi | `~/.pi/agent/AGENTS.md` (every project) or the project's `AGENTS.md` |
+| Claude Code | `CLAUDE.md` |
+| Cursor | `.cursor/rules` (or `.cursorrules`) |
+| Anything else | the agent's system prompt / instructions field |
+
+The block is deliberately short and self-contained — instruction files are
+prime real estate, and a bloated contract gets trimmed or ignored. The full
+operating brief is [agents.md](agents.md), linked for the human; the agent
+needs no web fetches to operate. An interlock test in `packages/mcp/tests/`
+pins the block's load-bearing claims to the live MCP tool surface, so it
+cannot silently rot when the tools change.
+
+<!-- snippet-start -->
+## Venya — operating contract
+
+You operate infrastructure through Venya. Four MCP tools: `list_executors`,
+`list_secrets`, `run_command`, `get_audit`.
+
+1. **Secret values are unreachable by design.** Never attempt to read, echo,
+   encode, or exfiltrate one — attempts are logged and attributed to the
+   human who authorized you.
+2. **`list_secrets` shows a `usage` line for most secrets: a ready-to-run
+   command template** with the secret's sandbox path
+   (`/run/secrets/venya/<id>`) already resolved. Copy it and fill any
+   `{host}`/`{user}` placeholders from your task and the listed metadata.
+   Never construct secret paths yourself; never inline a secret value.
+3. **`[REDACTED:<id>]` in output is the system working**, not an error.
+   Never decode, work around, or re-request it.
+4. **Commands:** use absolute binary paths (`/usr/bin/ssh`, `/bin/cat`).
+   A command name that does not resolve on the executor's PATH into a trusted
+   directory is refused (503) — that catches most shell builtins (`cd`, `export`,
+   `source`, `eval`), but NOT ones that have a real binary of the same name
+   (`echo`, `true`, `test` pass). Never rely on shell syntax. Hostnames resolve
+   only if the operator allowlisted them as hostnames — otherwise use IP addresses.
+5. **Runs are seconds-scale on a properly installed executor** — the installer
+   pre-pulls the sandbox template. If a FIRST run looks slow or times out
+   client-side, check its result before retrying; it may already have succeeded
+   server-side.
+6. **On 401 / expired session:** ask your human to re-authenticate
+   (`venya login`, physical key touch). You cannot and must not renew
+   authorization yourself.
+7. **On 503:** surface the error to your human verbatim. Do not loop
+   retries. When something is missing (a credential, a setup step), say
+   WHAT is needed — never invent CLI commands for your human to run.
+   **ssh/sshpass exit 6 with empty output** = unknown host key (fresh
+   sandboxes carry no `known_hosts`): report that the template needs
+   `-o StrictHostKeyChecking=accept-new`; do not retry.
+8. **Everything you run is permanently attributed to your human.** Behave
+   as if their security team reads every command — they do.
+<!-- snippet-end -->
+
+## Operator site facts (fill in, paste with the block)
+
+Live agent testing showed a filled-in site-facts block was the single
+largest time-to-success factor: the agent stopped probing the environment
+and started working. Fill this in for YOUR deployment and paste it after
+the operating contract. Values are never part of this block — secret KEY
+NAMES only. Generic sandbox mechanics do not belong here; they live in
+[agents.md](agents.md) ("Sandbox mechanics").
+
+```text
+## Site facts (deployment-specific)
+
+**Hosts**
+
+| Host | What | Facts |
+|---|---|---|
+| <target-host> | <role> | <OS>; SSH port <port>, user <user>; resolves in the sandbox? <allowlisted hostname, else IP <ip>> |
+| <executor-id> | Venya executor (jump host) | every run_command runs in a fresh ephemeral sandbox here; sandbox OS = <os> |
+
+**Credentials** (one line per secret; key names only — NEVER values)
+
+- <secret-key> (shape <shape>) — <what it authenticates; which usage line to copy>
+
+**Sandbox binary paths** (verified present — list what your tasks need)
+
+<path> · <path> · <path>
+```
+
+---
+
+*Honesty note: every claim in the block is source-matched to the shipped
+tool surface (the pinning interlock lives in
+`packages/mcp/tests/test_agent_prompts_doc.py`); the command-resolution rule
+above is the MEASURED behavior of the shipped validator — refusal is by
+PATH-resolution into a trusted directory, not by a builtin table.*

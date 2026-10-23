@@ -1,0 +1,851 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Tests for roles CRUD endpoints."""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from core.iam.role_manager import RoleManagerError
+from fastapi import FastAPI
+from server.dependencies import get_current_user, require_admin
+from server.routes import roles as roles_routes
+from starlette.testclient import TestClient
+
+
+def _create_test_app(backend=None, auth_user=None):
+    """Create a minimal test app with roles routes."""
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+
+    app = FastAPI()
+
+    # Override get_current_user BEFORE including router so require_role/require_admin
+    # dependencies resolve through the override at request time.
+    TEST_USER = auth_user or {"user_id": "test-user"}
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    app.dependency_overrides[require_admin] = lambda: TEST_USER
+
+    if backend is None:
+        backend = MagicMock()
+        backend.get_session.return_value = MagicMock()
+    app.state.backend = backend
+
+    app.include_router(roles_routes.router, prefix="/api/v1")
+
+    class AuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            if auth_user is not None:
+                request.state.auth_user = auth_user
+            return await call_next(request)
+
+    app.add_middleware(AuthMiddleware)
+    return app
+
+
+def _make_mock_role_manager(role=None, roles=None, members=None, error=None, user_permissions=None):
+    """Create a mock RoleManager with realistic behavior."""
+    rm = MagicMock()
+
+    def make_role(id_, name, permissions="read", description=None):
+        return SimpleNamespace(id=id_, name=name, permissions=permissions, description=description)
+
+    if error:
+        rm.create_role.side_effect = error
+        rm.add_member.side_effect = error
+    else:
+        if role:
+            rm.create_role.return_value = role
+        else:
+            rm.create_role.return_value = make_role(1, "dev", "read", "Developers")
+
+    if roles is not None:
+        rm.list_roles.return_value = roles
+    else:
+        rm.list_roles.return_value = [make_role(1, "dev", "read", "Developers")]
+
+    if members is not None:
+        rm.get_role_members.return_value = members
+    else:
+        rm.get_role_members.return_value = []
+
+    rm.get_role.return_value = make_role(1, "dev", "read", "Developers")
+    rm.delete_role.return_value = True
+    rm.add_member.return_value = SimpleNamespace(user_id="user1", role_id=1)
+    rm.remove_member.return_value = True
+
+    # Default: user holds role id 1 at tier "read" — makes require_role("read")
+    # pass. NOTE the shape: get_user_permissions returns {role_id: tier}
+    # (core/iam/role_manager.py:316-322), so an int id is the key. The previous
+    # default was name-keyed ({"dev": "read"}) — fiction that survived only
+    # because nothing read the map's KEYS until #448 put a key check in
+    # role_members_list. The `user_permissions` argument also used to be ACCEPTED
+    # AND IGNORED unless it was None; both are fixed here.
+    rm.get_user_permissions.return_value = {1: "read"} if user_permissions is None else user_permissions
+
+    # For require_admin: admin role exists and user has write permission
+    admin_role = make_role(999, "admin", "read-write")
+    rm.get_role_by_name.return_value = admin_role
+    rm.has_permission.return_value = True
+
+    return rm
+
+
+class TestRolesCreate:
+    """Tests for role creation endpoint."""
+
+    def test_create_success(self):
+        """POST /roles should create a role via role_manager."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/roles",
+                json={
+                    "name": "dev",
+                    "permissions": "read-write",
+                    "description": "Developers with write access",
+                },
+            )
+            assert resp.status_code == 201
+            data = resp.json()
+            assert data["name"] == "dev"
+            assert data["permissions"] == "read"
+            assert data["description"] == "Developers"
+
+    def test_create_auditor_permissions_accepted(self):
+        """Acceptance (ticket auditor-role): permissions="auditor" passes the
+        request-model Literal gate and reaches RoleManager.create_role
+        verbatim (pre-fix the Literal 422'd it before role_manager ran)."""
+        rm = _make_mock_role_manager(
+            role=SimpleNamespace(id=2, name="auditor", permissions="auditor", description=None)
+        )
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/roles", json={"name": "auditor", "permissions": "auditor"})
+            assert resp.status_code == 201
+            assert resp.json()["permissions"] == "auditor"
+        assert rm.create_role.call_args.kwargs["permissions"] == "auditor"
+
+    def test_create_duplicate(self):
+        """POST /roles should return 400 for duplicate role name."""
+        rm = _make_mock_role_manager(error=RoleManagerError("Role 'dev' already exists"))
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/roles",
+                json={"name": "dev", "permissions": "read"},
+            )
+            assert resp.status_code == 400
+            assert "already exists" in resp.json()["detail"]
+
+    def test_create_empty_name(self):
+        """POST /roles should return 422 for empty name."""
+        app = _create_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/roles", json={"name": "", "permissions": "read"})
+        assert resp.status_code == 422
+
+    def test_create_special_chars_name(self):
+        """POST /roles should return 422 for name with special chars."""
+        app = _create_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/roles", json={"name": "my role!", "permissions": "read"})
+        assert resp.status_code == 422
+
+    def test_create_invalid_permissions(self):
+        """POST /roles should return 422 for invalid permissions (Literal validation)."""
+        app = _create_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/roles", json={"name": "admin", "permissions": "superadmin"})
+        assert resp.status_code == 422
+
+
+class TestRolesList:
+    """Tests for roles listing endpoint."""
+
+    def test_list_success(self):
+        """GET /roles should return list of roles."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/roles")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["roles"]) == 1
+            assert data["roles"][0]["name"] == "dev"
+
+
+class TestRolesGet:
+    """Tests for role retrieval endpoint."""
+
+    def test_get_success(self):
+        """GET /roles/{id} should return role details."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/roles/1")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["id"] == 1
+            assert data["name"] == "dev"
+            assert data["permissions"] == "read"
+
+    def test_get_not_found(self):
+        """GET /roles/{id} should return 404 for missing role."""
+        rm = _make_mock_role_manager()
+        rm.get_role.return_value = None
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/roles/999")
+            assert resp.status_code == 404
+            assert "not found" in resp.json()["detail"]
+
+
+class TestRolesUpdate:
+    """Tests for role update endpoint."""
+
+    def test_update_success(self):
+        """PUT /roles/{id} should update role fields."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        updated_role = SimpleNamespace(
+            id=1, name="senior-dev", permissions="read-write", description="Senior developers"
+        )
+        rm.update_role.return_value = updated_role
+        rm.get_role_members.return_value = []
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={
+                    "name": "senior-dev",
+                    "permissions": "read-write",
+                    "description": "Senior developers",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["name"] == "senior-dev"
+            assert data["permissions"] == "read-write"
+            assert data["description"] == "Senior developers"
+
+    def test_update_not_found(self):
+        """PUT /roles/{id} should return 404 for missing role."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = RoleManagerError("Role 999 not found")
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/999",
+                json={"name": "new-name"},
+            )
+            assert resp.status_code == 400
+            assert "not found" in resp.json()["detail"]
+
+    def test_update_internal_error_not_leaked(self):
+        """A non-RoleManagerError exception gets the static detail — internals never echoed."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = RuntimeError('(psycopg2.errors.UndefinedColumn) column "x" does not exist')
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={"name": "new-name"},
+            )
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "Role update failed"
+            assert "psycopg2" not in resp.text
+            assert "UndefinedColumn" not in resp.text
+
+    def test_update_duplicate_name(self):
+        """PUT /roles/{id} should return 400 if new name already exists."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = RoleManagerError("Role 'dev' already exists")
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={"name": "dev"},
+            )
+            assert resp.status_code == 400
+            assert "already exists" in resp.json()["detail"]
+
+    def test_update_invalid_permissions(self):
+        """PUT /roles/{id} should return 422 for invalid permissions (Literal validation)."""
+        app = _create_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.put("/api/v1/roles/1", json={"permissions": "superadmin"})
+        assert resp.status_code == 422
+
+    def test_update_partial(self):
+        """PUT /roles/{id} should allow partial updates."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        updated_role = SimpleNamespace(id=1, name="dev", permissions="read", description="Updated description")
+        rm.update_role.return_value = updated_role
+        rm.get_role_members.return_value = []
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={"description": "Updated description"},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["description"] == "Updated description"
+
+
+class TestRolesDelete:
+    """Tests for role deletion endpoint."""
+
+    def test_delete_success(self):
+        """DELETE /roles/{id} should delete the role."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.delete("/api/v1/roles/1")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["deleted"] is True
+
+    def test_delete_not_found(self):
+        """DELETE /roles/{id} should return 404 for missing role."""
+        rm = _make_mock_role_manager()
+        rm.delete_role.return_value = False
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.delete("/api/v1/roles/999")
+            assert resp.status_code == 404
+            assert "not found" in resp.json()["detail"]
+
+
+class TestRoleMembersList:
+    """Tests for role members listing endpoint."""
+
+    def test_list_members_success(self):
+        """GET /roles/{id}/members should return list of members.
+
+        The caller's role map is `{1: "read"}` — the shape `get_user_permissions`
+        actually documents (role_id -> tier). A roster is answered only about a
+        group the caller holds (#448), so the fixture has to say so honestly.
+        """
+        rm = _make_mock_role_manager(user_permissions={1: "read"})
+        member1 = MagicMock(user_id="user1", role_id=1)
+        member2 = MagicMock(user_id="user2", role_id=1)
+        rm.get_role_members.return_value = [member1, member2]
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/roles/1/members")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["members"]) == 2
+            assert data["members"][0]["user_id"] == "user1"
+            assert data["members"][1]["user_id"] == "user2"
+
+    def test_list_members_empty(self):
+        """GET /roles/{id}/members should return empty list when no members.
+
+        The caller holds the group it asks about, so this stays the legitimate
+        "group has no members" answer — the scoped-out half is
+        TestRoleMembersRosterScoping448.
+        """
+        rm = _make_mock_role_manager(user_permissions={1: "read"})
+        rm.get_role_members.return_value = []
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/roles/1/members")
+            assert resp.status_code == 200
+            assert resp.json()["members"] == []
+
+
+class TestRoleMembersRosterScoping448:
+    """role-read-surface-enumeration-oracle (#448) — the roster of a group the
+    caller does not belong to is refused, and the refusal is INDISTINGUISHABLE
+    from asking about a group that does not exist.
+
+    The ruling (owner 2026-10-06): "the single intern should absolutely _not have
+    this power" — and the deny must not become a second oracle, so 404 (never 403)
+    with a body that does not vary by whether the group is real. Oversight tiers
+    (auditor, read-write) keep the full view; `roles_list` / `roles_get` keep
+    names, tiers and member COUNTS for every tier — the deliberate no-change half.
+    """
+
+    @staticmethod
+    def _client(user_permissions, members_for_one=(), role_members_side_effect=None):
+        rm = _make_mock_role_manager(user_permissions=user_permissions)
+        if role_members_side_effect is not None:
+            rm.get_role_members.side_effect = role_members_side_effect
+        else:
+            rm.get_role_members.return_value = list(members_for_one)
+        backend = MagicMock()
+        backend.get_session.return_value = MagicMock()
+        app = _create_test_app(backend=backend)
+        return TestClient(app, raise_server_exceptions=False), rm
+
+    def test_non_member_deny_is_byte_identical_to_unknown_group(self):
+        """REQUIRED NEGATIVE HALF.
+
+        A caller holding group 1 only asks for group 7, in two worlds: one where
+        group 7 is a REAL group with members, one where group 7 does not exist at
+        all. Before the fix the first world served the roster — that is the
+        defect. After it both answers are byte-identical, so no existence signal
+        survives the deny.
+        """
+        real_group = [MagicMock(user_id="alice", role_id=7), MagicMock(user_id="bob", role_id=7)]
+        client_real, rm_real = self._client(
+            user_permissions={1: "read"},
+            role_members_side_effect=lambda role_id: real_group if role_id == 7 else [],
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm_real), patch(
+            "server.dependencies.RoleManager", return_value=rm_real
+        ):
+            resp_exists = client_real.get("/api/v1/roles/7/members")
+        # The deny reads nothing: no membership query, so no row count, timing
+        # difference, or body to observe.
+        rm_real.get_role_members.assert_not_called()
+
+        client_absent, rm_absent = self._client(
+            user_permissions={1: "read"},
+            role_members_side_effect=lambda role_id: [],
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm_absent), patch(
+            "server.dependencies.RoleManager", return_value=rm_absent
+        ):
+            resp_missing = client_absent.get("/api/v1/roles/7/members")
+        rm_absent.get_role_members.assert_not_called()
+
+        assert resp_exists.status_code == 404, resp_exists.text
+        assert resp_missing.status_code == 404, resp_missing.text
+        assert resp_exists.content == resp_missing.content
+        assert resp_exists.json() == {"detail": "Role 7 not found"}
+        # A 403 would name the caller's position relative to the group; AC-2
+        # refuses that whatever this file's other denials do.
+        assert "forbidden" not in resp_exists.text.lower()
+        assert "another" not in resp_exists.text.lower()
+        assert "insufficient" not in resp_exists.text.lower()
+        # "alice" is the roster that was refused: she must not appear anywhere.
+        assert "alice" not in resp_exists.text
+
+    def test_member_still_gets_own_group_roster(self):
+        """POSITIVE (member half): holding the group is sufficient — the 200 shape
+        and field names are exactly what they were before the fix."""
+        members = [MagicMock(user_id="alice", role_id=1), MagicMock(user_id="carol", role_id=1)]
+        client, rm = self._client(user_permissions={1: "read"}, members_for_one=members)
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles/1/members")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "members": [
+                {"user_id": "alice", "role_id": 1},
+                {"user_id": "carol", "role_id": 1},
+            ]
+        }
+
+    def test_auditor_tier_reads_a_foreign_group_roster(self):
+        """POSITIVE (oversight half, tier `auditor`): the audit-surface precedent —
+        an auditor sees who is in which group."""
+        client, rm = self._client(
+            user_permissions={4: "auditor"}, members_for_one=[MagicMock(user_id="dave", role_id=1)]
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles/1/members")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"members": [{"user_id": "dave", "role_id": 1}]}
+
+    def test_readwrite_tier_reads_a_foreign_group_roster(self):
+        """POSITIVE (oversight half, tier `read-write`): admin keeps the full view."""
+        client, rm = self._client(
+            user_permissions={9: "read-write"}, members_for_one=[MagicMock(user_id="dave", role_id=1)]
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles/1/members")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"members": [{"user_id": "dave", "role_id": 1}]}
+
+    def test_lowest_tier_still_sees_roles_list(self):
+        """NO-REGRESSION half of the ruling: `GET /roles` stays open to a
+        lowest-tier caller — names, tiers and member counts are not the exposure."""
+        client, rm = self._client(user_permissions={1: "read"})
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles")
+        assert resp.status_code == 200, resp.text
+        roles = resp.json()["roles"]
+        assert roles and roles[0]["name"] == "dev"
+        assert "member_count" in roles[0]
+
+    def test_lowest_tier_still_sees_role_get(self):
+        """NO-REGRESSION half: `GET /roles/{id}` unchanged for the same caller."""
+        client, rm = self._client(user_permissions={1: "read"})
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles/1")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["name"] == "dev"
+
+    def test_holding_two_groups_opens_exactly_those_two_rosters(self):
+        """Truth table on the member half: groups 1 and 2 answer, group 3 stays
+        404 for the SAME caller — the scoping is per-group, not per-caller."""
+        rosters = {
+            1: [MagicMock(user_id="alice", role_id=1)],
+            2: [MagicMock(user_id="bob", role_id=2)],
+            3: [MagicMock(user_id="carol", role_id=3)],
+        }
+        client, rm = self._client(
+            user_permissions={1: "read", 2: "read"},
+            role_members_side_effect=lambda role_id: rosters.get(role_id, []),
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            for role_id, expected_user in ((1, "alice"), (2, "bob")):
+                resp = client.get(f"/api/v1/roles/{role_id}/members")
+                assert resp.status_code == 200, resp.text
+                assert [m["user_id"] for m in resp.json()["members"]] == [expected_user]
+            denied = client.get("/api/v1/roles/3/members")
+        assert denied.status_code == 404
+        assert denied.json() == {"detail": "Role 3 not found"}
+        assert "carol" not in denied.text
+
+
+class TestRoleMemberAdd:
+    """Tests for role member addition endpoint."""
+
+    def test_add_member_success(self):
+        """POST /roles/{id}/members should add a user to a role."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/roles/1/members",
+                json={"user_id": "user1"},
+            )
+            assert resp.status_code == 201
+            data = resp.json()
+            assert data["added"] is True
+            assert data["user_id"] == "user1"
+            assert data["role_id"] == 1
+
+    def test_add_member_duplicate(self):
+        """POST /roles/{id}/members should return 400 for duplicate membership."""
+        rm = _make_mock_role_manager()
+        rm.add_member.side_effect = RoleManagerError("User 'user1' is already a member of role 1")
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/roles/1/members",
+                json={"user_id": "user1"},
+            )
+            assert resp.status_code == 400
+            assert "already a member" in resp.json()["detail"]
+
+    def test_add_member_user_not_found(self):
+        """POST /roles/{id}/members should return 400 if user doesn't exist."""
+        rm = _make_mock_role_manager()
+        rm.add_member.side_effect = RoleManagerError("User 'nonexistent' not found")
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/roles/1/members",
+                json={"user_id": "nonexistent"},
+            )
+            assert resp.status_code == 400
+            assert "not found" in resp.json()["detail"]
+
+
+class TestRoleMemberRemove:
+    """Tests for role member removal endpoint."""
+
+    def test_remove_member_success(self):
+        """DELETE /roles/{id}/members/{user_id} should remove a user from a role."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.delete("/api/v1/roles/1/members/user1")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["removed"] is True
+            assert data["user_id"] == "user1"
+
+    def test_remove_member_not_found(self):
+        """DELETE /roles/{id}/members/{user_id} should return 404 if not a member."""
+        rm = _make_mock_role_manager()
+        rm.remove_member.return_value = False
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.delete("/api/v1/roles/1/members/nonexistent")
+            assert resp.status_code == 404
+            assert "not found" in resp.json()["detail"]
+
+
+def _sod(user_id="target", role_id=1, tiers=None):
+    from core.iam.role_manager import SeparationOfDutiesError
+
+    return SeparationOfDutiesError(
+        f"Separation of duties: resulting tiers {sorted(tiers or {'auditor', 'read'})}",
+        user_id=user_id,
+        role_id=role_id,
+        tiers=tiers or {"auditor", "read"},
+    )
+
+
+def _sod_session(rm):
+    """App + (backend session mock) wired to the mocked RoleManager."""
+    backend = MagicMock()
+    session = MagicMock()
+    backend.get_session.return_value = session
+    app = _create_test_app(backend=backend)
+    return app, session
+
+
+class TestAuditorSeparationOfDuties:
+    """POST /roles/{id}/members and PUT /roles/{id} refuse SoD mixtures
+    with 409 and ONE value-free auditor_sod_denied audit event (ruling 2');
+    audit-write failure stays a 409 (fail-closed — never 200/500)."""
+
+    def _post_member(self, app, rm):
+        with (
+            patch("core.iam.role_manager.RoleManager", return_value=rm),
+            patch("server.dependencies.RoleManager", return_value=rm),
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            return client.post("/api/v1/roles/1/members", json={"user_id": "target"})
+
+    def _put_role(self, app, rm, body):
+        with (
+            patch("core.iam.role_manager.RoleManager", return_value=rm),
+            patch("server.dependencies.RoleManager", return_value=rm),
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            return client.put("/api/v1/roles/1", json=body)
+
+    @staticmethod
+    def _sod_events(session):
+        return [
+            c.args[0]
+            for c in session.add.call_args_list
+            if getattr(c.args[0], "event_type", None) == "auditor_sod_denied"
+        ]
+
+    def test_member_add_success_writes_no_sod_event(self):
+        """P1/P2 handler-side: a legal grant commits membership, zero events."""
+        rm = _make_mock_role_manager()
+        app, session = _sod_session(rm)
+        resp = self._post_member(app, rm)
+        assert resp.status_code == 201
+        assert self._sod_events(session) == []
+        session.commit.assert_called()
+
+    def test_member_add_sod_409_with_one_event(self):
+        """N1/N2 handler-side: mixed-tier grant → 409 + exactly one event
+        carrying action/target/tiers; value-free; commit-BEFORE-raise ran."""
+        rm = _make_mock_role_manager()
+        rm.add_member.side_effect = _sod(user_id="target", tiers={"auditor", "read"})
+        app, session = _sod_session(rm)
+        resp = self._post_member(app, rm)
+        assert resp.status_code == 409
+        events = self._sod_events(session)
+        assert len(events) == 1
+        event = events[0]
+        assert event.user_id == "test-user"  # actor (require_admin override)
+        assert '"action": "add_member"' in event.fields
+        assert '"target_user_id": "target"' in event.fields
+        assert '["auditor", "read"]' in event.fields
+
+    def test_member_add_sod_reverse_direction_409(self):
+        """N2 paired: non-auditor tier onto an auditor is the same refusal."""
+        rm = _make_mock_role_manager()
+        rm.add_member.side_effect = _sod(user_id="audited", tiers={"auditor", "read-write"})
+        app, session = _sod_session(rm)
+        resp = self._post_member(app, rm)
+        assert resp.status_code == 409
+        assert len(self._sod_events(session)) == 1
+
+    def test_role_tier_flip_sod_409_with_one_event(self):
+        """N3 handler-side: roles_update tier flip refused → 409 + one
+        event with action=role_tier_change."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = _sod(user_id="target", tiers={"auditor", "read-write"})
+        app, session = _sod_session(rm)
+        resp = self._put_role(app, rm, {"permissions": "auditor"})
+        assert resp.status_code == 409
+        events = self._sod_events(session)
+        assert len(events) == 1
+        assert '"action": "role_tier_change"' in events[0].fields
+
+    def test_role_tier_flip_memberless_allowed(self):
+        """N4 handler-side pair: a clean update commits, zero events."""
+        rm = _make_mock_role_manager(role=SimpleNamespace(id=1, name="flip", permissions="auditor", description=None))
+        rm.update_role.return_value = SimpleNamespace(id=1, name="flip", permissions="auditor", description=None)
+        app, session = _sod_session(rm)
+        resp = self._put_role(app, rm, {"permissions": "auditor"})
+        assert resp.status_code == 200
+        assert resp.json()["permissions"] == "auditor"
+        assert self._sod_events(session) == []
+
+    def test_audit_write_failure_still_409(self):
+        """H1: audit-event commit blows up → STILL 409, never 200/500
+        (fail-closed guard — the refusal is the control)."""
+        rm = _make_mock_role_manager()
+        rm.add_member.side_effect = _sod()
+        app, session = _sod_session(rm)
+        session.commit.side_effect = RuntimeError("audit store down")
+        resp = self._post_member(app, rm)
+        assert resp.status_code == 409
+        assert "Separation of duties" in resp.json()["detail"]

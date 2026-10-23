@@ -1,0 +1,734 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Tests for the Venya API client and config management."""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from venya_mcp import config as config_module
+from venya_mcp.client import (
+    SessionExpiredError,
+    VenyaAPIError,
+    VenyaClient,
+    _bootstrap_tls_verify,
+)
+from venya_mcp.config import InsecureServerURLError, MCPConfig, _https_refusal
+
+# --- Config tests ---
+
+
+def test_config_loads(tmp_path: Path) -> None:
+    """Config file with server_url and access_token loads correctly."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "https://venya-core-1/",
+                "access_token": "test-token-abc",
+            }
+        )
+    )
+    config = MCPConfig(config_file)
+    assert config.server_url == "https://venya-core-1"
+    assert config.access_token == "test-token-abc"
+
+
+def test_config_missing_raises(tmp_path: Path) -> None:
+    """Missing config file raises FileNotFoundError with actionable message."""
+    config_file = tmp_path / "nonexistent.json"
+    with pytest.raises(FileNotFoundError) as exc_info:
+        MCPConfig(config_file)
+    assert "Venya session token found" in str(exc_info.value)
+
+
+def test_config_missing_token_is_none(tmp_path: Path) -> None:
+    """Config file without access_token returns None."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"server_url": "https://venya-core-1"}))
+    config = MCPConfig(config_file)
+    assert config.access_token is None
+
+
+def test_config_update_token_preserves_keys(tmp_path: Path) -> None:
+    """update_token replaces access_token, preserves server_url and unknown keys."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "https://venya-core-1",
+                "access_token": "old-token",
+                "unknown_key": "unknown_value",
+            }
+        )
+    )
+    config = MCPConfig(config_file)
+    config.update_token("new-token")
+
+    data = json.loads(config_file.read_text())
+    assert data["access_token"] == "new-token"
+    assert data["server_url"] == "https://venya-core-1"
+    assert data["unknown_key"] == "unknown_value"
+
+
+def test_config_update_token_atomic(tmp_path: Path) -> None:
+    """update_token writes atomically — no torn file."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "https://venya-core-1",
+                "access_token": "old-token",
+            }
+        )
+    )
+    config = MCPConfig(config_file)
+    config.update_token("new-token")
+
+    # File should be valid JSON (not a partial write)
+    data = json.loads(config_file.read_text())
+    assert data["access_token"] == "new-token"
+
+
+def test_config_update_token_permissions(tmp_path: Path) -> None:
+    """update_token sets 0o600 permissions."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "https://venya-core-1",
+                "access_token": "old-token",
+            }
+        )
+    )
+    config = MCPConfig(config_file)
+    config.update_token("new-token")
+    mode = config_file.stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def _publish_boundary(monkeypatch) -> dict:
+    """Watch the publish boundary of ``update_token`` and report what it saw.
+
+    Replaces only the ``os`` name bound in ``venya_mcp.config`` with a shim that
+    delegates every call to the real module, so nothing else in the process is
+    perturbed. Two observations are taken, both at the instant ``os.replace``
+    runs — i.e. while the staged temp file still exists under its own name:
+
+    ``mode_at_replace``
+        the mode of the staged temp file at that instant;
+    ``fchmod_before_replace``
+        whether the explicit ``os.fchmod`` pin had already been called by then.
+    """
+    seen: dict = {}
+    real = os
+
+    class _OsShim:
+        def __getattr__(self, name: str):
+            return getattr(real, name)
+
+        def fchmod(self, fd: int, mode: int) -> None:
+            seen["fchmod_mode"] = mode
+            return real.fchmod(fd, mode)
+
+        def replace(self, src, dst):
+            seen["fchmod_before_replace"] = "fchmod_mode" in seen
+            seen["mode_at_replace"] = stat.S_IMODE(real.stat(src).st_mode)
+            return real.replace(src, dst)
+
+    monkeypatch.setattr(config_module, "os", _OsShim())
+    return seen
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o000])
+def test_config_update_token_pins_0600_before_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, umask: int
+) -> None:
+    """The custody guard for the MCP config write (owner commission, s147 release).
+
+    ``update_token`` stages the token in a temp file, pins it 0o600 with
+    ``os.fchmod``, then publishes with ``os.replace``. **The order is the whole
+    guard:** both orders leave the destination 0o600, so
+    ``test_config_update_token_permissions`` above — which stats the destination
+    after the call — cannot see the difference, and neither can any assertion on
+    the end state. This cell watches the boundary instead: the pin must have
+    landed while the staged file still exists under its own name.
+
+    Truth table, both halves, and how the negative half was proved (mutation,
+    not a shipped second case, because the wrong order is not reachable without
+    editing the writer):
+
+    - positive: mode at the publish boundary is 0o600 and the ``fchmod`` landed
+      before it — asserted below;
+    - negative: with the ``fchmod`` moved after ``os.replace`` (end state still
+      0o600) this cell reddens on ``fchmod_before_replace``. Verified at the
+      anchor of this leg, then restored byte-identically.
+
+    The parametrised umask is not decoration: ``tempfile.NamedTemporaryFile``
+    already creates 0o600, so on a healthy tree the mode arm cannot tell the two
+    orders apart. Its job is the sibling regression class — a writer swapped to a
+    plain ``open()`` creates 0o666 under ``umask(0)``, and this arm is what
+    reddens on it. The ordering arm is what reddens on the moved ``fchmod``.
+    """
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "https://venya-core-1",
+                "access_token": "old-token",
+            }
+        )
+    )
+    config = MCPConfig(config_file)
+    seen = _publish_boundary(monkeypatch)
+
+    old = os.umask(umask)
+    try:
+        config.update_token("new-token")
+    finally:
+        os.umask(old)
+
+    # Positive half — the window is closed: the pin landed on the staged file.
+    assert seen.get("fchmod_before_replace") is True, (
+        "the 0o600 pin did not land before os.replace published the staged file — "
+        "the token existed under its temp name at the create-time mode"
+    )
+    assert seen.get("fchmod_mode") == 0o600
+    assert (
+        seen.get("mode_at_replace") == 0o600
+    ), f"staged temp was {oct(seen['mode_at_replace'])} at the publish boundary under umask {oct(umask)}"
+
+    # And the guarantees the neighbouring cells already make, held in one place.
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+    assert json.loads(config_file.read_text())["access_token"] == "new-token"
+    assert not [
+        p for p in tmp_path.iterdir() if p.name.startswith(".venya-config-")
+    ], "a staged temp survived the publish"
+
+
+def test_config_env_override(tmp_path: Path) -> None:
+    """VENYA_CONFIG env var overrides default path."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "https://venya-core-1",
+                "access_token": "env-token",
+            }
+        )
+    )
+    with patch.dict(os.environ, {"VENYA_CONFIG": str(config_file)}):
+        config = MCPConfig()
+        assert config.access_token == "env-token"
+
+
+# --- TLS bootstrap tests ---
+
+
+def test_bootstrap_tls_verify_with_ca_cert(tmp_path: Path) -> None:
+    """VENYA_CA_CERT set → returns that path."""
+    ca_file = tmp_path / "ca-bundle.crt"
+    ca_file.write_text("fake-ca")
+    with patch.dict(os.environ, {"VENYA_CA_CERT": str(ca_file)}):
+        result = _bootstrap_tls_verify()
+        assert result == str(ca_file)
+
+
+def test_bootstrap_tls_verify_missing_ca_cert_raises() -> None:
+    """No VENYA_CA_CERT → RuntimeError."""
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(RuntimeError, match="VENYA_CA_CERT"):
+            _bootstrap_tls_verify()
+
+
+def test_bootstrap_tls_verify_explicit_false_warns() -> None:
+    """VENYA_TLS_VERIFY=false → returns False with warning."""
+    with patch.dict(os.environ, {"VENYA_TLS_VERIFY": "false"}):
+        result = _bootstrap_tls_verify()
+        assert result is False
+
+
+def test_bootstrap_tls_verify_ca_cert_not_a_file_raises(tmp_path: Path) -> None:
+    """VENYA_CA_CERT points to non-existent file → RuntimeError."""
+    fake_path = str(tmp_path / "does-not-exist.crt")
+    with patch.dict(os.environ, {"VENYA_CA_CERT": fake_path}):
+        with pytest.raises(RuntimeError, match="does not exist"):
+            _bootstrap_tls_verify()
+
+
+# --- Client tests ---
+
+
+@pytest.fixture
+def mock_config(tmp_path: Path) -> MCPConfig:
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "https://venya-core-1",
+                "access_token": "initial-token",
+            }
+        )
+    )
+    return MCPConfig(config_file)
+
+
+def _make_response(status_code: int, body: dict | None = None, text: str = "") -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = body or {}
+    resp.text = text
+    resp.headers = {}
+    return resp
+
+
+async def test_refresh_success(mock_config: MCPConfig) -> None:
+    """401 → POST /auth/refresh 200 → retried request carries new token."""
+    new_token = "refreshed-token"
+
+    # _refresh() calls .post(), _request() calls .request()
+    first_401 = _make_response(401)
+    refresh_resp = _make_response(200, {"access_token": new_token})
+    retry_resp = _make_response(200, {"data": "success"})
+
+    mock_http = MagicMock()
+    mock_http.post = AsyncMock(return_value=refresh_resp)
+    mock_http.request = AsyncMock(side_effect=[first_401, retry_resp])
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    result = await client._request("GET", "/api/v1/test")
+    assert result == {"data": "success"}
+    assert client._access_token == new_token
+
+    # Verify token was persisted to disk
+    data = json.loads(mock_config.path.read_text())
+    assert data["access_token"] == new_token
+
+
+async def test_refresh_failure_raises_session_expired(mock_config: MCPConfig) -> None:
+    """Refresh returns non-200 → SessionExpiredError."""
+    first_401 = _make_response(401)
+    refresh_fail = _make_response(401)
+
+    mock_http = MagicMock()
+    mock_http.post = AsyncMock(return_value=refresh_fail)
+    mock_http.request = AsyncMock(side_effect=[first_401])
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    with pytest.raises(SessionExpiredError):
+        await client._request("GET", "/api/v1/test")
+
+
+async def test_request_sends_auth_header(mock_config: MCPConfig) -> None:
+    """Normal request includes Authorization header."""
+    ok_resp = _make_response(200, {"ok": True})
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(return_value=ok_resp)
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    await client._request("GET", "/api/v1/test")
+
+    call_kwargs = mock_http.request.call_args[1]
+    assert call_kwargs["headers"]["Authorization"] == "Bearer initial-token"
+
+
+async def test_run_command_execute_leg_gets_long_timeout(mock_config: MCPConfig) -> None:
+    """Execute leg carries the last-fuse timeout; session-create leg does not
+    (ticket cli-execution-timeout-cold-start-default)."""
+    session_resp = _make_response(200, {"session_id": "s1"})
+    exec_resp = _make_response(200, {"exit_code": 0, "stdout": "ok", "stderr": "", "masked_count": 0})
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(side_effect=[session_resp, exec_resp])
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    result = await client.run_command("exec-1", "echo hi", [])
+    assert result["exit_code"] == 0
+
+    session_kwargs = mock_http.request.call_args_list[0][1]
+    exec_kwargs = mock_http.request.call_args_list[1][1]
+    assert exec_kwargs.get("timeout") == 340.0
+    assert "timeout" not in session_kwargs
+
+
+# --- M1 argv split at the MCP client boundary (ticket #322) -----------------
+# The tool surface stays a shell string; the wire carries the argv LIST.
+# Both halves of each truth table, client level (the MCP-only mapping cells
+# live in test_tools.py).
+
+
+def _argv_harness(mock_config: MCPConfig) -> tuple[VenyaClient, MagicMock]:
+    """Client with the two execute-leg responses canned; returns (client, http)."""
+    session_resp = _make_response(200, {"session_id": "s1"})
+    exec_resp = _make_response(200, {"exit_code": 0, "stdout": "ok", "stderr": "", "masked_count": 0})
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(side_effect=[session_resp, exec_resp])
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+    return client, mock_http
+
+
+async def test_run_command_posts_argv_list(mock_config: MCPConfig) -> None:
+    """Positive: a quoted arg with a space posts as ONE exact element —
+    boundaries survive without quoting artifacts in the wire value."""
+    client, mock_http = _argv_harness(mock_config)
+    await client.run_command("exec-1", "grep 'error message' app.log", [])
+    exec_body = mock_http.request.call_args_list[1][1]["json"]
+    assert exec_body["command"] == ["grep", "error message", "app.log"]
+
+
+async def test_run_command_metachar_stays_element_data(mock_config: MCPConfig) -> None:
+    """Split is BOUNDARY-preserving, not sanitizing: `;` inside ONE quoted
+    element posts intact — rejection is the executor's per-element gate
+    (paired negative: executor TestValidateCommandStructure)."""
+    client, mock_http = _argv_harness(mock_config)
+    await client.run_command("exec-1", 'echo "a;b|c"', [])
+    exec_body = mock_http.request.call_args_list[1][1]["json"]
+    assert exec_body["command"] == ["echo", "a;b|c"]
+
+
+async def test_run_command_unterminated_quote_raises_clean_valueerror(mock_config: MCPConfig) -> None:
+    """Negative: an unbalanced quote is a clean ValueError with an actionable
+    message (server.py maps handler exceptions to isError=True) — never a
+    raw shlex traceback, never a POSTed half-parse. Since #415 the argv
+    parse precedes the session POST, so NOTHING is requested: a malformed
+    command must not churn a secret-bound session row awaiting TTL reap."""
+    client, mock_http = _argv_harness(mock_config)
+    with pytest.raises(ValueError, match="Command could not be parsed as a shell line"):
+        await client.run_command("exec-1", 'echo "unclosed', [])
+    # zero legs: parse failed locally, no session POST, nothing on the wire
+    assert mock_http.request.await_count == 0
+
+
+async def test_run_command_valid_path_session_then_execute(mock_config: MCPConfig) -> None:
+    """Paired negative for #415: a parseable command keeps the original
+    order — session POST first, execute POST second, argv on the wire."""
+    client, mock_http = _argv_harness(mock_config)
+    result = await client.run_command("exec-1", "echo hi", ["k1"])
+    assert result["exit_code"] == 0
+    assert mock_http.request.call_args_list[0][0][1].endswith("/api/v1/executors/sessions")
+    session_body = mock_http.request.call_args_list[0][1]["json"]
+    assert session_body == {"executor_id": "exec-1", "secret_keys": ["k1"]}
+    assert mock_http.request.call_args_list[1][0][1].endswith("/execute")
+    assert mock_http.request.call_args_list[1][1]["json"]["command"] == ["echo", "hi"]
+
+
+async def test_run_command_empty_string_posts_empty_argv(mock_config: MCPConfig) -> None:
+    """Empty string posts [] — the server/executor empty-command gate owns
+    the rejection (fail-loudly downstream); the client never invents one."""
+    client, mock_http = _argv_harness(mock_config)
+    await client.run_command("exec-1", "", [])
+    exec_body = mock_http.request.call_args_list[1][1]["json"]
+    assert exec_body["command"] == []
+
+
+async def test_request_without_timeout_keeps_client_default(mock_config: MCPConfig) -> None:
+    """Paired negative: a plain _request must NOT forward timeout=None —
+    httpx reads an explicit None as 'no timeout' and would disable the
+    client default entirely."""
+    ok_resp = _make_response(200, {"ok": True})
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(return_value=ok_resp)
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    await client._request("GET", "/api/v1/test")
+    assert "timeout" not in mock_http.request.call_args[1]
+
+
+async def test_list_secrets_filters(mock_config: MCPConfig) -> None:
+    """executor/purpose/username → params sent; omitted → no params."""
+    secrets_resp = _make_response(200, {"secrets": [{"key": "mysecret", "metadata": {}}]})
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(return_value=secrets_resp)
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    result = await client.list_secrets(executor="web-3", purpose="ssh_login", username="bot")
+    assert len(result) == 1
+
+    # Check params were sent
+    call_kwargs = mock_http.request.call_args[1]
+    assert call_kwargs["params"]["executor"] == "web-3"
+    assert call_kwargs["params"]["purpose"] == "ssh_login"
+    assert call_kwargs["params"]["username"] == "bot"
+
+
+async def test_list_secrets_unwraps_envelope(mock_config: MCPConfig) -> None:
+    """Response envelope {secrets:[...]} → method returns the list."""
+    secrets_resp = _make_response(
+        200,
+        {
+            "secrets": [
+                {"key": "k1", "metadata": {"executor": "web-3"}},
+                {"key": "k2", "metadata": {}},
+            ]
+        },
+    )
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(return_value=secrets_resp)
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    result = await client.list_secrets()
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert result[0]["key"] == "k1"
+
+
+async def test_run_command_two_steps(mock_config: MCPConfig) -> None:
+    """Asserts call order: POST /executors/sessions → POST /executors/{id}/execute."""
+    session_resp = _make_response(201, {"session_id": "sess-123", "executor_id": "exec-1"})
+    execute_resp = _make_response(
+        200,
+        {
+            "exit_code": 0,
+            "stdout": "done",
+            "stderr": "",
+            "masked_count": 1,
+        },
+    )
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(side_effect=[session_resp, execute_resp])
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    result = await client.run_command(
+        executor_id="exec-1",
+        command="ls -la",
+        secret_keys=["my_secret"],
+    )
+
+    assert result["exit_code"] == 0
+    assert result["masked_count"] == 1
+
+    # Verify the two calls in order
+    assert mock_http.request.call_count == 2
+
+    # First call: POST /executors/sessions
+    first_call = mock_http.request.call_args_list[0]
+    assert first_call.args[0] == "POST"
+    assert "/executors/sessions" in first_call.args[1]
+    assert first_call[1]["json"]["secret_keys"] == ["my_secret"]
+
+    # Second call: POST /executors/{id}/execute
+    second_call = mock_http.request.call_args_list[1]
+    assert second_call.args[0] == "POST"
+    assert "/executors/exec-1/execute" in second_call.args[1]
+    assert second_call[1]["json"]["session_id"] == "sess-123"
+
+
+async def test_run_command_no_secrets(mock_config: MCPConfig) -> None:
+    """Skips secret_keys in session body when no keys provided."""
+    session_resp = _make_response(201, {"session_id": "sess-456", "executor_id": "exec-1"})
+    execute_resp = _make_response(
+        200,
+        {
+            "exit_code": 0,
+            "stdout": "ok",
+            "stderr": "",
+            "masked_count": 0,
+        },
+    )
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(side_effect=[session_resp, execute_resp])
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    await client.run_command(executor_id="exec-1", command="echo hello", secret_keys=[])
+
+    first_call = mock_http.request.call_args_list[0]
+    body = first_call[1]["json"]
+    assert body["executor_id"] == "exec-1"
+    assert "secret_keys" not in body
+
+
+async def test_get_audit_params(mock_config: MCPConfig) -> None:
+    """hours/event_type/executor_id/limit → correct query params."""
+    audit_resp = _make_response(200, {"events": []})
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(return_value=audit_resp)
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    await client.get_audit(hours=2, event_type="command_executed", executor_id="exec-1", limit=100)
+
+    call_kwargs = mock_http.request.call_args[1]
+    assert call_kwargs["params"]["hours"] == "2"
+    assert call_kwargs["params"]["event_type"] == "command_executed"
+    assert call_kwargs["params"]["executor_id"] == "exec-1"
+    assert call_kwargs["params"]["limit"] == "100"
+
+
+async def test_get_audit_unwraps_envelope(mock_config: MCPConfig) -> None:
+    """Response envelope {events:[...]} → method returns the list."""
+    audit_resp = _make_response(
+        200,
+        {
+            "events": [
+                {
+                    "event_type": "command_executed",
+                    "user_id": "alice",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "fields": {"executor_id": "exec-1"},
+                },
+            ]
+        },
+    )
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(return_value=audit_resp)
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    result = await client.get_audit()
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert result[0]["event_type"] == "command_executed"
+
+
+async def test_api_error(mock_config: MCPConfig) -> None:
+    """Non-401 error responses raise VenyaAPIError."""
+    error_resp = _make_response(500, {"detail": "Internal server error"})
+    error_resp.headers = {"content-type": "application/json"}
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(return_value=error_resp)
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    with pytest.raises(VenyaAPIError) as exc_info:
+        await client._request("GET", "/api/v1/test")
+
+    assert exc_info.value.status_code == 500
+    assert "Internal server error" in str(exc_info.value)
+
+
+# --- HTTPS scheme guard on server_url (#540) ---
+#
+# Truth table for the guard at the MCPConfig.server_url choke point: the
+# positive halves (https URL, shipped default) and the negative halves
+# (http, uppercase, no scheme, non-string) both ship, per the AGENTS.md
+# filter/gate rule. The refusal must land BEFORE any dial leaves — an
+# http:// entry otherwise sends the bearer token and every tool call in
+# cleartext.
+
+
+def _write_url_config(tmp_path: Path, server_url: object) -> MCPConfig:
+    """Real MCPConfig from tmp JSON — the file's own fixture shape (#540)."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"server_url": server_url, "access_token": "initial-token"}))
+    return MCPConfig(config_file)
+
+
+def test_server_url_https_allowed_unchanged(tmp_path: Path) -> None:
+    """POSITIVE: an https:// config passes the guard — the working case is not bricked."""
+    config = _write_url_config(tmp_path, "https://venya-core-1")
+    assert config.server_url == "https://venya-core-1"
+
+
+def test_server_url_default_localhost_allowed(tmp_path: Path) -> None:
+    """POSITIVE: the shipped default (no server_url key) still passes the guard."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"access_token": "initial-token"}))
+    config = MCPConfig(config_file)
+    assert config.server_url == "https://localhost"
+
+
+@pytest.mark.parametrize("bad_url", ["http://venya-core-1", "HTTP://venya-core-1", "venya-core-1", 8443])
+def test_server_url_non_https_refused(tmp_path: Path, bad_url: object) -> None:
+    """NEGATIVE: http, uppercase-HTTP, no-scheme and non-string values are refused."""
+    config = _write_url_config(tmp_path, bad_url)
+    with pytest.raises(InsecureServerURLError) as exc_info:
+        _ = config.server_url
+    assert "server URL must be https://" in str(exc_info.value)
+    assert "mcp-dial-missing-https-guard" in str(exc_info.value)
+
+
+async def test_refusal_happens_before_any_connection_attempt(tmp_path: Path) -> None:
+    """The guard trips while the URL f-string is composed — no request is ever issued.
+
+    Tripwire: client._http is replaced with mocks that FAIL the test if
+    called. Both dials (token refresh at client.py:141, tool call at
+    client.py:180) read config.server_url first, so the raise lands and the
+    tripwire stays uncalled.
+    """
+    config = _write_url_config(tmp_path, "http://venya-core-1")
+    client = VenyaClient(config, verify=False)
+    tripwire_post = AsyncMock(side_effect=AssertionError("dial attempted before guard"))
+    tripwire_request = AsyncMock(side_effect=AssertionError("dial attempted before guard"))
+    client._http = MagicMock(post=tripwire_post, request=tripwire_request)
+
+    with pytest.raises(InsecureServerURLError):
+        await client._refresh()
+    with pytest.raises(InsecureServerURLError):
+        await client._request("GET", "/api/v1/test")
+
+    assert tripwire_post.await_count == 0
+    assert tripwire_request.await_count == 0
+
+
+def test_refusal_text_excludes_bearer_token(tmp_path: Path) -> None:
+    """Truth-table half: the refusal names the bad URL but never leaks the token."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "http://venya-core-1",
+                "access_token": "super-secret-token-xyz",
+            }
+        )
+    )
+    config = MCPConfig(config_file)
+    with pytest.raises(InsecureServerURLError) as exc_info:
+        _ = config.server_url
+    assert "super-secret-token-xyz" not in str(exc_info.value)
+    assert "http://venya-core-1" in str(exc_info.value)
+
+
+def test_mcp_refusal_wording_matches_cli_copy() -> None:
+    """The mcp _https_refusal is pinned to the CLI template — one wording, no variant.
+
+    Same arrangement as test_config_path.py pins default_config_dir: the
+    product copies are separate (mcp does not depend on venya-cli), the test
+    compares them. venya_cli is imported HERE (test code), never in product
+    code.
+    """
+    from venya_cli.commands import _https_refusal as cli_refusal
+
+    for site in ("a", "the Venya MCP server dial"):
+        for ticket in ("cli-dial-sites-missing-https-guard", "mcp-dial-missing-https-guard"):
+            for detail in ("", "carries your bearer token"):
+                assert _https_refusal("http://x", site=site, ticket=ticket, detail=detail) == cli_refusal(
+                    "http://x", site=site, ticket=ticket, detail=detail
+                )

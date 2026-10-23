@@ -1,0 +1,1032 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Tests for ReaperLoop thread lifecycle and ExecutorDaemon signal handling.
+
+Tests ReaperLoop.start()/stop(), _run() loop behavior, and ExecutorDaemon
+methods: _main_loop(), _send_heartbeat(), _handle_signal(), stop(),
+_write_pidfile(), _remove_pidfile().
+"""
+
+import logging
+import os
+import signal
+import time
+from datetime import UTC
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import httpx2
+import pytest
+from cryptography.hazmat.primitives import hashes
+
+from executor.command_validator import DEFAULT_DANGEROUS_PATTERNS, DEFAULT_TRUSTED_PATHS
+from executor.config import SANDBOX_MEMORY_DEFAULT_MB, ExecutorConfig, ReaperConfig
+from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop, RevocationStatus
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def config() -> ExecutorConfig:
+    return ExecutorConfig(
+        server_url="https://example.com",
+        executor_id="test-executor",
+        reaper=ReaperConfig(check_interval=0.1, secret_ttl_seconds=1),
+    )
+
+
+@pytest.fixture()
+def state() -> DaemonState:
+    return DaemonState()
+
+
+@pytest.fixture()
+def tmpfs_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "venya-secrets"
+    d.mkdir()
+    return d
+
+
+# ---------------------------------------------------------------------------
+# ReaperLoop thread lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestReaperLoopLifecycle:
+    """Tests for ReaperLoop.start() and stop()."""
+
+    def test_start_creates_and_starts_thread(self, config: ExecutorConfig, state: DaemonState, tmpfs_dir: Path):
+        """start() creates a daemon thread and starts it."""
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        reaper.start()
+        time.sleep(0.2)  # Give thread time to start
+
+        assert reaper._thread is not None
+        assert reaper._thread.is_alive()
+        assert reaper._thread.daemon is True
+        assert reaper._thread.name == "venya-reaper"
+
+        reaper.stop()
+
+    def test_stop_terminates_thread(self, config: ExecutorConfig, state: DaemonState, tmpfs_dir: Path):
+        """stop() sets the stop event and joins the thread."""
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        reaper.start()
+        time.sleep(0.2)
+        assert reaper._thread.is_alive()
+
+        reaper.stop()
+        assert not reaper._thread.is_alive()
+
+    def test_stop_without_start(self, config: ExecutorConfig, state: DaemonState, tmpfs_dir: Path):
+        """stop() without start() does not raise."""
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        reaper.stop()  # Should not raise
+
+    def test_start_clears_stop_event(self, config: ExecutorConfig, state: DaemonState, tmpfs_dir: Path):
+        """start() clears the stop event for restart."""
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        reaper.start()
+        time.sleep(0.2)
+        reaper.stop()
+
+        # Restart should work
+        reaper.start()
+        time.sleep(0.2)
+        assert reaper._thread.is_alive()
+        reaper.stop()
+
+    def test_run_loop_checks_orphaned_each_iteration(self, config: ExecutorConfig, state: DaemonState, tmpfs_dir: Path):
+        """_run() calls _check_orphaned on each iteration."""
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        with patch.object(reaper, "_check_orphaned") as mock_check:
+            reaper.start()
+            time.sleep(0.5)  # Should run at least a couple iterations (interval=0.1)
+            reaper.stop()
+
+            assert mock_check.call_count >= 1
+
+    def test_run_loop_exits_on_stop_event(self, config: ExecutorConfig, state: DaemonState, tmpfs_dir: Path):
+        """_run() exits when stop event is set."""
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        reaper.start()
+        time.sleep(0.15)
+        reaper.stop()
+
+        # Thread should have exited
+        assert not reaper._thread.is_alive()
+
+    def test_run_loop_catches_exceptions(self, config: ExecutorConfig, state: DaemonState, tmpfs_dir: Path):
+        """_run() catches exceptions in _check_orphaned and continues."""
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        call_count = [0]
+
+        def fail_once():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("Test error")
+
+        with patch.object(reaper, "_check_orphaned", side_effect=fail_once):
+            reaper.start()
+            time.sleep(0.5)  # Should continue after exception
+            reaper.stop()
+
+            # Should have been called at least twice (exception + recovery)
+            assert call_count[0] >= 2
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon._send_heartbeat
+# ---------------------------------------------------------------------------
+
+
+class TestSendHeartbeat:
+    """Tests for ExecutorDaemon._send_heartbeat()."""
+
+    def test_heartbeat_sends_fingerprint(self, config: ExecutorConfig, tmp_path: Path):
+        """_send_heartbeat posts fingerprint to server."""
+
+        # Create a real cert so get_fingerprint returns non-empty
+        from executor.daemon import _create_csr, _generate_ecdsa_p256_keypair
+
+        key = _generate_ecdsa_p256_keypair()
+        _create_csr(key, "test-exec")
+
+        # Create a self-signed cert for testing
+        from datetime import datetime, timedelta
+
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+
+        now = datetime.now(UTC)
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-exec"),
+            ]
+        )
+        test_cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=30))
+            .sign(key, hashes.SHA256())
+        )
+
+        cert_path = str(tmp_path / "executor.crt")
+        key_path = str(tmp_path / "executor.key")
+        ca_path = str(tmp_path / "ca.crt")
+
+        from cryptography.hazmat.primitives import serialization
+
+        Path(cert_path).write_bytes(test_cert.public_bytes(serialization.Encoding.PEM))
+        Path(key_path).write_bytes(
+            key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+        Path(ca_path).write_bytes(test_cert.public_bytes(serialization.Encoding.PEM))
+
+        config.mtls.cert = cert_path
+        config.mtls.key = key_path
+        config.mtls.ca_cert = ca_path
+
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+
+        daemon._send_heartbeat()
+
+        daemon.client.post.assert_called_once()
+        call_args = daemon.client.post.call_args
+        assert call_args[0][0] == "/api/v1/heartbeat"
+        payload = call_args[1]["json"]
+        assert payload["executor_id"] == "test-executor"
+        assert len(payload["cert_fingerprint"]) == 64  # SHA-256 hex
+
+    def test_heartbeat_handles_connection_error(self, config: ExecutorConfig):
+        """_send_heartbeat logs debug on connection error, does not raise."""
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        daemon.client.post.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
+
+        # Should not raise
+        daemon._send_heartbeat()
+
+    def test_heartbeat_with_no_cert(self, config: ExecutorConfig):
+        """_send_heartbeat sends empty fingerprint when no cert exists."""
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+
+        daemon._send_heartbeat()
+
+        daemon.client.post.assert_called_once()
+        payload = daemon.client.post.call_args[1]["json"]
+        assert payload["cert_fingerprint"] == ""
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon._send_heartbeat — revoked-flag consumption
+# (executor-revocation-by-identity ruling 4, F3 ride-along)
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatRevokedFlag:
+    """The daemon CONSUMES the heartbeat response's revoked flag (previously
+    discarded): a fast cooperative stop between revocation-list polls. The
+    poll remains authoritative; a malformed body must never kill the beat."""
+
+    def _daemon(self, config, resp_json):
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        resp = MagicMock()
+        resp.json.return_value = resp_json
+        daemon.client.post.return_value = resp
+        return daemon
+
+    def test_revoked_flag_sets_state(self, config: ExecutorConfig):
+        daemon = self._daemon(config, {"revoked": True, "new_cert_required": False})
+        daemon._send_heartbeat()
+        assert daemon.state.revoked is True
+
+    def test_clean_flag_leaves_state(self, config: ExecutorConfig):
+        daemon = self._daemon(config, {"revoked": False, "new_cert_required": False})
+        daemon._send_heartbeat()
+        assert daemon.state.revoked is False
+
+    def test_malformed_body_never_kills_beat(self, config: ExecutorConfig):
+        daemon = self._daemon(config, None)
+        daemon.client.post.return_value.json.side_effect = ValueError("no json here")
+        daemon._send_heartbeat()  # must not raise
+        assert daemon.state.revoked is False
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon._submit_heartbeat (bounded-heartbeat backpressure guard)
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitHeartbeatBackpressure:
+    """_submit_heartbeat skips + warns when the prior beat is still in flight.
+
+    Ticket daemon-heartbeat-unbounded-queue: the heartbeat is fire-and-forget
+    into a 2-worker pool with an UNBOUNDED work queue. At default config the
+    per-request timeout (10s) is shorter than the ~30s cadence, so it self-limits
+    -- but if request_timeout_seconds is raised above the cadence AND the server
+    stalls the heartbeat POST, beats stack silently. The guard makes the bound
+    structural (at most one in flight) instead of timing-dependent, and fails
+    loudly on every skip.
+    """
+
+    def test_no_prior_future_submits(self, config: ExecutorConfig):
+        """First beat (no prior future) -> submitted, future recorded."""
+        daemon = ExecutorDaemon(config)
+        daemon._http_executor = MagicMock()
+        fut = MagicMock()
+        daemon._http_executor.submit.return_value = fut
+
+        daemon._submit_heartbeat()
+
+        daemon._http_executor.submit.assert_called_once()
+        assert daemon._heartbeat_future is fut
+
+    def test_prior_done_submits_again(self, config: ExecutorConfig):
+        """Prior beat completed -> next beat submitted normally (no false skip)."""
+        daemon = ExecutorDaemon(config)
+        daemon._http_executor = MagicMock()
+        prior = MagicMock()
+        prior.done.return_value = True
+        daemon._heartbeat_future = prior
+        new_fut = MagicMock()
+        daemon._http_executor.submit.return_value = new_fut
+
+        daemon._submit_heartbeat()
+
+        daemon._http_executor.submit.assert_called_once()
+        assert daemon._heartbeat_future is new_fut
+
+    def test_prior_in_flight_skips_and_warns(self, config: ExecutorConfig, caplog):
+        """LOAD-BEARING: prior beat still running -> skip (do NOT queue) + warn."""
+        daemon = ExecutorDaemon(config)
+        daemon._http_executor = MagicMock()
+        inflight = MagicMock()
+        inflight.done.return_value = False
+        daemon._heartbeat_future = inflight
+
+        with caplog.at_level(logging.WARNING):
+            daemon._submit_heartbeat()
+
+        daemon._http_executor.submit.assert_not_called()  # skipped, not queued
+        assert daemon._heartbeat_future is inflight  # unchanged
+        assert any("still in flight" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon._handle_signal
+# ---------------------------------------------------------------------------
+
+
+class TestHandleSignal:
+    """Tests for ExecutorDaemon._handle_signal()."""
+
+    def test_handle_signal_sets_running_false(self, config: ExecutorConfig):
+        """_handle_signal sets state.running to False."""
+        daemon = ExecutorDaemon(config)
+        daemon.state.running = True
+
+        daemon._handle_signal(signal.SIGTERM, None)
+
+        assert daemon.state.running is False
+
+    def test_handle_signal_sets_shutdown_event(self, config: ExecutorConfig):
+        """_handle_signal sets the shutdown event."""
+        daemon = ExecutorDaemon(config)
+        daemon._shutdown_event.clear()
+
+        daemon._handle_signal(signal.SIGTERM, None)
+
+        assert daemon._shutdown_event.is_set()
+
+    def test_handle_signal_logs(self, config: ExecutorConfig, caplog):
+        """_handle_signal logs the received signal."""
+        caplog.set_level("INFO", logger="venya.executor.daemon")
+
+        daemon = ExecutorDaemon(config)
+        daemon._handle_signal(signal.SIGTERM, None)
+
+        assert "SIGTERM" in caplog.text
+        assert "shutdown" in caplog.text.lower()
+
+    def test_handle_signal_sigint(self, config: ExecutorConfig):
+        """_handle_signal works with SIGINT."""
+        daemon = ExecutorDaemon(config)
+        daemon.state.running = True
+
+        daemon._handle_signal(signal.SIGINT, None)
+
+        assert daemon.state.running is False
+        assert daemon._shutdown_event.is_set()
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon._write_pidfile / _remove_pidfile
+# ---------------------------------------------------------------------------
+
+
+class TestPidfile:
+    """Tests for PID file management."""
+
+    def test_write_pidfile(self, tmp_path: Path, config: ExecutorConfig):
+        """_write_pidfile creates PID file with current PID."""
+        daemon = ExecutorDaemon(config)
+        daemon.config.pid_file = str(tmp_path / "executor.pid")
+
+        daemon._write_pidfile()
+
+        pid_file = Path(daemon.config.pid_file)
+        assert pid_file.exists()
+        assert pid_file.read_text() == str(os.getpid())
+
+    def test_write_pidfile_creates_parent_dirs(self, tmp_path: Path, config: ExecutorConfig):
+        """_write_pidfile creates parent directories if needed."""
+        daemon = ExecutorDaemon(config)
+        daemon.config.pid_file = str(tmp_path / "nested" / "deep" / "executor.pid")
+
+        daemon._write_pidfile()
+
+        assert Path(daemon.config.pid_file).exists()
+
+    def test_remove_pidfile(self, tmp_path: Path, config: ExecutorConfig):
+        """_remove_pidfile removes the PID file."""
+        daemon = ExecutorDaemon(config)
+        daemon.config.pid_file = str(tmp_path / "executor.pid")
+
+        daemon._write_pidfile()
+        assert Path(daemon.config.pid_file).exists()
+
+        daemon._remove_pidfile()
+        assert not Path(daemon.config.pid_file).exists()
+
+    def test_remove_pidfile_missing(self, config: ExecutorConfig):
+        """_remove_pidfile does not raise if file doesn't exist."""
+        daemon = ExecutorDaemon(config)
+        daemon.config.pid_file = "/tmp/nonexistent-venya-pid-12345.pid"
+
+        daemon._remove_pidfile()  # Should not raise
+
+    def test_remove_pidfile_nonexistent(self, tmp_path: Path, config: ExecutorConfig):
+        """_remove_pidfile does not raise for already-deleted file."""
+        daemon = ExecutorDaemon(config)
+        daemon.config.pid_file = str(tmp_path / "executor.pid")
+
+        daemon._write_pidfile()
+        os.unlink(daemon.config.pid_file)
+
+        daemon._remove_pidfile()  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon.stop()
+# ---------------------------------------------------------------------------
+
+
+class TestDaemonStop:
+    """Tests for ExecutorDaemon.stop()."""
+
+    def test_stop_stops_reaper(self, config: ExecutorConfig, tmpfs_dir: Path):
+        """stop() stops the reaper loop."""
+        daemon = ExecutorDaemon(config)
+        daemon.reaper.tmpfs_dir = str(tmpfs_dir)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        daemon.reaper.start()
+        time.sleep(0.2)
+        assert daemon.reaper._thread.is_alive()
+
+        daemon.stop()
+
+        assert not daemon.reaper._thread.is_alive()
+
+    def test_stop_closes_client(self, config: ExecutorConfig):
+        """stop() closes the HTTP client."""
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+
+        daemon.stop()
+
+        daemon.client.close.assert_called_once()
+
+    def test_stop_removes_pidfile(self, tmp_path: Path, config: ExecutorConfig):
+        """stop() removes the PID file."""
+        daemon = ExecutorDaemon(config)
+        daemon.config.pid_file = str(tmp_path / "executor.pid")
+        daemon.client = MagicMock(spec=httpx2.Client)
+
+        daemon._write_pidfile()
+        daemon.stop()
+
+        assert not Path(daemon.config.pid_file).exists()
+
+    def test_stop_logs(self, config: ExecutorConfig, caplog):
+        """stop() logs start and completion."""
+        caplog.set_level("INFO", logger="venya.executor.daemon")
+
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+
+        daemon.stop()
+
+        assert "Stopping executor daemon" in caplog.text
+        assert "Executor daemon stopped" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon._main_loop
+# ---------------------------------------------------------------------------
+
+
+class TestMainLoop:
+    """Tests for ExecutorDaemon._main_loop()."""
+
+    def test_main_loop_exits_when_revoked(self, config: ExecutorConfig):
+        """_main_loop() exits when check_revocation returns True."""
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        daemon.state.running = True
+
+        with patch.object(daemon.cert_manager, "needs_rotation", return_value=False):
+            with patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.REVOKED):
+                with patch.object(daemon, "_send_heartbeat"):
+                    with patch.object(daemon._shutdown_event, "wait", return_value=False):
+                        daemon._main_loop()
+
+        assert daemon.state.revoked is True
+
+    def test_main_loop_exits_when_stopped(self, config: ExecutorConfig):
+        """_main_loop() exits when state.running is False."""
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+
+        # Set running to False immediately — loop should not enter
+        with patch.object(daemon.cert_manager, "needs_rotation", return_value=False):
+            with patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED):
+                with patch.object(daemon._shutdown_event, "wait", return_value=False):
+                    daemon._main_loop()
+
+        # Loop should exit immediately without calling heartbeat
+        with patch.object(daemon, "_send_heartbeat") as mock_hb:
+            daemon.state.running = False
+            daemon._main_loop()
+        mock_hb.assert_not_called()
+
+    def test_main_loop_sends_heartbeat(self, config: ExecutorConfig):
+        """_main_loop() calls _send_heartbeat each iteration."""
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        daemon.state.running = True
+
+        call_count = [0]
+
+        def set_running_false():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                daemon.state.running = False
+
+        with patch.object(daemon.cert_manager, "needs_rotation", return_value=False):
+            with patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED):
+                with patch.object(daemon, "_send_heartbeat", side_effect=set_running_false):
+                    with patch.object(daemon._shutdown_event, "wait", return_value=False):
+                        daemon._main_loop()
+
+        assert call_count[0] >= 2
+
+    def test_main_loop_rotates_cert_when_needed(self, config: ExecutorConfig):
+        """_main_loop() rotates certificate when needs_rotation returns True."""
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        daemon.state.running = True
+
+        rotate_called = [False]
+
+        def do_rotate():
+            rotate_called[0] = True
+            daemon.state.running = False
+
+        with patch.object(daemon.cert_manager, "needs_rotation", return_value=True):
+            with patch.object(daemon.cert_manager, "rotate", side_effect=do_rotate):
+                with patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED):
+                    with patch.object(daemon, "_send_heartbeat"):
+                        with patch.object(daemon._shutdown_event, "wait", return_value=False):
+                            daemon._main_loop()
+
+        assert rotate_called[0] is True
+
+    def _run_one_rotation(self, daemon, old_client, new_client):
+        """Drive _main_loop() through exactly one rotation, then shutdown."""
+
+        def do_rotate():
+            daemon.state.running = False
+
+        with (
+            patch.object(daemon.cert_manager, "needs_rotation", return_value=True),
+            patch.object(daemon.cert_manager, "rotate", side_effect=do_rotate),
+            patch.object(daemon, "_create_mtls_client", return_value=new_client),
+            patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED),
+            patch.object(daemon, "_send_heartbeat"),
+            patch.object(daemon._shutdown_event, "wait", return_value=False),
+        ):
+            daemon._main_loop()
+
+    def test_rotation_closes_pre_rotation_client(self, config: ExecutorConfig):
+        """T1 (#178 residual): rotation swaps ALL references onto the new
+        client AND closes the pre-rotation client exactly once — the
+        never-closed orphan lingered with the revoked cert until daemon
+        stop."""
+        daemon = ExecutorDaemon(config)
+        old_client = MagicMock(spec=httpx2.Client)
+        new_client = MagicMock(spec=httpx2.Client)
+        daemon.client = old_client
+        daemon.state.running = True
+
+        self._run_one_rotation(daemon, old_client, new_client)
+
+        assert daemon.client is new_client
+        assert daemon.cert_manager.client is new_client
+        assert daemon.reaper.http_client is new_client
+        old_client.close.assert_called_once_with()
+        new_client.close.assert_not_called()
+
+    def test_rotation_closes_old_client_only_after_reference_swap(self, config: ExecutorConfig):
+        """T2 (#178 residual): the close is the LAST swap step — at the
+        moment .close() fires, every consumer reference already points at
+        the new client (an early close would race the reaper thread into a
+        closed client)."""
+        daemon = ExecutorDaemon(config)
+        old_client = MagicMock(spec=httpx2.Client)
+        new_client = MagicMock(spec=httpx2.Client)
+        daemon.client = old_client
+        daemon.state.running = True
+
+        seen: dict = {}
+        old_client.close.side_effect = lambda: seen.update(
+            self_client=daemon.client is new_client,
+            cert_manager=daemon.cert_manager.client is new_client,
+            reaper=daemon.reaper.http_client is new_client,
+        )
+
+        self._run_one_rotation(daemon, old_client, new_client)
+
+        assert seen == {"self_client": True, "cert_manager": True, "reaper": True}
+
+    def test_rotation_survives_close_failure(self, config: ExecutorConfig, caplog):
+        """T3 (#178 residual): a raising old-client .close() is swallowed
+        with a warning — rotation still lands the new references and the
+        main loop never aborts."""
+        daemon = ExecutorDaemon(config)
+        old_client = MagicMock(spec=httpx2.Client)
+        old_client.close.side_effect = RuntimeError("close boom")
+        new_client = MagicMock(spec=httpx2.Client)
+        daemon.client = old_client
+        daemon.state.running = True
+
+        with caplog.at_level(logging.WARNING, logger="venya.executor.daemon"):
+            self._run_one_rotation(daemon, old_client, new_client)
+
+        assert daemon.client is new_client
+        assert daemon.reaper.http_client is new_client
+        assert any("pre-rotation client close failed" in r.getMessage() for r in caplog.records)
+
+    def test_non_rotating_iteration_touches_no_clients(self, config: ExecutorConfig):
+        """T4 (paired negative): without needs_rotation the loop creates NO
+        client and closes NOTHING — the handoff lives only in the rotation
+        block."""
+        daemon = ExecutorDaemon(config)
+        old_client = MagicMock(spec=httpx2.Client)
+        daemon.client = old_client
+        daemon.state.running = True
+
+        call_count = [0]
+
+        def stop_after_two():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                daemon.state.running = False
+
+        with (
+            patch.object(daemon.cert_manager, "needs_rotation", return_value=False),
+            patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED),
+            patch.object(daemon, "_create_mtls_client") as create_mock,
+            patch.object(daemon, "_send_heartbeat", side_effect=stop_after_two),
+            patch.object(daemon._shutdown_event, "wait", return_value=False),
+        ):
+            daemon._main_loop()
+
+        create_mock.assert_not_called()
+        old_client.close.assert_not_called()
+        assert daemon.client is old_client
+
+    def test_rotation_with_no_prior_client_skips_close(self, config: ExecutorConfig):
+        """T5 (None-safety pin): the outgoing client is only closed when one
+        exists. The registration site is None-safe by inspection — start()
+        initializes self.client=None and :1101 is its FIRST assignment
+        (register() uses throwaway clients, never self.client) — so no swap
+        there orphans; this cell pins the guard the rotation code relies on
+        staying None-safe if a rotation ever runs before an assignment."""
+        daemon = ExecutorDaemon(config)
+        new_client = MagicMock(spec=httpx2.Client)
+        daemon.client = None
+        daemon.state.running = True
+
+        self._run_one_rotation(daemon, None, new_client)
+
+        assert daemon.client is new_client
+        assert daemon.cert_manager.client is new_client
+        assert daemon.reaper.http_client is new_client
+        new_client.close.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ReaperLoop._check_orphaned — real sbx layout (ticket daemon-reaper-phantom-session)
+# ---------------------------------------------------------------------------
+
+
+class TestReaperOrphanCleanup:
+    """_check_orphaned against session_<server-session-id>_<rand> dirs."""
+
+    def _session_dir(self, base: Path, session_id: str, secret_ids: list, age: float = 10.0) -> Path:
+        d = base / f"session_{session_id}_abcd1234"
+        d.mkdir()
+        for sid in secret_ids:
+            (d / sid).write_bytes(b"x")
+        old = time.time() - age
+        os.utime(d, (old, old))
+        return d
+
+    def test_aged_session_dir_deleted_and_revoked_under_real_session(self, config, state, tmpfs_dir):
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        d = self._session_dir(tmpfs_dir, sid, ["7", "3"])
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert not d.exists()
+        client.post.assert_called_once()
+        args, kwargs = client.post.call_args
+        assert args[0] == f"/api/v1/sessions/{sid}/secrets/revoke"
+        assert kwargs["json"] == {"secret_ids": ["3", "7"]}  # sorted, real ids from dir children
+
+    def test_fresh_session_dir_untouched(self, config, state, tmpfs_dir):
+        d = self._session_dir(tmpfs_dir, "fresh-sid", ["1"], age=0.0)
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert d.exists()
+        client.post.assert_not_called()
+
+    def test_foreign_entries_ignored(self, config, state, tmpfs_dir):
+        legacy = tmpfs_dir / "venya_1_x.secret"
+        legacy.write_bytes(b"x")
+        old = time.time() - 10
+        os.utime(legacy, (old, old))
+        other = tmpfs_dir / "not-a-session"
+        other.mkdir()
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert legacy.exists()
+        assert other.exists()
+        client.post.assert_not_called()
+
+    def test_unparseable_name_deleted_without_revoke(self, config, state, tmpfs_dir):
+        d = tmpfs_dir / "session_x"
+        d.mkdir()
+        (d / "9").write_bytes(b"x")
+        old = time.time() - 10
+        os.utime(d, (old, old))
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert not d.exists()  # cleanup still happens
+        client.post.assert_not_called()  # but no phantom-session revoke
+
+    def test_revoke_failure_does_not_crash_loop(self, config, state, tmpfs_dir):
+        d = self._session_dir(tmpfs_dir, "sid-fail", ["2"])
+        client = MagicMock()
+        client.post.side_effect = RuntimeError("server down")
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()  # must not raise
+
+        assert not d.exists()
+
+    def test_no_http_client_deletes_without_revoke(self, config, state, tmpfs_dir):
+        d = self._session_dir(tmpfs_dir, "sid-noclient", ["4"])
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        reaper._check_orphaned()
+
+        assert not d.exists()
+
+    def test_rand_suffix_with_underscore_still_parses(self, config, state, tmpfs_dir):
+        """mkdtemp rand charset includes '_' — parse must not swallow it into
+        the session id (regression: join(parts[1:-1]) broke on such suffixes)."""
+        d = tmpfs_dir / "session_11111111-2222-3333-4444-555555555555_t7bzq8n_"
+        d.mkdir()
+        (d / "5").write_bytes(b"x")
+        old = time.time() - 10
+        os.utime(d, (old, old))
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert not d.exists()
+        args, _ = client.post.call_args
+        assert args[0] == "/api/v1/sessions/11111111-2222-3333-4444-555555555555/secrets/revoke"
+
+    def test_default_base_is_the_sbx_writer_base(self, config, state):
+        # Compare in the daemon module's namespace: conftest patches the
+        # sbx_strategy attribute per-test, but the ReaperLoop default binds
+        # the daemon-side import — that binding is the wiring under test.
+        import executor.daemon as daemon_mod
+
+        reaper = ReaperLoop(config, state)
+        assert reaper.tmpfs_dir == daemon_mod.SECRET_TMPFS_BASE
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon.create_executor — config knob plumbing
+# (ticket executor-dns-resolver-config-inert)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateExecutorPlumbing:
+    """create_executor must wire the config's dns_resolver /
+    egress_allowlist_path into the SbxStrategy (previously it constructed a
+    bare SbxStrategy() and the hardcoded values won)."""
+
+    def test_create_executor_plumbs_config_knobs(self, config: ExecutorConfig):
+        config.dns_resolver = "198.51.100.53"
+        config.egress_allowlist_path = "/tmp/venya-t5.txt"
+
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        with patch("shutil.which", return_value="/usr/bin/sbx"):
+            executor = daemon.create_executor("sess-1")
+
+        strategy = executor.injection_strategy
+        assert strategy.dns_resolver == "198.51.100.53"
+        assert strategy.egress_allowlist_path == "/tmp/venya-t5.txt"
+
+    # ------------------------------------------------------------------ #643
+    # The third knob the same line carries was unpinned. Measured before these cells existed:
+    # deleting `sandbox_memory_mb=self.config.sandbox_memory_mb` from ExecutorDaemon.create_executor
+    # (daemon.py:1874 at dev d9a4f36) left the four files that could have caught it reading
+    # IDENTICAL — 3 failed, 192 passed, 16 errors, same node ids — because the only cell that pins
+    # the argv re-plays the daemon's call by hand (`SbxStrategy(sandbox_memory_mb=cfg.sandbox_memory_mb)`,
+    # test_sbx_strategy.py:440) instead of going through create_executor(). These three cells make
+    # the daemon hop the subject, not an assumption.
+
+    def _daemon(self, config: ExecutorConfig) -> ExecutorDaemon:
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        return daemon
+
+    def test_create_executor_plumbs_the_memory_cap_into_the_emitted_argv(self, config: ExecutorConfig):
+        """POSITIVE, non-default value: what the operator configured must be what `sbx` is given.
+
+        2048 and not 1024 on purpose — a hardcoded cap at the daemon would pass a default-value
+        assertion while silently outranking the operator (the exact defect this class's docstring says
+        it exists to prevent: "previously it constructed a bare SbxStrategy() and the hardcoded values
+        won"). Asserted on the strategy create_executor BUILT, and then on the argv that strategy
+        emits.
+        """
+        config.sandbox_memory_mb = 2048
+        with patch("shutil.which", return_value="/usr/bin/sbx"):
+            strategy = self._daemon(config).create_executor("sess-mem").injection_strategy
+
+        assert strategy.sandbox_memory_mb == 2048, (
+            "the daemon did not carry the configured cap to the strategy — a dropped "
+            "sandbox_memory_mb kwarg in ExecutorDaemon.create_executor falls back to the constructor "
+            "default (None) and every session then refuses at create (#643)"
+        )
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.create_sandbox("venya-mem", "/workspace")
+        argv = mock_run.call_args_list[0][0][0]
+        assert argv == [
+            "sbx",
+            "create",
+            "--name",
+            "venya-mem",
+            "--memory",
+            f"{config.sandbox_memory_mb}m",
+            "shell",
+            "/workspace",
+        ], f"the daemon-built strategy emitted {argv!r} — the configured cap did not reach the argument"
+
+    def test_create_executor_shipped_default_reaches_the_argv_too(self, config: ExecutorConfig):
+        """SECOND POSITIVE: the shipped default, through the daemon, in the vendor's unit form.
+
+        `config` carries no sandbox_memory_mb (the package fixture never sets it), so this is the
+        fresh-install path: 1024 -> `--memory 1024m`, with no operator action in between.
+        """
+        assert config.sandbox_memory_mb == SANDBOX_MEMORY_DEFAULT_MB
+        with patch("shutil.which", return_value="/usr/bin/sbx"):
+            strategy = self._daemon(config).create_executor("sess-def").injection_strategy
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.create_sandbox("venya-def", "/workspace")
+        assert mock_run.call_args_list[0][0][0][5] == f"{SANDBOX_MEMORY_DEFAULT_MB}m", (
+            f"the daemon-built strategy's create argv carried {mock_run.call_args_list[0][0][0][5]!r}, "
+            f"not the shipped {SANDBOX_MEMORY_DEFAULT_MB}m — the default stopped reaching the vendor flag"
+        )
+
+    def test_create_executor_refuses_when_the_operator_nulled_the_cap(self, config: ExecutorConfig):
+        """PAIRED NEGATIVE: an explicit null through the DAEMON must still refuse, and never spawn.
+
+        This is the cell that stops the hop from being "fixed" with a fallback default at the daemon.
+        A hardcoded `sandbox_memory_mb=1024` in create_executor passes both positives above and
+        FAILS here, because the #578 create-time refusal is the shipped contract for a nulled knob.
+        """
+        config.sandbox_memory_mb = None
+        with patch("shutil.which", return_value="/usr/bin/sbx"):
+            strategy = self._daemon(config).create_executor("sess-null").injection_strategy
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            with pytest.raises(RuntimeError, match="sandbox_memory_mb is not configured"):
+                strategy.create_sandbox("venya-null", "/workspace")
+            mock_run.assert_not_called()
+
+
+class TestHeartbeatCommandPolicyPropagation:
+    """Ticket command-policy-no-server-executor-propagation (owner ruling (a)
+    2026-09-26): the heartbeat/registration responses may carry the core's
+    default command policy; the daemon applies it via update_policy() with
+    change detection. Malformed or absent payloads never kill the beat and
+    never revert the live policy (advisory-channel discipline, fail-closed)."""
+
+    def _daemon(self, config: ExecutorConfig, payload):
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        resp = MagicMock()
+        resp.json.return_value = payload
+        daemon.client.post.return_value = resp
+        daemon.command_validator = MagicMock()
+        return daemon
+
+    def _policy_payload(
+        self, preset="strict", allowed=("/usr/bin/ssh",), patterns=None, updated="2026-09-26T00:00:00+00:00"
+    ):
+        return {
+            "revoked": False,
+            "command_policy": {
+                "preset": preset,
+                "allowed_commands": list(allowed),
+                "dangerous_patterns": list(patterns) if patterns is not None else None,
+                "updated_at": updated,
+            },
+        }
+
+    def test_strict_policy_applied_with_allowlist_and_default_patterns(self, config):
+        daemon = self._daemon(config, self._policy_payload())
+        daemon._send_heartbeat()
+        daemon.command_validator.update_policy.assert_called_once()
+        policy = daemon.command_validator.update_policy.call_args[0][0]
+        assert policy.preset == "strict"
+        assert policy.allowed_commands == frozenset({"/usr/bin/ssh"})
+        assert policy.trusted_paths == frozenset()
+        assert policy.dangerous_patterns == frozenset(DEFAULT_DANGEROUS_PATTERNS)
+
+    def test_balanced_policy_gets_trusted_paths_floor(self, config):
+        daemon = self._daemon(config, self._policy_payload(preset="balanced", allowed=()))
+        daemon._send_heartbeat()
+        policy = daemon.command_validator.update_policy.call_args[0][0]
+        assert policy.trusted_paths == frozenset(DEFAULT_TRUSTED_PATHS)
+
+    def test_custom_patterns_replace_builtin_floor(self, config):
+        """Semantics mirror the local toml builder: an explicit server list
+        REPLACES the built-in patterns (admin-gated authority, same as the
+        operator's own executor.toml)."""
+        daemon = self._daemon(config, self._policy_payload(patterns=["curl "]))
+        daemon._send_heartbeat()
+        policy = daemon.command_validator.update_policy.call_args[0][0]
+        assert policy.dangerous_patterns == frozenset({"curl "})
+
+    def test_identical_payload_applies_once(self, config):
+        daemon = self._daemon(config, self._policy_payload())
+        daemon._send_heartbeat()
+        daemon._send_heartbeat()
+        daemon._send_heartbeat()
+        assert daemon.command_validator.update_policy.call_count == 1
+
+    def test_changed_row_reapplies(self, config):
+        daemon = self._daemon(config, self._policy_payload())
+        daemon._send_heartbeat()
+        daemon.client.post.return_value.json.return_value = self._policy_payload(updated="2026-09-26T01:00:00+00:00")
+        daemon._send_heartbeat()
+        assert daemon.command_validator.update_policy.call_count == 2
+
+    def test_absent_field_keeps_toml_policy(self, config):
+        """Paired negative: no policy in the response -> update_policy is
+        NEVER called (the toml-built policy stays live)."""
+        daemon = self._daemon(config, {"revoked": False})
+        daemon._send_heartbeat()
+        daemon.command_validator.update_policy.assert_not_called()
+
+    def test_unknown_preset_rejected_and_beat_survives(self, config):
+        """Malformed payload: not applied — and the advisory channel keeps
+        working: the revoked flag on the SAME beat still stops the daemon."""
+        daemon = self._daemon(
+            config,
+            {
+                "revoked": True,
+                "command_policy": {
+                    "preset": "wat",
+                    "allowed_commands": [],
+                    "dangerous_patterns": None,
+                    "updated_at": "",
+                },
+            },
+        )
+        daemon._send_heartbeat()
+        daemon.command_validator.update_policy.assert_not_called()
+        assert daemon.state.revoked is True
+
+    def test_non_dict_payload_ignored(self, config):
+        daemon = self._daemon(config, {"revoked": False, "command_policy": "strict"})
+        daemon._send_heartbeat()
+        daemon.command_validator.update_policy.assert_not_called()
+
+    def test_registration_source_applies(self, config):
+        """_maybe_apply_server_policy is the shared consumer; register() hooks
+        it with source='registration' so a fresh install gets the policy on
+        its first response, before the first beat."""
+        daemon = self._daemon(config, None)
+        daemon._maybe_apply_server_policy(
+            {"command_policy": self._policy_payload()["command_policy"]},
+            "registration",
+        )
+        daemon.command_validator.update_policy.assert_called_once()

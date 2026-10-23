@@ -1,0 +1,607 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""#603 AC2 step 2 (a-prime-ii) — the freshness-bounded revocation-liveness snapshot.
+
+The revocation-liveness population (the two sorted lists the executor poll answers
+from) is read here, OFF the request path, by a publisher task the core starts beside
+the shipped ``session_cleanup_loop`` (``app.py``). ``routes/executors.py`` answers
+``GET /executors/certs/revocation-list`` from the published snapshot, and REFUSES in
+the 503 stale class whenever the snapshot it would answer from is missing or has
+crossed the ceiling — a poll must never read "nothing revoked" out of data nobody can
+vouch for, because an empty population IS "nothing revoked".
+
+THE NUMBERS, and they are constants on purpose (ticket #603 AC2; owner's spec ok and
+boundary ruling, both 2026-10-15): a ceiling of 45 s, a refresh interval of 10 s, and
+the boundary operator ``>=`` — refuse at exactly the ceiling. Putting the ceiling on
+the env-var surface would re-open the drift this ticket exists to kill, so there is no
+knob and no installer edit here; ``validate_snapshot_windows`` is a startup check, not
+a setting.
+
+What this module does NOT own — the law that keeps it honest:
+
+* NO VERDICT. It stores a population (two sorted lists), never a ``revoked`` answer,
+  never a serial match, never an identity match. ``server/revocation.py`` is the one
+  matcher and its module contract names a second implementation as the
+  rotation/revocation split-brain. This module is the read, not the rulebook.
+* ONE AGE DECISION. ``snapshot_is_stale`` is the only place staleness is computed; a
+  second age check anywhere (route, publisher, caller) is the same split-brain in new
+  clothes.
+* THE ETAG IS NOT STORED. Payload and ETag are derived together at serve time by the
+  shipped lines in the route, so a cached ETag can never describe a different
+  population from the body beside it (the #337 ``crl-cap-etag-divergence`` class).
+* MONOTONIC ONLY. Age is elapsed real time since publish, measured on
+  ``time.monotonic()`` — never the wall clock (#464: a BACKWARD NTP step would
+  otherwise make an entry look young forever, and on THIS plane "young forever" means
+  answering "not revoked" from a snapshot that is really past its warrant).
+* THE ABSENCE OF AN ANSWER KEEPS ITS SHIPPED MEANING. Step 2 changes WHEN an answer is
+  available, never what its absence means: the strike counter, the threshold, the
+  cadence, the fault arm and the refusal routing all stay exactly as they ship.
+* SURVIVAL (#626). A publisher task used to end on any raise that escaped ``publish_once``
+  — a faulting ``close()`` in that function's own ``finally`` sat outside its ``except``, and
+  a raise in a ``finally`` also replaces whatever the ``try`` returned, so one bad teardown
+  cost both a good snapshot and the task. The loop's ``finally`` then disarmed and NOTHING
+  in-process re-armed it: the core ran the lockable live read for the rest of its life with
+  one latched WARNING as the only trace. So the teardown is now guarded where it happens, the
+  tick is guarded again at the call site behind a bounded, doubling backoff, and every exit is
+  journalled — the lifespan's shutdown cancel quietly at INFO, anything else at ERROR with its
+  reason. The journal is the evidence surface; no new module state carries it.
+* THE STALE ARM COUNTS ITS OWN REFUSAL (#657). This module raises the refusal, so this is the
+  one place that records it — ``note_stale_refusal`` at the raise, not at the route's ``except``,
+  because an arm that must be remembered at every caller is an arm missing at one. It writes the
+  EXISTING series ``venya_revocation_read_refusals_total`` under its own ``site`` value; it adds
+  no metric and renames nothing, and it is a Counter, not a Gauge: #651's shape was a per-emit
+  line with no cumulative record, so a losing component could not later state how much it lost.
+  The single piece of new module state here is the warning latch — the counter itself is never
+  latched, and ``reset_snapshot_state`` re-arms the latch so no cell inherits another's trace.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from sqlalchemy.orm import Session
+
+# Two imports landed here in the same window, and both are load-bearing: #657's metrics handle for the
+# stale-arm counter at the raise, and #654's seam for the fallback read below. Kept in the tip's
+# alphabetical order; neither side's behavior is contingent on the other.
+from . import metrics
+from .revocation_read import bounded_read
+
+logger = logging.getLogger("venya.server")
+
+# --- the ruled window -------------------------------------------------------------
+
+#: Freshness ceiling: how long a published population may be answered from. 45 s
+#: covers the observed 15-40 s lock-stall band with margin (review item 4, owner's
+#: pick, 2026-10-15). Past it the poll REFUSES in the 503 stale class — it does not
+#: answer live, and it does not answer "nothing revoked".
+REVOCATION_SNAPSHOT_MAX_AGE_SECONDS = 45
+
+#: Publisher interval. ``validate_snapshot_windows`` requires it strictly below the
+#: ceiling, so a snapshot can never sit older than one interval when it is read.
+REVOCATION_SNAPSHOT_REFRESH_SECONDS = 10
+
+# --- #626 retry pair: how a tick that ESCAPED the guard is retried --------------------
+#
+# These two are NOT the ruled refresh/ceiling pair above and must never be read as such:
+# #603 AC2 owns 10/45, and those numbers are untouched here. This pair governs only what
+# happens after a tick raises something ``publish_once`` did not absorb — a backoff floor
+# that doubles to a ceiling of its own, so a persistent fault costs one retry per
+# increasingly long nap rather than a burst (#626 AC5: no respawn storm).
+
+#: First retry nap after an escaped tick. One second, because the ruled 45 s ceiling
+#: already tolerates four missed 10 s refreshes, and a transient teardown fault should
+#: cost one publish, not the whole window.
+REVOCATION_SNAPSHOT_RETRY_BACKOFF_SECONDS = 1.0
+
+#: Upper bound on that nap. A fault that outlives the doubling (1, 2, 4, 8, 16, 30, 30 …)
+#: settles at one retry every 30 s: persistent, so the plane recovers on its own when the
+#: fault clears, and never a burst against a pool that is already sick (#626 AC5).
+REVOCATION_SNAPSHOT_RETRY_BACKOFF_MAX_SECONDS = 30.0
+
+
+class RevocationSnapshotUnavailable(RuntimeError):
+    """No answerable population exists: nothing published yet, or the published
+    snapshot has crossed the freshness ceiling.
+
+    Its own class so the refusal site is one ``except`` and the reason is never
+    guessed from a ``None`` return. This is an availability fault, NOT a revocation
+    assertion — the caller turns it into the shipped stale-class 503.
+    """
+
+
+@dataclass(frozen=True)
+class RevocationSnapshot:
+    """One immutable published population.
+
+    Frozen because a concurrent reader must never see a half-written list: the
+    publisher builds a WHOLE new object and REPLACES the reference (the shipped
+    ``relay_listener.reload_ssl_context`` swap law), so a request sees either the old
+    snapshot or the new one. ``published_mono`` is a monotonic stamp.
+    """
+
+    serials: tuple[str, ...]
+    identities: tuple[str, ...]
+    published_mono: float
+    #: #597: revoked CORE RELAY credential serials — the peer population at executor :8443.
+    #: Kept beside the other two rather than merged into ``serials``, because ``serials``
+    #: answers "which EXECUTOR credential is dead" and a listener matching its peer needs
+    #: "which CORE relay credential is dead". One list for both would let an executor
+    #: serial refuse a core's client certificate that happens to share its spelling.
+    #: LAST and defaulted, so the required-ness of ``published_mono`` above is unchanged
+    #: (a silent 0.0 would make any direct construction read as infinitely stale) and every
+    #: pre-#597 call site keeps compiling untouched.
+    relay_serials: tuple[str, ...] = ()
+
+
+# --- module state (one process — the shipped app is single-worker) ----------------
+
+_published: RevocationSnapshot | None = None
+_publisher_running = False
+# One-shot latch on the no-publisher warning: the fallback is per-request and a fleet
+# polls every ~30 s, so an un-latched warning would be journal noise — which is how
+# real alarms get ignored. Re-armed only by ``reset_snapshot_state``.
+_unarmed_warned = False
+
+
+#: The site label this arm records refusals under (#657). It is a module constant in the shape
+#: of the existing closed vocabulary — ``heartbeat``, ``crl``, ``audit-ingest``, ``executor-session``,
+#: ``executor-mtls``, ``register/terminal-check``, ``register/incumbent-exemption``,
+#: ``register/rotation-prior-serial``, ``admin/list-executors``, ``dial/create-session``,
+#: ``dial/execute`` — and it is NEVER built from the request: the label lands on a Prometheus
+#: series, so a caller-influenced value there would be unbounded (the #603 AC1 reasoning, kept).
+#: It is also what keeps the two refusal arms SEPARATE series: an operator reading
+#: ``venya_revocation_read_refusals_total`` can tell "refused because the read was locked" from
+#: "refused because the snapshot was stale or missing" (#657 AC3), which is the distinction the
+#: runbook's alert needs — one is a DDL convoy, the other is a starved pool or a dead publisher.
+POLL_REFUSAL_SITE = "poll/revocation-list"
+
+# One-shot latch on the stale-refusal warning, the same shape as ``_unarmed_warned`` and as
+# ``revocation_read._refusal_warned``: a fleet polls every ~30 s, so an un-latched warning is
+# journal noise. The COUNTER is never latched — #651's defect shape was a per-emit line with no
+# cumulative record, so a losing component could not later state how much it lost.
+_stale_warned = False
+
+# shortcut: the count covers the two REQUEST-PATH refusal arms on this plane (the lock-timeout
+#   arm in revocation_read and the snapshot-stale arm here); the dial-gate CRL refusals in
+#   routes/executors.py — _dial_crl_verdict_for's X509 codes 3 and 12, and the store-preparation
+#   arm — answer the SAME stale-class sentence and are deliberately not counted, because they are
+#   handshake-surface failures, not revocation reads, and folding them in would make the site
+#   vocabulary lie about which path refused. Upgrade trigger: a row that rules dial-gate refusals
+#   into the alert (it must then declare its own site value, not reuse this one).
+
+
+def is_stale_refusal_warned() -> bool:
+    """True once a snapshot refusal has been journalled this process (the latch has fired)."""
+    return _stale_warned
+
+
+def note_stale_refusal(site: str = POLL_REFUSAL_SITE) -> None:
+    """Count a snapshot refusal (cumulative, never latched) and WARN once (latched).
+
+    The stale arm of the shipped 503 — a missing snapshot or one at/past the freshness
+    ceiling — is the shape a starved pool or a dead publisher actually produces, and until
+    #657 it raised uncounted while the lock arm counted. One counter, two arms, distinct
+    ``site`` values: this is the arm that makes the runbook's "the counter is the alerting
+    surface" line true for a LOAD event rather than only for a lock hold.
+
+    The wording is its own, deliberately: it must not claim a lock deadline the read never
+    hit, and it must never assert a revocation. ``site`` has a default and no caller passes
+    the request path — the label vocabulary stays closed.
+    """
+    metrics.REVOCATION_READ_REFUSALS_TOTAL.labels(site=site).inc()
+    global _stale_warned
+    if not _stale_warned:
+        _stale_warned = True
+        logger.warning(
+            "Revocation poll refused at '%s': no snapshot inside the %d s freshness ceiling. "
+            "That is not a revocation and not an all-clear — callers answer the shipped "
+            "stale-class 503 and executors keep their last confirmed state and retry. This "
+            "line fires ONCE per process by design; the alerting surface is the cumulative "
+            "counter venya_revocation_read_refusals_total{site=} (refs #657; the lock-deadline "
+            "arm counts the same series under its own site name, refs #603 AC1).",
+            site,
+            REVOCATION_SNAPSHOT_MAX_AGE_SECONDS,
+        )
+
+
+def snapshot_is_stale(snapshot: RevocationSnapshot | None, *, now_mono: float) -> bool:
+    """THE single staleness decision: ``age >= ceiling`` refuses.
+
+    ``>=`` is the owner's ruled boundary (2026-10-15, verbatim: ">= — refuse at exactly
+    the ceiling"), conservative at the boundary tick for the same reason every other
+    rule on this plane is: one extra honest 503 costs a request, while one answer
+    served past its warrant costs a stale all-clear on the revocation plane. A missing
+    snapshot is stale by the same line — fail closed at boot, never answer live.
+    """
+    if snapshot is None:
+        return True
+    return (now_mono - snapshot.published_mono) >= REVOCATION_SNAPSHOT_MAX_AGE_SECONDS
+
+
+def current_snapshot() -> RevocationSnapshot | None:
+    """The published snapshot, or None when nothing has been published."""
+    return _published
+
+
+def publisher_running() -> bool:
+    """True while the core's snapshot publisher task owns the revocation read."""
+    return _publisher_running
+
+
+def arm_publisher() -> None:
+    """Declare that this process owns the revocation read: no snapshot yet is a REFUSE.
+
+    Called by ``revocation_snapshot_loop`` before its first publish, and by the cells
+    that need the armed-but-empty state. Arming is what closes the live-read fallback,
+    so the order matters: arm first, publish after.
+    """
+    global _publisher_running
+    _publisher_running = True
+
+
+def disarm_publisher() -> None:
+    """Release ownership of the revocation read (loop exit / cancellation)."""
+    global _publisher_running
+    _publisher_running = False
+
+
+def validate_snapshot_windows() -> None:
+    """Startup check: the refresh interval must be strictly below the ceiling.
+
+    The shipped idiom is ``config.py``'s ``_session_timeout_within_max`` validator;
+    these are module constants rather than config fields, so the check runs when the
+    publisher starts. A pair that violates it raises — a publisher that could serve an
+    already-stale snapshot never starts.
+    """
+    if REVOCATION_SNAPSHOT_REFRESH_SECONDS >= REVOCATION_SNAPSHOT_MAX_AGE_SECONDS:
+        raise ValueError(
+            "REVOCATION_SNAPSHOT_REFRESH_SECONDS "
+            f"({REVOCATION_SNAPSHOT_REFRESH_SECONDS}) must stay below "
+            "REVOCATION_SNAPSHOT_MAX_AGE_SECONDS "
+            f"({REVOCATION_SNAPSHOT_MAX_AGE_SECONDS}): a snapshot at or past the "
+            "ceiling must never be answerable, and an interval at or above it makes "
+            "that state reachable by construction"
+        )
+
+
+def revocation_populations(db: Session) -> tuple[list[str], list[str]]:
+    """Read the revocation population — the single implementation of both reads.
+
+    Moved VERBATIM off ``get_revocation_list`` (the ``ExecutorCertRevocation`` fetch
+    plus the ``Executor.revoked_at`` identity scan): same tables, same columns, same
+    sort. The publisher calls it and the route's no-publisher fallback calls it, and
+    that is the whole point of putting it here — a leg that writes the SELECT twice,
+    once in the publisher and once in the route, has built the split-brain that
+    ``revocation.py:15-26`` forbids.
+    """
+    from core.iam.models import Executor, ExecutorCertRevocation
+
+    revocations = db.query(ExecutorCertRevocation).all()
+    serials = sorted([r.serial_number for r in revocations])
+    # Identity-level revocations (the terminal flag on the Executor row) ride
+    # alongside the serial history: additive wire field, and the ETag covers BOTH.
+    identities = sorted(row[0] for row in db.query(Executor.id).filter(Executor.revoked_at.isnot(None)).all())
+    return serials, identities
+
+
+def relay_revocation_populations(db: Session) -> list[str]:
+    """Read the revoked core-relay serials — the third population (#597).
+
+    Own function, own single read, deliberately NOT folded into
+    ``revocation_populations``: that one is the #603-protected pair whose arity other
+    cells pin, and mixing a core-credential population into the executor population list
+    is exactly the vocabulary error the snapshot field comment refuses.
+
+    Canonical stored form; readers compare with ``serial_match_key`` (#481), so a legacy
+    spelling in a row still matches the credential it names.
+    """
+    from core.iam.models import CoreRelayCredential
+
+    return sorted(
+        r.serial_number for r in db.query(CoreRelayCredential).filter(CoreRelayCredential.revoked_at.isnot(None)).all()
+    )
+
+
+def publish_populations(
+    serials: list[str] | tuple[str, ...],
+    identities: list[str] | tuple[str, ...],
+    *,
+    relay_serials: list[str] | tuple[str, ...] | None = None,
+    published_mono: float | None = None,
+) -> RevocationSnapshot:
+    """Swap in one whole population — the publish step, with no read.
+
+    ``published_mono`` is the age stamp; left None it is "now" on the monotonic clock.
+    Passing it explicitly is what lets the boundary cells pin ``age == ceiling`` to the
+    microsecond instead of racing the clock.
+    """
+    global _published
+    snapshot = RevocationSnapshot(
+        serials=tuple(serials),
+        identities=tuple(identities),
+        published_mono=time.monotonic() if published_mono is None else published_mono,
+        # None means "this publisher does not know about relay credentials" (every
+        # pre-#597 caller). It carries the PREVIOUS tick's value rather than an empty
+        # tuple: a partial publish must not silently un-revoke a relay credential the
+        # last good snapshot named. Same law as the paragraph below about failures.
+        relay_serials=(
+            _published.relay_serials if relay_serials is None and _published is not None else tuple(relay_serials or ())
+        ),
+    )
+    _published = snapshot
+    return snapshot
+
+
+def publish_snapshot(db: Session) -> RevocationSnapshot:
+    """Read and publish in one step — an object swap, never an in-place mutation.
+
+    Returns what it published. A raise here leaves the PREVIOUS snapshot in place: an
+    exception never substitutes an empty population, because an empty list is the most
+    permissive answer the publisher could fabricate out of a failure.
+    """
+    serials, identities = revocation_populations(db)
+    return publish_populations(serials, identities, relay_serials=relay_revocation_populations(db))
+
+
+def read_relay_populations(db: Session) -> list[str]:
+    """Answer the peer-serial question from the SAME snapshot the executor poll uses.
+
+    Mirrors ``read_populations`` exactly: publisher running -> answer from the published
+    snapshot only, and a missing/stale snapshot raises
+    ``RevocationSnapshotUnavailable`` (the caller turns it into the shipped stale-class
+    503); no publisher running -> the inline read, so a router mounted without the core
+    lifespan behaves as before. One ceiling, one publisher, one refusal sentence for all
+    three populations — a second staleness rule would be a second answer to the same
+    question.
+
+    NOTE for #586: this is the population a relay listener can match its PEER against.
+    It is keyed on registry MEMBERSHIP, and nothing here makes list age a stop condition
+    at that door — the availability trade stays #586's and the owner's.
+    """
+    if not _publisher_running:
+        with bounded_read(db, site="poll/fallback-read"):
+            return relay_revocation_populations(db)
+    snapshot = _published
+    if snapshot is None or snapshot_is_stale(snapshot, now_mono=time.monotonic()):
+        note_stale_refusal()
+        raise RevocationSnapshotUnavailable(
+            "no revocation snapshot inside the freshness ceiling "
+            f"({REVOCATION_SNAPSHOT_MAX_AGE_SECONDS} s): the relay-credential poll must refuse, not answer live"
+        )
+    return list(snapshot.relay_serials)
+
+
+def read_populations(db: Session) -> tuple[list[str], list[str]]:
+    """Answer one poll from the snapshot, or raise ``RevocationSnapshotUnavailable``.
+
+    * publisher running → answer ONLY from the published snapshot. Missing or at/past
+      the ceiling raises and the route turns that into the stale-class 503, BEFORE any
+      payload/ETag is built — which is what makes a stale 304 impossible rather than
+      merely unintended (the 304 has no body, so nothing downstream could catch one).
+      The request-path DB read is gone; that is the step.
+    * no publisher running → fall back to the shipped inline read. A router mounted
+      WITHOUT the core lifespan (every unit-test harness that builds a bare
+      ``FastAPI()`` and wires a mock ``backend.get_session``) therefore behaves exactly
+      as it does today, and so does any future caller that never installed the
+      publisher. This is not a fail-open on the ruled property: the fallback still
+      reads the live population, and in the shipped process ``lifespan`` starts the
+      publisher before any request is served, so the snapshot branch is what answers
+      in the field. The publisher's own cold window refuses rather than answering
+      live, because once ``_publisher_running`` is set the fallback is gone.
+    * ``db`` is consulted in the fallback branch only — a fresh snapshot answers from
+      pure memory, with no checkout.
+    """
+    if not _publisher_running:
+        global _unarmed_warned
+        if not _unarmed_warned:
+            _unarmed_warned = True
+            logger.warning(
+                "Revocation poll answered from a live DB read: the snapshot publisher is not running "
+                "in this process. The answer is current, but the read is back on the lockable path "
+                "#603 AC2 exists to take it off — on a shipped core the lifespan starts the publisher "
+                "before the first request, so this line means the app was built without it."
+            )
+        # #656 site 2: the fallback is the row shape A never covered — AC1 put the deadline inside
+        # ``bounded_read`` and this read never entered it, so a held ACCESS EXCLUSIVE here parked the
+        # core's single event loop on a PUBLIC, unauthenticated route polled by every executor, with
+        # one latched line as the only trace. It now runs inside the SAME seam as the matcher and the
+        # bounded GET: same two deadlines, same shared refusal sentence, and — the half that matters
+        # for #626 — the fallback still ANSWERS. Refusing every poll until a publisher came back
+        # would starve the fleet on one dead task; bounding the read and answering from it does not.
+        # A refusal here is ``RevocationReadUnavailable``, which the one central arm in ``app.py``
+        # already answers in the shipped stale class; no new arm was added and no sentence retyped.
+        #
+        # The publisher's OWN read (``publish_snapshot``) is deliberately still unbonded: it runs on
+        # a worker thread off the loop, where a slow tick costs a late snapshot and AC2's 45 s ceiling
+        # is the ruled answer. Bounding it would turn a slow publish into a fleet-wide refusal, which
+        # is that ceiling's decision to make, not this row's.
+        with bounded_read(db, site="poll/fallback-read"):
+            return revocation_populations(db)
+    snapshot = _published
+    if snapshot_is_stale(snapshot, now_mono=time.monotonic()):
+        # #657: this arm is the LOAD case — a starved pool or a dead publisher lands here, not in
+        # the lock-timeout arm — and until now it raised its 503 uncounted. Counted HERE, at the
+        # single place the decision is made, so every caller of this function is covered and a
+        # future second call site cannot re-open the under-report. The label is the module
+        # constant, deliberately NOT ``current_site()``: the poll runs unlabelled, and the
+        # ContextVar default is the lock arm's own "revocation-plane" — inheriting it would
+        # merge the two arms into one series and break the #657 AC3 distinction.
+        note_stale_refusal()
+        raise RevocationSnapshotUnavailable(
+            "no revocation snapshot inside the freshness ceiling "
+            f"({REVOCATION_SNAPSHOT_MAX_AGE_SECONDS} s): the poll must refuse, not answer live"
+        )
+    return list(snapshot.serials), list(snapshot.identities)  # type: ignore[union-attr]
+
+
+def publish_once(session_factory: Callable[[], Session]) -> RevocationSnapshot | None:
+    """One publish: check out, read, swap, close. Returns None when the read failed.
+
+    The CHECKOUT IS INSIDE THE GUARD on purpose. A pool that cannot be had is the same
+    event as a query that cannot be answered — step 1's reserved checkout raises on its
+    2 s timeout — and a raise escaping here would escape the loop, end the publisher
+    task, and clear the running flag. The route would then fall back to a live DB read
+    on the lockable path: a dead publisher that looks healthy. That is the fail-open
+    this function exists to prevent, so nothing about a tick is allowed to escape.
+
+    A failure never clears the population: the last good snapshot stays answerable
+    until the ceiling, after which ``read_populations`` refuses — an empty population is
+    the most permissive answer the publisher could fabricate out of a failure.
+    """
+    db = None
+    try:
+        db = session_factory()
+        return publish_snapshot(db)
+    except Exception:
+        logger.warning(
+            "Revocation snapshot publish failed — the last snapshot stays served until the "
+            "freshness ceiling, then the poll refuses in the stale class",
+            exc_info=True,
+        )
+        return None
+    finally:
+        # The teardown is guarded SEPARATELY from the read, and that is the #626 hole. This
+        # ``finally`` sits outside the ``except Exception`` above, so a faulting ``close()``
+        # (rollback-on-close against a dead or broken connection is the case) used to leave
+        # the function whole — and a raise here replaces whatever the ``try`` returned, so a
+        # population that had ALREADY been swapped in was thrown away along with the task.
+        # Absorbing it keeps the published snapshot, keeps the function's own promise ("nothing
+        # about a tick is allowed to escape") true for the teardown as well as the read, and
+        # leaves the loop's backoff guard to cover anything else a tick can still raise.
+        close = getattr(db, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as teardown_fault:
+                logger.warning(
+                    "Revocation snapshot publish could not close its session (#626): %r — the "
+                    "population it read is already published and stays served; the pool's own "
+                    "recycle is the backstop for a session that would not close",
+                    teardown_fault,
+                    exc_info=True,
+                )
+
+
+async def revocation_snapshot_loop(session_factory: Callable[[], Session]) -> None:
+    """The publisher coroutine, started beside ``session_cleanup_loop``.
+
+    Publishes FIRST and then waits the interval, so a boot does not spend a whole
+    interval answering "no snapshot yet": the cold window the stale class covers is a
+    startup artifact, not a recurring one. The flag is set before the first publish
+    (so a concurrent early poll refuses rather than answering live) and cleared in the
+    ``finally``, which is what makes task cancellation the same thing as "the publisher
+    no longer owns the read".
+
+    THE READ RUNS IN A WORKER THREAD. #603 exists because a lock-stalled liveness read
+    freezes the single-worker core event loop; a publisher that ran its synchronous
+    query ON the loop would move the stall onto a 10 s timer and block everything —
+    including the memory-only poll this step exists to protect — for the whole stall.
+    ``asyncio.to_thread`` is therefore part of the fix, not an optimization: the
+    session is created, used and closed entirely inside the worker thread, so no
+    Session ever crosses threads. (This is the server's first offload; ``app.py``
+    measured zero hits for ``run_in_threadpool|to_thread`` at the step-2 base.)
+
+    SURVIVAL (#626). ``publish_once`` absorbs its own read failures, but it could not absorb a
+    raise from the ``close()`` in its own ``finally`` — that call sat OUTSIDE the
+    ``except Exception`` it sits next to, so an escaped teardown raise left the function, the
+    ``while``, and (before this change) the task itself: the ``finally`` disarmed, nothing
+    re-armed in-process, and the core lost the snapshot plane for the rest of its life with one
+    latched WARNING as the only trace. So the tick is guarded HERE, at the call site, and an
+    escaped tick costs a bounded backoff nap instead of a death.
+
+    WHAT THE GUARD COVERS, named because #626 AC4 asks: ``Exception``, which is what a faulting
+    ``Session.close()`` raises (``sqlalchemy.exc.SQLAlchemyError`` and its subclasses are all
+    ``Exception`` descendants). It deliberately does NOT cover ``asyncio.CancelledError``, which
+    on this interpreter is NOT in ``Exception`` (measured here: ``issubclass(asyncio.CancelledError,
+    Exception)`` → False on CPython 3.14) — a cancel is the shutdown shape ``app.py`` uses, and
+    swallowing it would turn a clean stop into a task that never ends. Anything else that still
+    ends the task is logged at ERROR with its reason on the way out, because the row's complaint
+    was precisely that a death looked like a shutdown.
+    """
+    # The retry counter and the last reason live HERE, on the task's own frame, not in module
+    # state: the module already carries four globals and a counter that only this task reads
+    # would be a fifth nobody clears. The journal is the operator-facing record (#626 AC3).
+    retries = 0
+    backoff = REVOCATION_SNAPSHOT_RETRY_BACKOFF_SECONDS  # task-local: no new module state (#626)
+
+    validate_snapshot_windows()
+    arm_publisher()
+    try:
+        while True:
+            try:
+                await asyncio.to_thread(publish_once, session_factory)
+            except asyncio.CancelledError:
+                # Re-raised untouched: named explicitly so the class the guard covers, and the
+                # one it does not, are readable at the site rather than inferred from a comment.
+                raise
+            except Exception as escape:
+                # The #626 hole, now a retry instead of a death. The last good snapshot keeps
+                # answering until the ceiling and the poll refuses past it, so this branch does
+                # not touch the fail-closed door — see the TT refusal cells.
+                retries += 1
+                logger.error(
+                    "Revocation snapshot publish escaped its own guard (#626): %r — the publisher "
+                    "is RETRYING in %.1f s rather than ending (attempt %d since the last good tick)"
+                    "; the revocation poll still answers from the last snapshot until the ceiling, "
+                    "then refuses",
+                    escape,
+                    backoff,
+                    retries,
+                    exc_info=escape,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, REVOCATION_SNAPSHOT_RETRY_BACKOFF_MAX_SECONDS)
+                continue
+            if retries:
+                logger.info("Revocation snapshot publisher recovered after %d escaped tick(s) (#626)", retries)
+            retries = 0
+            backoff = REVOCATION_SNAPSHOT_RETRY_BACKOFF_SECONDS
+            await asyncio.sleep(REVOCATION_SNAPSHOT_REFRESH_SECONDS)
+    except asyncio.CancelledError:
+        # The intended exit: ``app.py``'s lifespan cancels this task, the ``finally`` below
+        # disarms, and the poll falls back to the shipped live read. Not an alarm — an ERROR on
+        # every clean shutdown is how the real one gets missed (#626 AC3's paired negative).
+        logger.info(
+            "Revocation snapshot publisher stopped on a shutdown cancel (#626): the revocation "
+            "poll falls back to the live read from here"
+        )
+        raise
+    except BaseException as death:
+        # Not ``Exception``, so not the read path and not the teardown close(): a
+        # KeyboardInterrupt, a SystemExit, a generator thrown in from outside. The tick guard
+        # above deliberately does not swallow these, so when one still ends the task the line
+        # says so, with its reason — which is the half of #626 that a latched WARNING cannot be.
+        logger.error(
+            "Revocation snapshot publisher stopped unexpectedly (%s) and will not restart in this "
+            "process (#626): the revocation poll is back on the lockable live-read path until a "
+            "core restart",
+            f"{type(death).__name__}: {death}",
+            exc_info=death,
+        )
+        raise
+    finally:
+        disarm_publisher()
+
+
+def reset_snapshot_state() -> None:
+    """Clear the published snapshot, the running flag and the warning latch. Exposed for testing.
+
+    Module state is process-global and the suites run one process, so a cell that
+    armed the publisher without clearing it would silently change what every later
+    poll cell observes — the same reason ``health._reset_health_cache`` exists. The #626
+    retry counter is local to the task and needs no clearing for the same reason.
+    """
+    global _published, _publisher_running, _unarmed_warned, _stale_warned
+    _published = None
+    _publisher_running = False
+    _unarmed_warned = False
+    _stale_warned = False

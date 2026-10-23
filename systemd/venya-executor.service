@@ -1,0 +1,63 @@
+[Unit]
+Description=Venya Executor Daemon
+After=network.target tmp-venya_secrets.mount
+Requires=tmp-venya_secrets.mount
+# #24: a permanent register rejection (revoked identity, bad token) must park
+# the unit in failed state instead of hot-looping the core's register rate
+# limiter — five restarts in 3 s turned a loud 400 into a masking 429.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=venya
+Group=venya
+ExecStart=/opt/venya/.venv/bin/venya-executor --config /etc/venya/executor.toml
+# #565: the executor's mTLS leaf key is encrypted at rest now, and the daemon that
+# reads it back is unattended, so the passphrase has to arrive the way the core's CA
+# passphrases do -- through a root-only EnvironmentFile that systemd (PID1, as root)
+# reads into the service's os.environ before privileges drop. The leading "-" keeps an
+# executor installed BEFORE this change booting: no file, no variable, the incumbent
+# key still reads, and the next WRITE (register/rotate) refuses loudly instead of the
+# unit crash-looping.
+EnvironmentFile=-/etc/venya/venya-executor.env
+Restart=always
+RestartSec=5s
+
+# #477 (relay-stop-unbounded-skips-cleanup-under-systemd): the relay drain
+# waits up to RELAY_STOP_DEADLINE_SECONDS (30 s) for an in-flight command to
+# finish and run its teardown; this unit grants 45 s before SIGKILL — drain
+# bound plus margin for the remaining cleanup steps — so the cooperative
+# stop always lands inside the systemd deadline. A static interlock test
+# (executor/tests/test_relay_stop_477.py) pins this value against the code
+# constant; edit both together or the test gate fails.
+TimeoutStopSec=45s
+
+# Executor must NOT have CAP_IPC_LOCK — jump host is untrusted
+# All capabilities dropped by default (NoNewPrivileges=true)
+
+# Additional hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# /etc/venya/executor must be writable: CertManager.rotate() persists the
+# renewed cert/key there every ~30 days (ticket executor-cert-rotation-erofs).
+# RW subpath under the RO parent is the intended systemd mechanism; the
+# config file /etc/venya/executor.toml stays read-only (outside the subdir).
+ReadWritePaths=/var/lib/venya/executor /var/log/venya /home/venya /etc/venya/executor
+ReadOnlyPaths=/etc/venya
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+PrivateDevices=true
+
+# Seccomp: deny dangerous syscall groups (executor never needs these)
+# Full JSON profile at /etc/venya/systemd/venya-executor.seccomp (reference)
+SystemCallFilter=~@cpu-emulation @debug @module @mount @obsolete @swap @chroot @keyring @clock @ptrace
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,873 @@
+# Copyright (c) 2026 Tabith LLC.
+# Use of this source code is governed by the Business Source License 1.1
+# included in the LICENSE file at the root of this repository. As of the
+# Change Date listed there, the work is available under MPL 2.0.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Tests for executor_heartbeat CLI command.
+
+Tests cover:
+- Success cases (not revoked, new cert required)
+- Revoked certificate
+- Missing cert/key files
+- Network errors (connection refused, timeout, server error)
+- Invalid cert file
+- Unknown server URL
+- Fingerprint included in payload
+- mTLS client instantiation
+- Key path derivation and override
+- Custom cert path
+- Output format verification
+"""
+
+import json
+import os
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+def _generate_test_keypair():
+    """Generate an ECDSA P-256 keypair for testing."""
+    return ec.generate_private_key(ec.SECP256R1())
+
+
+def _generate_test_cert(private_key, executor_id="venya-exec", validity_days=30):
+    """Generate a self-signed certificate for testing."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=validity_days))
+        .sign(private_key, hashes.SHA256())
+    )
+    return cert
+
+
+def _setup_cert_files(tmp_path, executor_id="test-exec", validity_days=30):
+    """Generate and write cert+key files, return (cert_path, key_path)."""
+    private_key = _generate_test_keypair()
+    cert = _generate_test_cert(private_key, executor_id, validity_days)
+
+    cert_path = tmp_path / "executor.crt"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+    key_path = tmp_path / "executor.key"
+    key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    key_path.write_bytes(key_pem)
+
+    return cert_path, key_path, private_key
+
+
+# ---------------------------------------------------------------------------
+# #507 — trust material for these cells (autouse)
+# ---------------------------------------------------------------------------
+
+FAKE_SUITE_CA_CN = "venya-suite-ca"
+
+
+@pytest.fixture(autouse=True)
+def _venya_config_ca(tmp_path, monkeypatch):
+    """Give renew/heartbeat a RESOLVED anchor so these cells are deterministic.
+
+    #507 replaced the silent system-store fallback with an anchor gate (config-dir
+    CA -> configured bundle -> sibling ca.crt -> loud failure). Run without trust
+    material, every cell here would now read the ACCOUNT THAT RUNS THE SUITE'S real
+    ~/.config/venya/ca.crt — measured: 34 of these cells passed at the tip purely by
+    borrowing that file, which proves nothing on a clean venue. So each cell gets a
+    scratch config dir with a generated CA. A cell that wants the no-anchor path
+    points VENYA_CONFIG at a dir without a ca.crt (see test_renew_heartbeat_ca_anchor_507.py).
+    """
+    cfg_dir = tmp_path / "venya-config"
+    cfg_dir.mkdir(exist_ok=True)
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, FAKE_SUITE_CA_CN)])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    (cfg_dir / "ca.crt").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    monkeypatch.setenv("VENYA_CONFIG", str(cfg_dir / "config.json"))
+    return cfg_dir
+
+
+def _make_mock_response(status_code=200, json_data=None):
+    """Create a mock httpx2 response."""
+    import httpx2
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = status_code
+    mock_resp.content = json.dumps(json_data).encode() if json_data else b""
+    mock_resp.json.return_value = json_data or {}
+    if status_code >= 400:
+        mock_resp.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            f"HTTP {status_code}",
+            request=MagicMock(),
+            response=mock_resp,
+        )
+    else:
+        mock_resp.raise_for_status.return_value = None
+    return mock_resp
+
+
+def _make_mock_client(response_data=None, post_error=None, status_code=200):
+    """Create a mock httpx2.Client that returns a mock response from .post()."""
+    mock_resp = _make_mock_response(
+        status_code=status_code,
+        json_data=response_data or {"revoked": False, "new_cert_required": False},
+    )
+    mock_post = MagicMock(return_value=mock_resp)
+    if post_error:
+        mock_post.side_effect = post_error
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    return mock_client
+
+
+# ---------------------------------------------------------------------------
+# Success cases
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatSuccess:
+    """Tests for successful heartbeat responses."""
+
+    def test_heartbeat_success_not_revoked(self, tmp_path, capsys):
+        """Heartbeat succeeds when not revoked and no cert rotation needed."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Heartbeat Response" in captured.out
+        assert "Revoked:         No" in captured.out
+        assert "Cert Rotation:   Not Required" in captured.out
+
+    def test_heartbeat_success_new_cert_required(self, tmp_path, capsys):
+        """Heartbeat succeeds when new cert is required (not revoked)."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": True},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Cert Rotation:   Required" in captured.out
+        assert "Revoked:         No" in captured.out
+
+    def test_heartbeat_includes_fingerprint_in_payload(self, tmp_path):
+        """SHA-256 hex fingerprint is sent in the POST body."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+
+        # Verify the POST call included the fingerprint
+        call_args = mock_client.post.call_args
+        json_payload = call_args.kwargs["json"] if call_args.kwargs else call_args[1]["json"]
+        assert "executor_id" in json_payload
+        assert "cert_fingerprint" in json_payload
+        assert isinstance(json_payload["cert_fingerprint"], str)
+        assert len(json_payload["cert_fingerprint"]) == 64  # SHA-256 hex digest
+        # The fingerprint must be over the DER encoding (matching server ca.py
+        # compute_fingerprint + executor daemon.py), NOT the PEM bytes -- so it
+        # matches the admin-listing fingerprint for the same cert.
+        import hashlib
+
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        expected = hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+        assert json_payload["cert_fingerprint"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Revoked certificate
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatRevoked:
+    """Tests for revoked certificate handling."""
+
+    def test_heartbeat_revoked(self, tmp_path, capsys):
+        """Heartbeat exits 1 and prints WARNING when revoked."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": True, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Revoked:         YES" in captured.out
+        assert "WARNING: This executor's certificate has been revoked." in captured.err
+
+    def test_heartbeat_revoked_with_cert_rotation(self, tmp_path, capsys):
+        """Heartbeat exits 1 when both revoked and cert rotation needed."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": True, "new_cert_required": True},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Revoked:         YES" in captured.out
+        assert "Cert Rotation:   Required" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Missing cert/key files
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatMissingFiles:
+    """Tests for missing certificate or key files."""
+
+    def test_heartbeat_missing_cert(self, tmp_path, capsys):
+        """Heartbeat exits 1 when cert file doesn't exist."""
+        from venya_cli.commands import executor_heartbeat
+
+        args = MagicMock()
+        args.cert_path = str(tmp_path / "nonexistent.pem")
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        result = executor_heartbeat(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "certificate not found" in captured.err
+        assert "Run 'venya exec register'" in captured.err
+
+    def test_heartbeat_missing_key(self, tmp_path, capsys):
+        """Heartbeat exits 1 when key file doesn't exist but cert does."""
+        cert_path, _, _ = _setup_cert_files(tmp_path)
+
+        # Deliberately do NOT create the key file
+        key_path = tmp_path / "executor.key"
+        key_path.unlink()  # Remove it
+
+        from venya_cli.commands import executor_heartbeat
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = "https://venya-core"
+
+        result = executor_heartbeat(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "private key not found" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Network errors
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatNetworkErrors:
+    """Tests for network error handling."""
+
+    def test_heartbeat_connection_refused(self, tmp_path, capsys):
+        """Heartbeat exits 1 on connection error."""
+        import httpx2
+
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            post_error=httpx2.ConnectError("Connection refused"),
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Connection failed" in captured.err
+
+    def test_heartbeat_unresolved_name_says_the_name_did_not_resolve(self, tmp_path, capsys):
+        """#633 paired positive for this site. The cell above pins the refusal half
+        (connection wording, unchanged); this pins the resolver half on the same
+        call site — name named, no connection sentence."""
+        import socket
+
+        import httpx2
+
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core-3"
+
+        bottom = socket.gaierror(-2, "Name or service not known")
+        middle = httpx2.NetworkError(str(bottom))
+        middle.__cause__ = bottom
+        outer = httpx2.ConnectError(str(middle))
+        outer.__cause__ = middle
+
+        mock_client = _make_mock_client(post_error=outer)
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "venya-core-3" in captured.err
+        assert "did not resolve" in captured.err
+        assert "Connection failed" not in captured.err
+
+    def test_heartbeat_timeout(self, tmp_path, capsys):
+        """Heartbeat exits 1 on timeout."""
+        import httpx2
+
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            post_error=httpx2.TimeoutException("Request timed out"),
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "timed out" in captured.err
+
+    def test_heartbeat_server_error_500(self, tmp_path, capsys):
+        """Heartbeat exits 1 on 500 server error."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            status_code=500,
+            response_data={"detail": "Internal server error"},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Heartbeat failed" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Invalid cert
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatInvalidCert:
+    """Tests for invalid certificate handling."""
+
+    def test_heartbeat_invalid_cert_file(self, tmp_path, capsys):
+        """Heartbeat exits 1 when cert file is not a valid certificate."""
+        from venya_cli.commands import executor_heartbeat
+
+        # Write invalid PEM content
+        cert_path = tmp_path / "executor.crt"
+        cert_path.write_text("this is not a certificate")
+
+        # Also write a valid key (so we get past the key check)
+        key_path = tmp_path / "executor.key"
+        key_path.write_text("fake key")
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = "https://venya-core"
+
+        result = executor_heartbeat(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        # _parse_executor_cert returns None for invalid cert
+        assert "certificate not found" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Server URL resolution
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatServerUrl:
+    """Tests for server URL resolution."""
+
+    def test_heartbeat_unknown_server_url(self, tmp_path, capsys):
+        """Heartbeat exits 1 when server URL is unknown."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        from venya_cli.commands import executor_heartbeat
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(_key_path)
+        args.core_url = None
+
+        with patch("venya_cli.api_client.Config") as MockConfig:
+            mock_config = MagicMock()
+            mock_config.server_url = "http://localhost:8000"
+            MockConfig.return_value = mock_config
+
+            # tomllib is imported locally inside _get_server_url
+            with patch.dict("sys.modules", {"tomllib": None}):
+                result = executor_heartbeat(args)
+
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "server URL not configured" in captured.err
+
+    def test_heartbeat_env_server_url_honored(self, tmp_path):
+        """Per-command env cell (ticket cli-core-url-server-url-naming-split):
+        VENYA_SERVER_URL passes the unknown-gate and becomes the POST base URL
+        when no --core-url/--server-url flag is given."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+
+        from venya_cli.commands import executor_heartbeat
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = None
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with (
+            patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env-core.example.com"}),
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client),
+        ):
+            result = executor_heartbeat(args)
+
+        assert result == 0
+        assert mock_client.post.call_args[0][0] == "https://env-core.example.com/api/v1/heartbeat"
+
+    def test_heartbeat_unknown_url_message_names_alias_and_env(self, tmp_path, capsys):
+        """Ruling fold-in: the unknown-gate guidance names --server-url
+        (alias --core-url) AND VENYA_SERVER_URL — same terminology as the
+        register error (ticket cli-core-url-server-url-naming-split)."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+
+        from venya_cli.commands import executor_heartbeat
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = None
+        args.config_path = "/nonexistent/executor.toml"
+
+        with patch("venya_cli.api_client.Config") as MockConfig:
+            mock_config = MagicMock()
+            mock_config.server_url = "http://localhost:8000"
+            MockConfig.return_value = mock_config
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "server URL not configured" in err
+        assert "--server-url" in err
+        assert "--core-url" in err
+        assert "VENYA_SERVER_URL" in err
+
+
+# ---------------------------------------------------------------------------
+# mTLS client
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatMtls:
+    """Tests for mTLS client usage."""
+
+    def test_heartbeat_mtls_client_used(self, tmp_path):
+        """httpx2.Client is instantiated with ssl.SSLContext for mTLS."""
+        import ssl
+
+        cert_path, _key_path, _ca_path = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+        MockClient.assert_called_once()
+        call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
+        assert isinstance(call_kwargs["verify"], ssl.SSLContext)
+        assert call_kwargs["timeout"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Key path derivation
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatKeyPath:
+    """Tests for key path derivation and override."""
+
+    def test_heartbeat_key_derived_from_cert(self, tmp_path):
+        """Key path is derived from cert path when --key-path not provided."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+        call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
+        # key_path was derived: executor.crt -> executor.key
+        import ssl
+
+        assert isinstance(call_kwargs["verify"], ssl.SSLContext)
+
+    def test_heartbeat_custom_key_path(self, tmp_path):
+        """--key-path overrides the derived key path."""
+        private_key = _generate_test_keypair()
+        cert = _generate_test_cert(private_key, "test-exec", validity_days=30)
+
+        cert_path = tmp_path / "executor.crt"
+        cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+        # Custom key path
+        custom_key_path = tmp_path / "custom.key"
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        custom_key_path.write_bytes(key_pem)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(custom_key_path)
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+        call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
+        import ssl
+
+        assert isinstance(call_kwargs["verify"], ssl.SSLContext)
+
+
+# ---------------------------------------------------------------------------
+# Custom cert path
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatCustomCertPath:
+    """Tests for custom --cert-path."""
+
+    def test_heartbeat_custom_cert_path(self, tmp_path):
+        """--cert-path overrides the default cert path."""
+        private_key = _generate_test_keypair()
+        cert = _generate_test_cert(private_key, "test-exec", validity_days=30)
+
+        custom_cert_path = tmp_path / "custom.pem"
+        custom_cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+        custom_key_path = tmp_path / "custom.key"
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        custom_key_path.write_bytes(key_pem)
+
+        args = MagicMock()
+        args.cert_path = str(custom_cert_path)
+        args.key_path = str(custom_key_path)
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+        call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
+        import ssl
+
+        assert isinstance(call_kwargs["verify"], ssl.SSLContext)
+
+
+# ---------------------------------------------------------------------------
+# Output format
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatOutput:
+    """Tests for output format verification."""
+
+    def test_heartbeat_output_includes_fingerprint(self, tmp_path, capsys):
+        """Fingerprint appears in stdout output."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Fingerprint:" in captured.out
+        # Fingerprint should be a 64-char hex string
+        for line in captured.out.split("\n"):
+            if line.strip().startswith("Fingerprint:"):
+                fp = line.split(":", 1)[1].strip()
+                assert len(fp) == 64
+                int(fp, 16)  # Should be valid hex
+
+    def test_heartbeat_output_revoked_format(self, tmp_path, capsys):
+        """Revoked field shows 'YES' (not 'No') when revoked."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": True, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Revoked:         YES" in captured.out
+        assert "Revoked:         No" not in captured.out
+
+    def test_heartbeat_output_executor_id(self, tmp_path, capsys):
+        """Executor ID from cert CN appears in output."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path, "my-executor")
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Executor ID:     my-executor" in captured.out
+        assert "Heartbeat Response" in captured.out
+
+
+class TestHeartbeatTlsRequired:
+    """#17 pin (ticket sec-sweep-low-informational, user ruling: REJECT not
+    warn): an http:// server URL is refused BEFORE any request is built —
+    plaintext heartbeat was the CLI's only non-knob TLS-off path, and the
+    POST carries executor-identifying state."""
+
+    def test_http_url_rejected_no_request(self, tmp_path, capsys):
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "http://venya-core"
+
+        mock_client = _make_mock_client()
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as mock_ctor:
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+        mock_ctor.assert_not_called()  # no transport built at all
+        captured = capsys.readouterr()
+        assert "https://" in captured.err
+        assert "sec-sweep-low-informational" in captured.err
+
+    def test_https_url_still_works(self, tmp_path):
+        """Paired positive: the rejection is scheme-specific, not a lockdown."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(response_data={"revoked": False, "new_cert_required": False})
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+        assert result == 0
