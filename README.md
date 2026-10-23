@@ -52,6 +52,10 @@ the doc that governs it, and you can hold the code to it.
 - **Change and recovery governance.** Deployed bytes trace to committed source
   ([docs/deploy-gate.md](docs/deploy-gate.md)), and backup is validated by a restore drill
   rather than by a file existing ([docs/BACKUPS.md](docs/BACKUPS.md)).
+- **Every control above, one row at a time, with the command that re-derives it:**
+  [docs/controls.md](docs/controls.md) states each mechanism as `file:symbol`, names the commit it
+  was verified at, and gives the one command you run to check it yourself. A claim that cannot be
+  re-derived that way is listed there as not verified, not quietly kept.
 
 **No certification is claimed here.** Venya is software you host; it carries no
 attestation and this page asserts none. What beta does **not** do is published, entry by
