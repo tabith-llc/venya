@@ -36,6 +36,7 @@ pins read UNVERIFIED, not green. That is `test_pinned_sha_is_not_yet_current_is_
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import re
 import subprocess
@@ -57,9 +58,18 @@ _spec.loader.exec_module(gen)
 
 #: The sha the coordinates were last RE-PINNED by the generator, or ``None`` when they never have
 #: been. Set by running the generator at the cut commit (`--write`) and filling this in from ITS
-#: OWN stdout, in the same changeset. None is the honest face today: the numbers on the page predate
-#: this tool, so the strict cell below reports them unverified instead of pretending otherwise.
-PINNED_AT: str | None = None
+#: OWN stdout, in the same changeset. It is no longer ``None``: the generator ran at `2b90902`
+#: (`17fc21d`, 105 cites re-pinned, manifest 96 -> 93 keys), and at the face named below
+#: `--write` itself reports `105 cites already correct …; nothing written` — the coordinates are
+#: exact there BY VERIFICATION, not by inheritance. A commit cannot contain its own sha, so this
+#: value names the settled release face the pin was struck against (the parent of the commit that
+#: sets it) rather than the one the generator first ran at: the strict cell diffs `PINNED_AT..HEAD`
+#: over `CITED_ROOTS`, `packages/` is one of those roots, so this very file counts as moved and the
+#: cell RE-RESOLVES all 105 cites against the live tree and asserts agreement. A merge that moves a
+#: cited symbol from here forward reddens the suite instead of quietly publishing a stale line.
+PINNED_AT: str | None = (
+    "4fb736eb92e3b93547ed1f80152d79177a957323"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
+)
 
 #: Files whose churn invalidates the pins — the tree the cites point into.
 CITED_ROOTS = ("packages/", "install-venya-core.sh", "install-venya-executor.sh", "venya-common.sh")
@@ -87,6 +97,86 @@ def _text() -> str:
 # --------------------------------------------------------------------------------------
 # The durable assertion: named symbol exists in the named file.
 # --------------------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------------------
+# The key-collision audit (#675, a prior worker lane): a duplicate dict key is SILENT in Python.
+# --------------------------------------------------------------------------------------
+
+_MANIFEST_PY = _PKG / "scripts" / "beta_terms_cites.py"
+
+
+def test_manifest_has_no_duplicate_keys() -> None:
+    """Source keys must equal runtime keys, and no key may carry two meanings.
+
+    `test_every_cite_is_manifested_and_its_symbol_exists` asks the manifest what each cite means, so a
+    manifest that LOST an entry to a repeated key answers confidently and wrongly — every metric stays
+    green on the surviving meaning. That is the failure this cell exists to catch, and it is not
+    catchable from the runtime dict: `len(MANIFEST)` cannot see what Python already discarded. Counting
+    keys in the SOURCE, before the dict collapses them, is the only way.
+    """
+    src = _MANIFEST_PY.read_text(encoding="utf-8")
+    n_src, n_run, dups = gen.audit_keys(src)
+    assert n_src == n_run, (
+        f"MANIFEST declares {n_src} keys but holds {n_run}: {n_src - n_run} were silently discarded by a "
+        "repeated dict key. Delete the redundant entry or give it a distinct coordinate."
+    )
+    conflicting = {k: v for k, v in dups.items() if len(set(v)) > 1}
+    assert not conflicting, f"duplicate keys with DIFFERENT values, one meaning is lost: {conflicting}"
+
+
+def test_positive_control_a_planted_duplicate_goes_red() -> None:
+    """RED BEFORE GREEN on the real predicate — the same lesson the false-symbol falsifier teaches.
+
+    Half 1 plants a duplicate key over a real entry with a DIFFERENT value and shows the audit that
+    guards the cut reports it. Half 2 shows the untouched manifest passes the identical call, so a
+    broken harness cannot pass the red half by accident.
+    """
+    src = _MANIFEST_PY.read_text(encoding="utf-8")
+    clean = gen.audit_keys(src)
+    assert clean[0] == clean[1], f"the shipped manifest already fails its own audit: {clean[2]}"
+    victim = next(iter(gen._load_manifest().MANIFEST))
+    lines = src.split("\n")
+    node = gen._manifest_dict_node(ast.parse(src))
+    assert node is not None and node.end_lineno, "no MANIFEST literal to plant into"
+    # Splice INSIDE the MANIFEST literal. Appending at end-of-file would land in DATED_OVERRIDES (the
+    # last dict in the file) and the audit would correctly see nothing — a fixture that tests nothing is
+    # worse than no fixture, which is what this line cost to learn.
+    i = node.end_lineno - 1
+    planted = "\n".join(
+        lines[:i] + [f'    {victim!r}: ("some/other/file.py", "x", 7, "pin"),', lines[i]] + lines[i + 1 :]
+    )
+    p_src, p_run, p_dups = gen.audit_keys(planted)
+    assert p_src > p_run, "planted duplicate did NOT change the source/runtime counts — the audit is decoration"
+    assert (
+        victim in p_dups and len(set(p_dups[victim])) > 1
+    ), f"FALSIFIER FAILED: audit_keys did not report the planted key {victim!r} as value-conflicting"
+    assert gen.manifest_key_problems(planted), "manifest_key_problems returned nothing on a corrupt manifest"
+    assert gen.manifest_key_problems(src) == [], "the untouched manifest reports problems"
+
+
+def test_rekey_refuses_a_collision_instead_of_clobbering_it() -> None:
+    """The exact shape that made a hand union green-and-wrong must be a refusal, not a write.
+
+    A re-pin can move one cite ONTO a coordinate another cite is leaving; if the two carry different
+    values, last-wins silently re-assigns a meaning. `main()` refuses that case before it renames
+    anything, and the predicate it uses is the merge this cell exercises — first on a fixture that MUST
+    collide, then on a swap that must NOT be called a clobber.
+    """
+    man = gen._load_manifest().MANIFEST
+    keys = list(man)
+    a, b = keys[0], keys[1]
+
+    def merge(moved: dict[str, str]) -> list[str]:
+        grouped: dict[str, list] = {}
+        for k in keys:
+            grouped.setdefault(moved.get(k, k), []).append(tuple(man[k]))
+        return [k for k, v in grouped.items() if len(v) > 1 and len(set(v)) > 1]
+
+    # The collision: `a` lands on b's key while b stays put -> two different values share one key.
+    assert merge({a: b}) == [b], "the fixture's collision was not detected — the guard proves nothing"
+    # The harmless case the same code must ALLOW: a genuine swap, where each key ends up with one value.
+    assert merge({a: b, b: a}) == [], "a two-way swap was called a clobber — --write would refuse a good re-pin"
 
 
 def test_every_cite_is_manifested_and_its_symbol_exists() -> None:
@@ -265,9 +355,83 @@ def test_pins_match_the_tree_they_claim_at_when_pinned() -> None:
         if not c.symbol or c.path not in files:
             continue
         lines = files[c.path]
-        actual = next((i for i, ln in enumerate(lines, 1) if c.symbol in ln), None)
+        # #684-class resolver defect: this took the FIRST line containing the symbol, while the
+        # generator takes the c.occurrence-th one. Three pin rows declare occurrence >= 2, so the
+        # cell could report MOVED on a page that was right. One resolver now, shared with the two
+        # cells below, so the strict path and the generator cannot answer differently.
+        actual = _resolve_for_test(lines, c.symbol, c.occurrence)
         if actual is not None and actual != c.start:
             bad.append(f"  page:{c.line} {c.token} says {c.start}, symbol {c.symbol!r} is at {actual}")
     assert not bad, f"cited symbols moved since {PINNED_AT} — re-run the generator at the cut commit:\n" + "\n".join(
         bad
     )
+
+
+def _resolve_for_test(lines: list[str], symbol: str, occurrence: int) -> int | None:
+    """The one resolver, shared by the strict cell and its negative halves."""
+    hits = [i for i, ln in enumerate(lines, 1) if symbol in ln]
+    return hits[occurrence - 1] if 0 < occurrence <= len(hits) else None
+
+
+def test_agrees_with_the_generator_resolver_on_every_pinned_symbol() -> None:
+    """The strict cell and the generator must not answer differently for any real pin row.
+
+    This is the drift guard. The defect this leg fixed was two implementations of one rule: the
+    generator took the Nth hit, the cell took the first, and the cell never read ``occurrence``.
+    Runs whether or not ``PINNED_AT`` is set, so the agreement is asserted today, not only at the cut.
+    """
+    files = gen._tracked_files()
+    text = _text()
+    mismatches = []
+    checked = 0
+    for c in gen.parse_cites(text, files):
+        if not c.symbol or c.path not in files or c.kind != "pin":
+            continue
+        mine = _resolve_for_test(files[c.path], c.symbol, c.occurrence)
+        theirs = gen.resolve([c], files)[0][1]
+        checked += 1
+        if mine != theirs:
+            mismatches.append(
+                f"  page:{c.line} {c.token} symbol={c.symbol!r} occ={c.occurrence}: cell={mine} generator={theirs}"
+            )
+    assert checked > 0, "the pin manifest resolved nothing — this cell would be vacuous"
+    assert (
+        not mismatches
+    ), f"cell resolver and generator resolver disagree on {len(mismatches)} pin row(s):\n" + "\n".join(mismatches)
+
+
+def test_occurrence_2_pin_resolves_to_the_second_line_and_first_line_pin_reddens() -> None:
+    """Paired negative for the resolver, on a planted symbol that occurs twice.
+
+    Positive half: a row declaring ``occurrence=2`` pointing at the SECOND line passes.
+    Negative half: the same fixture pointing at the FIRST line is a mismatch, so a pin that ignores
+    ``occurrence`` cannot pass silently.
+    Control: the pre-fix expression is computed here and shown to answer a DIFFERENT line from the
+    generator on this same fixture — that is the wrongness this leg removed, stated in a cell that
+    goes green either way.
+    """
+    lines = [
+        "def unrelated(): pass",
+        "needle_fn = 1",
+        "    return needle_fn",
+    ]
+    containing = [i for i, ln in enumerate(lines, 1) if "needle_fn" in ln]
+    assert containing == [2, 3], "the planted fixture must actually carry two occurrences"
+
+    cite = gen.Cite(path="x/y.py", start=3, end=3, symbol="needle_fn", line=42, occurrence=2)
+    # generator's own answer, and the cell's answer, agree on the second line
+    assert gen.resolve([cite], {"x/y.py": lines})[0][1] == 3
+    assert _resolve_for_test(lines, cite.symbol, cite.occurrence) == 3
+
+    # positive half: a pin claiming line 3 is NOT a move
+    assert _resolve_for_test(lines, cite.symbol, cite.occurrence) == cite.start
+
+    # negative half: the same row claiming the FIRST line is a move, and reddens the strict check
+    wrong = gen.Cite(path="x/y.py", start=2, end=2, symbol="needle_fn", line=42, occurrence=2)
+    assert _resolve_for_test(lines, wrong.symbol, wrong.occurrence) != wrong.start
+
+    # control: the shape this cell had before the fix takes the first hit, and disagrees with the
+    # generator on this fixture. Computed, never asserted as correct.
+    first_match = next((i for i, ln in enumerate(lines, 1) if cite.symbol in ln), None)
+    assert first_match == 2, "the old resolver's answer is what makes this a real paired negative"
+    assert first_match != cite.start

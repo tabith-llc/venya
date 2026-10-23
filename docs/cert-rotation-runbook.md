@@ -10,14 +10,23 @@
 
 ## 0. Key material inventory — what rotates, and where it lives
 
+**Break-glass: recovering a CA passphrase.** If you arrived here from the end of an
+installer run, this section is the index, not the procedure. A CA passphrase is *stored*
+in the root-only EnvironmentFile named in the two CA rows below; the recovery procedure is
+§5 (root CA backup and restore, break-glass), and the one place this runbook shows reading
+the stored passphrase back is §7 step 0. Neither the banner nor this page prints that read
+as a copyable line — recovering a secret is an operator act performed on the host, not an
+installer echo. If the EnvironmentFile itself is gone, §5's encrypted-export and Shamir
+paths are the custody route, and they do not depend on that file.
+
 | Material | Location | Validity / rotation | Notes |
 |---|---|---|---|
 | Root CA keypair | core: `/var/lib/venya/ca/ca.key` (0600), `ca.crt` | manual break-glass only (§5) | key ENCRYPTED at rest since fix `4218ec1` (ticket `root-ca-key-plaintext-at-rest`, CLOSED 2026-09-20); passphrase `VENYA_CA_KEY_PASSPHRASE` in `/etc/venya/venya-core.env` (0640 root:venya), reused on re-run — an explicit wrong value fails loudly at decrypt |
 | Admin CA keypair | core: `/var/lib/venya/ca/admin-ca/` | manual (§7) | key ENCRYPTED; passphrase in `/etc/venya/venya-core.env` (0640 root:venya) |
-| Server TLS leaf | core: `/etc/venya/tls/server.crt|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh`, the `Server TLS certificate signed with Venya CA` block) | CN + SAN DNS = `CORE_HOSTNAME` |
-| Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (the `Relay client certificate signed and verified` block) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids`. Registered in `core_relay_credentials` at core boot and revocable — see § Revoking the core's relay client credential (#597) |
-| Executor client cert | executor: `/etc/venya/executor/executor.crt|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py`) | Auto-rotation persistence FIXED 2026-09-19 (ticket `executor-cert-rotation-erofs`, §1); pre-fix hosts need the unit refresh; manual path: §2 |
-| Admin client certs | core (machine plane): `/etc/venya/admin/admin.crt|.key` · person (human plane): a workstation path you choose | core pair: 90 days (`ADMIN_CERT_VALIDITY_DAYS`, `server/ca.py`), re-minted every installer run · person's certificate: 60 minutes, minted by ceremony (note below) | manual rotation: §7; the two credentials are different things and rotate differently |
+| Server TLS leaf | core: `/etc/venya/tls/server.crt\|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh`, the `Server TLS certificate signed with Venya CA` block) | CN + SAN DNS = `CORE_HOSTNAME` |
+| Relay client cert | core: `/etc/venya/relay/relay-client.crt\|.key` | regenerated on installer run (the `Relay client certificate signed and verified` block) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids`. Registered in `core_relay_credentials` at core boot and revocable — see § Revoking the core's relay client credential (#597) |
+| Executor client cert | executor: `/etc/venya/executor/executor.crt\|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py`) | Auto-rotation persistence FIXED 2026-09-19 (ticket `executor-cert-rotation-erofs`, §1); pre-fix hosts need the unit refresh; manual path: §2 |
+| Admin client certs | core (machine plane): `/etc/venya/admin/admin.crt\|.key` · person (human plane): a workstation path you choose | core pair: 90 days (`ADMIN_CERT_VALIDITY_DAYS`, `server/ca.py`), re-minted every installer run · person's certificate: 60 minutes, minted by ceremony (note below) | manual rotation: §7; the two credentials are different things and rotate differently |
 | Secret-encryption KEK + key versions | core: database + server config | `venya admin rotate-key` (§6) | independent of the TLS CA hierarchy |
 
 **Admin client certificates also have a renewal path of their own.** The row
@@ -34,15 +43,19 @@ sent (#565 Part B). Exact flags: `cli-reference.md` (generated). What an interac
 desktop ceremony requires, including on Windows, is covered in `faq.md` and
 `installation.md` and is deliberately not restated here.
 
-### 0.1 The age-out date for a certificate an installer used to hand to a workstation
+### 0.1 The age-out date for the MACHINE-PLANE admin pair an installer used to hand to a workstation (installer-handed bootstrap credential — NOT a person's renewed certificate)
 
-**Published date: 2027-01-10.** It is computed, not chosen, and the inputs are these:
+**Which plane this date governs: the MACHINE PLANE only — the admin pair the installer mints and used to hand to a workstation.** It is computed, not chosen, and the inputs are these: **read the next line before you use the date below, because it is not your credential's expiry.**
+
+**A person's renewed admin certificate does NOT age out on this schedule — it lives 60 minutes.** `ADMIN_SHORT_CERT_LIFETIME_SECONDS = 3600` is the human-plane lifetime (RF-6 §1.2 ruling 4a), applied by `routes/admin_certs.py`, `admin_issue_cert` → `sign_admin_csr(lifetime_seconds=ADMIN_SHORT_CERT_LIFETIME_SECONDS)`. **So an operator who ran `venya admin cert renew` and then read `2027-01-10` as their own expiry was reading a date 80 days past the credential actually in their hand.**
 
 | Input | Value | Where it was read |
 |---|---|---|
 | Lifetime of the pair the installer mints | 90 days | `ADMIN_CERT_VALIDITY_DAYS = 90`, `packages/server/src/server/ca.py` (Admin CA constants block; consumed by `AdminCAManager.sign_admin_cert`) |
 | Cut-over — the run of the installer that stopped printing the copy instruction | 2026-10-12 | `2b70210` 11:35:25 -0600, merged into `dev` as `832c11c` 11:36:13 -0600 (RF-10) |
 | Sum | **2027-01-10** | `date -u -d "2026-10-12 + 90 days"` → 2027-01-10 |
+
+**Measured absent, stated as absence and not as presence.** On a re-installed guest of this fleet the 90-day class was **not present to measure**: on `venya-core-3` (read 2026-10-21 16:42–16:46Z, seat a prior lane, leg 316, source `origin/dev = aa90d201`) the served `:443` leaf expired **2027-10-18** (365 d), the root CA **2036-09-29** (3,650 d), and the admin credential in service `CN=venya-adm3` carried a span of **3,600 SECONDS** — **three lifetimes, none of them `2027-01-10`** — with exactly **one** `admin_credentials` row, `source=issue-route`. **A mint was deliberately not performed to manufacture the missing class: minting is the owner's hand.** **So treat the table below as the arithmetic of a bootstrap plane that this guest does not carry, not as a fleet-wide inventory of live 90-day credentials, and do not re-derive a date from `ADMIN_CERT_VALIDITY_DAYS` for any credential a person renewed.**
 
 **Which number is enforced where**, because two of these lifetimes are one hour apart
 in name only and a third number nearby is not a lifetime at all:
@@ -77,7 +90,7 @@ guessable, on the core that holds it:
 sudo openssl x509 -in /etc/venya/admin/admin.crt -noout -enddate
 ```
 
-Re-anchor this section on the release that first ships the new banner.
+**Re-anchor this section on `v0.1.0beta1` — the release that first ships the new banner is due to carry the re-anchor, and this instruction is the runbook's own.** Until that release is published, the date above stays a computed floor and not a measured fleet face.
 
 - **What the date means:** up to it, a credential minted by a pre-cut-over installer
   — including one copied to a workstation — is still valid on its own schedule. Past
@@ -98,19 +111,25 @@ Re-anchor this section on the release that first ships the new banner.
   deployment's value rather than assuming the default.
 
 nginx terminates TLS on :443 and proxies to the backend over the inner-mTLS
-channel: uvicorn serves TLS on the loopback bind only and nginx presents the
-relay client certificate (`install-venya-core.sh`, the nginx site config block
-with `proxy_pass https://127.0.0.1:8080`). The port is unreachable from other
-hosts; all verification curls below go through `https://<core-host>/…`.
+channel: uvicorn serves TLS on the loopback bind only and nginx authenticates to it
+with the **inner keypair** — `proxy_ssl_certificate /etc/venya/tls/inner.crt`, both
+`location` blocks of the generated site config (`install-venya-core.sh`). That leaf is
+minted per run with `CN=<core-hostname>-inner` and `extendedKeyUsage=serverAuth,clientAuth`,
+because the same keypair is uvicorn's server certificate and nginx's client certificate on
+this one channel; its SAN names the loopback path only, and no application-layer identity is
+taken from it. The **relay** client certificate is a different credential — see the
+section below. The port is unreachable from other hosts; all verification curls below go
+through `https://<core-host>/…`.
 
 ## Revoking the core's relay client credential (#597)
 
-The same relay client certificate is used in two places, and they are not the same
-exposure: nginx presents it on the **loopback** inner-mTLS hop above, and the core
-presents it when it **dials an executor's :8443** listener
+The relay client certificate is the core's credential at one door — it is what the core
+presents when it **dials an executor's :8443** listener
 (`routes/executors.py`, inside `execute_command_on_executor` — the dial URL is
-`https://<executor-hostname>:8443/execute`). Losing the second one means a stolen
-credential can keep relaying commands, so it now has a revocation path.
+`https://<executor-hostname>:8443/execute`). The loopback hop above does NOT use it; that
+hop carries the inner keypair, so revoking a relay credential never disturbs
+nginx→uvicorn. Losing this one means a stolen credential can keep relaying commands, so it
+now has a revocation path.
 
 It did not used to. The credential is minted by `install-venya-core.sh` with `openssl`
 and historically entered no table, so there was nothing to revoke it *in* — a
@@ -150,14 +169,36 @@ executor door.
    and the refusal lands on **new** connections only — a relay call already in flight is
    not terminated. That boundary is the owner's ruling and is not a knob.
 
-5. **Revocation is terminal.** There is no un-revoke; the credential's row keeps its
+5. **Where the refusal actually lands, and what that proves.** The peer check runs in the
+   listener's connection-accept path (`packages/executor/src/executor/relay_listener.py`, the
+   `peer_revocation_refusal` function, called from `_RelayHTTPServer.get_request`), so it fires
+   **before** the application-layer `relay_client_ids` CN test in `ExecuteHandler.do_POST`. Measured, not inferred: one scratch credential, same leaf and same key on the same
+   two listeners, only the registry row changed — before the revoke it drew `403 … peer CN … not
+   allowed` (188 bytes, the CN layer answering), after the revoke it drew **zero application bytes
+   and no HTTP status**, with the journal line `Relay :8443 refused a new connection … 403 REVOKED
+   — the peer's core relay credential is revoked (registry membership, #597)`. Capture:
+   `wave33-specs-20261020/ultra-676-door2B-capture-s150c-report.md`. **Scope of that proof — read
+   this before you tell a customer the credential is dead end-to-end: it is the LISTENER door only.**
+   The other arm, the core's own **dial-out** verification when it presents a revoked executor leaf
+   (`routes/executors.py`, the CRL block inside `_build_relay_ssl_context`, which sets
+   `verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF`),
+   is code-present and unit-asserted, and **has not been observed as a core-side journal line on a
+   served fleet.** If you need that guarantee for a decommission, run the arm you can see: revoke at
+   the registry and confirm the refusal in the **executor's** journal, which is where the evidence lives.
+
+6. **Revocation is terminal.** There is no un-revoke; the credential's row keeps its
    `revoked_at` across a reboot, and re-minting the file (a fresh installer run) creates a
-   row for the NEW serial and leaves the revoked one revoked. Re-enrolment means a new
-   credential, same law as an executor identity.
+   row for the NEW serial and leaves the revoked one revoked. **The revoked row is the
+   record — nothing deletes it, and there is no delete verb to reach for.** Keep it: it is
+   the only thing that says this serial was killed and why (`revoke_reason`). The same
+   row is also what a backup restores, so a **stale** database dump un-revokes a revoked
+   credential — see `BACKUPS.md` § *The relay credential registry* for the post-restore
+   check. Re-enrolment means a new credential, same law as an executor identity.
 
 ## 1. Executor certificate auto-rotation (design + deployment caveat)
 
-Design (daemon `CertManager`, `packages/executor/src/executor/daemon.py:239-323`):
+Design (daemon `CertificateManager`, `packages/executor/src/executor/daemon.py` — the
+class, with `needs_rotation()` and `rotate()` on it):
 
 1. Every main-loop iteration (~30 s) checks `needs_rotation()`: cert expires within
    `rotate_before_days` (default 3), or is already expired.
@@ -258,7 +299,7 @@ requirement applies to the next write, so set the passphrase once and rotate.
 This is disk protection by a file passphrase, **not** hardware-key custody: the
 passphrase lives on the host, delivered through the service environment. The interim
 exemption and its retirement trigger are written up in
-`docs/design-fido2-keywrap-565.md` §6 (owner ruling R7-Q3).
+`docs/design-fido2-keywrap.md` §6 (owner ruling R7-Q3).
 
 `renew` authenticates with the CURRENT cert — run it while the cert is still valid
 (the same 3-day window the daemon uses). If the cert already expired, re-register
@@ -298,7 +339,8 @@ registration with a bootstrap token:
 ```bash
 # 1. On the core (that is where the machine-plane admin pair lives — §0.1):
 venya admin executor-enroll <executor-id> --output-dir /secure/enroll
-#    (token TTL default 1800 s, single-use, stored hashed — server config.py:131-136)
+#    (token TTL default 1800 s, single-use, stored hashed — server config.py,
+#     `ExecutorEnrollmentConfig.token_ttl_seconds`)
 
 # 2. Transfer /secure/enroll to the executor host, then re-run the executor installer:
 curl -fsSL <origin>/install-venya-executor.sh | sudo \
@@ -395,10 +437,16 @@ no CRL Distribution Point is published by default (`crl_url` defaults to None an
 installer sets `VENYA_CRL__CRL_URL`), so nothing in this runbook should be read as
 saying one exists.
 
-**Lifecycle:** the identity flag dies only with the Executor row — never via
-the CRL retention purge. The CRL table (`crl_retention_days`, default 90) is
-append-only serial history + advisory broadcast; purge-dropped serial rows are
-expected, not a bug (the identity flag is the enforcement truth).
+**Lifecycle:** the identity flag dies only with the Executor row — never via a timer.
+The CRL table (`executor_cert_revocations`) is append-only serial history + advisory
+broadcast, and since #685 (owner ruling 2026-10-20) it is EXEMPT from time-based purge:
+the maintenance-loop pass that used to delete rows older than `crl_retention_days` is
+removed, so a revoked serial stays listed. Purge-dropped serial rows are no longer
+"expected" — if a row disappears, that is an incident, not aging. (`crl_retention_days`
+is still declared and is still startup-validated: the core refuses to boot on a value
+below `EXECUTOR_VALIDITY_DAYS`, so no config value can age out a credential that could
+still be valid even if the exemption is ever reverted. See
+`docs/revocation-table-operations-runbook.md` §2a.)
 
 **Admin client-cert revocation** (separate table, `admin_cert_revocations`):
 the supported path is `venya admin revoke-admin-cert <serial>` (ORM — sets
@@ -465,10 +513,12 @@ Fresh installs seed one active `v1` key version (migration
 ## 7. Full root-CA rotation (compromise) — the honest procedure
 
 There is NO in-place CA-rotation command. The supported mechanism is the installer's
-create-if-absent behavior: the CA is generated only when `/var/lib/venya/ca/ca.key` is
-absent (`install-venya-core.sh`, the `if not ca_key_path.exists()` branch through the
-`CA already exists - preserved` print), while the server TLS cert, relay cert, system
-trust, well-known copy, and nginx client-CA bundle are rebuilt on EVERY run
+create-if-absent behavior: the CA is generated only when BOTH `ca.key` and `ca.crt` are
+absent from `/var/lib/venya/ca` — `key_exists`/`cert_exists` gate each branch and
+`if key_exists and cert_exists: print('CA already exists - preserved')`,
+`install-venya-core.sh`; a key that survives without its certificate gets the certificate
+RE-ISSUED from the incumbent key, never a new key, while the server TLS cert, relay cert,
+system trust, well-known copy, and nginx client-CA bundle are rebuilt on EVERY run
 (the server-TLS, relay/inner, trust-store, well-known, and bundle blocks that follow).
 Rotating the root CA therefore means: remove it, re-run the installer,
 then re-enroll every executor.

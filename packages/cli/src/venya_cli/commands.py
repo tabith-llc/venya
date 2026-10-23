@@ -1088,8 +1088,15 @@ def cmd_admin_remove_executor(client: APIClient, args: Any) -> int:
     stderr with a nonzero exit (user-remove precedent).
     """
     try:
-        client.delete(f"/api/v1/admin/executors/{quote(args.executor_id, safe='')}")
-        print(f"Executor '{args.executor_id}' removed (current certificate revoked).")
+        result = client.delete(f"/api/v1/admin/executors/{quote(args.executor_id, safe='')}")
+        # The route reports which serial it revoked, and that is None when the row
+        # carried no certificate record at all — so the parenthetical says what the
+        # answer supports rather than asserting a revocation that may not have happened.
+        revoked_serial = (result or {}).get("revoked_serial")
+        if revoked_serial:
+            print(f"Executor '{args.executor_id}' removed (current certificate revoked: {revoked_serial}).")
+        else:
+            print(f"Executor '{args.executor_id}' removed (no certificate record to revoke).")
         return 0
     except APIClientError as e:
         print(f"Remove failed: {e}", file=sys.stderr)
@@ -1143,8 +1150,26 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             (output_path / "token").unlink(missing_ok=True)
 
         result = client.post(f"/api/v1/admin/executors/{args.executor_id}/enroll")
-        token = result.get("enrollment_token", "")
-        expires_in = result.get("expires_in_seconds", 900)
+        # #698 AC3: a 2xx that carries no token is NOT a success. `_request` already raises on every
+        # 4xx/5xx, so the only way to land here with nothing usable is an empty body (`_request`
+        # returns {} when `response.content` is falsy), a missing/empty/whitespace/null field, or a
+        # non-dict body. Before this check the code wrote a ZERO-BYTE token, printed the bundle block
+        # and a SHA256 of nothing, and returned 0 — a directory that looks complete and nothing to
+        # copy to the executor. Refuse before any write and before any success print.
+        # The mkdir above and the stale-token unlink above it stay exactly where they are, on purpose
+        # (#616): a failed round trip must not hold a documented directory hostage, and removal after
+        # the POST would resurrect the stale-token bug. This branch therefore creates nothing.
+        raw_token = result.get("enrollment_token") if isinstance(result, dict) else None
+        token = raw_token.strip() if isinstance(raw_token, str) else ""
+        if not token:
+            target = f" --output-dir {output_dir}" if output_path is not None else " (token to stdout)"
+            print(
+                f"Enrollment failed: the server returned no enrollment token for '{args.executor_id}'{target}. "
+                "Nothing was minted.",
+                file=sys.stderr,
+            )
+            return 1
+        expires_in = result.get("expires_in_seconds", 900) if isinstance(result, dict) else 900
 
         if output_path is not None:
             import hashlib as hashlib_mod
@@ -2799,6 +2824,38 @@ def cmd_exec_group(client: APIClient, args: Any) -> int:
         return 1
 
 
+def _canonical_serial_text(value: Any) -> str:
+    """Render a serial in the ONE canonical form the revoke verbs match on (refs #682, #481).
+
+    Deliberately RE-TYPED, not imported: ``test_capability_isolation.test_no_core_imports_in_source``
+    bars ``venya_cli`` sources from ``core.*``, and ``core.utils.cert_serial``'s own docstring records
+    that standing exception for the CLI's serial writer. The body mirrors ``parse_serial`` +
+    ``canonical_serial`` on every input the guard crosses, and a cell in
+    ``packages/cli/tests/test_executor_list_serial_width_682.py`` asserts that parity against the
+    SHIPPED function, so this copy cannot drift silently: lowercase hex, zero-padded to a MINIMUM of
+    16 digits — a floor, never a mask, and never re-padded to an openssl byte width — while a value
+    that is not a hex serial comes back as its own casefolded text, which is what no real serial ever
+    renders as. Absent/empty keeps the empty cell it printed before; that is the ONE deliberate
+    difference from ``canonical_serial(None)`` (which casefolds to ``"none"``), because a display
+    column must not invent a word where the store held nothing.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        return format(value, "016x") if value >= 0 else str(value).strip().casefold()
+    text = str(value).strip()
+    if not text:
+        return ""
+    body = text[2:] if text[:2].lower() == "0x" else text
+    if text.startswith("-"):
+        return text.casefold()
+    try:
+        parsed = int(body, 16)
+    except ValueError:
+        return text.casefold()
+    return format(parsed, "016x")
+
+
 def executor_list(client: APIClient, args: Any) -> int:
     """List registered executors with their heartbeat-reported build versions.
 
@@ -2828,7 +2885,14 @@ def executor_list(client: APIClient, args: Any) -> int:
             rows.append(
                 [
                     e.get("executor_id", ""),
-                    (e.get("serial_number") or "")[:16],
+                    # #682 / #481: print the WHOLE canonical serial, never a slice. A 16-char
+                    # truncation is an operator-visible short form of a serial that is 40 hex on
+                    # the wire, and a truncated value pasted into `revoke` silently names the wrong
+                    # certificate. `venya-cli` is barred from importing core.utils.cert_serial
+                    # (test_capability_isolation), so the canonical writer is re-typed here in the
+                    # SAME form the revoke-side mint print already emits: `format(serial, "016x")` —
+                    # a MINIMUM width, so a 40-hex serial keeps all 40 characters.
+                    _canonical_serial_text(e.get("serial_number")),
                     e.get("not_after") or "-",
                     e.get("version") or "unknown (pre-B daemon)",
                 ]
@@ -3820,10 +3884,10 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
         # revoking the executor identity. Incident-response tool.
         try:
             int(serial, 16)
-            if not 1 <= len(serial) <= 16:
+            if not 1 <= len(serial) <= 64:
                 raise ValueError("bad length")
         except (ValueError, TypeError):
-            print(f"Error: --serial must be hex, 1-16 chars (got {serial!r})", file=sys.stderr)
+            print(f"Error: --serial must be hex, 1-64 chars (got {serial!r})", file=sys.stderr)
             return 1
 
     # Resolve executor_id: explicit arg > local cert CN
@@ -3845,13 +3909,47 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
             json={"serial": serial.casefold()} if serial else None,
         )
         revoked = result.get("revoked", False) if result else False
+        # #687 CLI half: show what the core ASSERTS, not what the operator typed. The route answers a
+        # duplicate serial-form revoke with the owner the revocation row stored, plus
+        # requested_executor_id/executor_id_mismatch when they disagree. Before this the two prints
+        # below echoed the local path variable, so the terminal was the fourth face still reading the
+        # unverified value after the log and the response had been corrected. `asserted` falls back to
+        # the typed value ONLY when the body names no owner at all (an older core), which is exactly
+        # the pre-fix answer, so a paired repeat stays byte-identical on every shipped arm.
+        asserted = (result or {}).get("executor_id") or executor_id
+        # The note is gated on the CORE's own flag, never on the CLI's own arithmetic. An older core can
+        # answer a different owner without setting executor_id_mismatch; printing that string in that
+        # case would attribute a field to the server that the server never sent — the same invention the
+        # ticket is about, arriving from the client side. So: display always follows the core, the flag
+        # is quoted only when the core actually raised it.
+        flagged = bool((result or {}).get("executor_id_mismatch"))
+        # The core's own field name is reused rather than a new CLI coinage: one fact, one vocabulary.
+        claimed = (result or {}).get("requested_executor_id") or executor_id
+        # The core answers 200 with revoked=false when the serial it was given is
+        # ALREADY revoked (identity form: the executor row already carries
+        # revoked_at). Transport success is not semantic success, so the headline
+        # follows the flag the summary line already prints (#666 precedent).
         if serial:
-            print("Certificate serial revoked (identity NOT revoked).")
-            print(f"  Executor ID:  {executor_id}")
+            print(
+                "Certificate serial revoked (identity NOT revoked)."
+                if revoked
+                else "Certificate serial was already revoked (no change)."
+            )
+            print(f"  Executor ID:  {asserted}")
+            if flagged:
+                # Named on the face rather than left to the log, so an operator at a terminal sees the
+                # disagreement at the moment they make it. Reuses the core's field name verbatim.
+                print(
+                    f"  NOTE:         serial belongs to {asserted}; this call was made as {claimed} "
+                    "(executor_id_mismatch)"
+                )
             print(f"  Serial:       {serial.casefold()}")
         else:
-            print("Certificate revoked.")
-            print(f"  Executor ID:  {executor_id}")
+            # Identity form: the route has no mismatch arm — it resolves the row by this very id, so the
+            # core never sets the flag here and no note can appear. Displaying `asserted` keeps the rule
+            # (show what the core says) without inventing a second face for a fact that cannot occur.
+            print("Certificate revoked." if revoked else "Executor identity was already revoked (no change).")
+            print(f"  Executor ID:  {asserted}")
         if not serial and revoked:
             print("  Identity:     REVOKED (terminal — re-enrollment requires a NEW executor_id)")
         print(f"  Revoked:      {'Yes' if revoked else 'No'}")
@@ -4225,7 +4323,7 @@ def _decrypt_ca_backup(data: bytes, passphrase: str) -> bytes:
     return padded[:-pad]
 
 
-def _validate_ca_key_pem(data: bytes) -> bytes:
+def _validate_ca_key_pem[T: (bytes, memoryview)](data: T) -> T:
     """Fail closed unless `data` parses as a PLAINTEXT PEM private key.
 
     Compensating control for the unauthenticated legacy CBC reader: a wrong
@@ -4297,12 +4395,28 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     with SecretHolder(plaintext_key) as holder:
         del plaintext_key, raw_at_rest
 
+        # #593: the tty gate, in the shipped shape of the sibling doors
+        # (at_rest_key.acquire_server_passphrase :126-127, executor_key.acquire_write_passphrase
+        # :146-147): NAMED refusal BEFORE any getpass call. This door has no env-var or argument
+        # source by design (#593 AC4 — a value in argv or the environment is visible to other
+        # processes and shell history), so off a terminal the honest answer is refusal, not the
+        # getpass fallback that only WARNS "Password input may be echoed" before reading a CA-key
+        # passphrase from a stream this code does not control. Nothing is written on this path;
+        # the holder erases its buffer on this exit too (#538).
+        if not sys.stdin.isatty():
+            print(_ca_key_tty_refusal(), file=sys.stderr)
+            return 1
+
         # Prompt for passphrase (twice for confirmation). The window spans both
         # prompts: the operator's typing time is part of how long the key sits
         # here, and it has no upper bound in the code.
         passphrase1 = None
         while passphrase1 is None:
-            passphrase1 = getpass.getpass("Enter passphrase for encrypted key: ")
+            passphrase1 = getpass.getpass(
+                f"Enter passphrase for encrypted key (at least "
+                f"{MIN_PASSPHRASE_CODE_POINTS} characters; longer than "
+                f"{MAX_PASSPHRASE_CODE_POINTS} is accepted too): "
+            )
             passphrase2 = getpass.getpass("Confirm passphrase: ")
             if passphrase1 != passphrase2:
                 print("Passphrases do not match. Try again.")
@@ -4401,14 +4515,27 @@ def cmd_admin_split_ca_key(args: Any) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    threshold = args.threshold
-    num_shares = args.shares
+    # #674: the unwrapped root-CA plaintext lives in the one buffer this command
+    # owns from here, and is erased on every exit path — including the threshold
+    # refusal below. `del` drops the producer's names; it does not erase the
+    # producer's copy (#538's stated limit).
+    with SecretHolder(plaintext_key) as holder:
+        del plaintext_key, raw_at_rest
 
-    if threshold > num_shares:
-        print("Error: threshold cannot exceed number of shares", file=sys.stderr)
-        return 1
+        threshold = args.threshold
+        num_shares = args.shares
 
-    shares = split(plaintext_key, threshold=threshold, shares=num_shares)
+        if threshold > num_shares:
+            print("Error: threshold cannot exceed number of shares", file=sys.stderr)
+            return 1
+
+        # The scoped read-only view is what the splitter is fed — no plaintext
+        # bytes copy leaves the holder here. shamir builds its own payload
+        # internally; that copy is the residual named in the #674 report, not a
+        # thing this call site can erase.
+        with holder.view() as key_material:
+            shares = split(key_material, threshold=threshold, shares=num_shares)
+
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     ensure_secret_dir(output_dir)
 
@@ -4514,8 +4641,20 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
             print(f"Error: backup file not found: {backup_path}", file=sys.stderr)
             return 1
 
+        # #593: the same tty gate as the export door, same shipped exemplar shape. It belongs to
+        # the BACKUP arm only — shares mode prompts nothing and must keep running headless. The
+        # guard sits before the blob is read and before any getpass call: the incumbent at-rest
+        # key keeps its bytes and nothing is decrypted on this path.
+        if not sys.stdin.isatty():
+            print(_ca_key_tty_refusal(read_path=True), file=sys.stderr)
+            return 1
+
         encrypted_data = backup_path.read_bytes()
-        passphrase = getpass.getpass("Enter passphrase to decrypt backup: ")
+        passphrase = getpass.getpass(
+            f"Enter passphrase to decrypt backup (a backup passphrase shorter than "
+            f"{MIN_PASSPHRASE_CODE_POINTS} characters is refused here, before anything is "
+            f"decrypted): "
+        )
         # #573: the VENYACA1 READ door. The passphrase's job here is to UNSEAL a blob that
         # already exists, and the restore's own write (`atomic_write_key`) is below this
         # block, so this door speaks the read wording: the blessed block with the
@@ -4534,18 +4673,29 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
         print(f"Unknown restore mode: {mode}", file=sys.stderr)
         return 1
 
-    try:
-        reconstructed = _validate_ca_key_pem(reconstructed)  # entry-path validator, site 3
-        # Re-encrypt into the at-rest envelope before writing (#297): target-
-        # format preserving, probe-verified against the current encrypted
-        # file (wrong server passphrase -> LOUD, ZERO writes, byte-identity),
-        # plaintext never persisted where the envelope is expected.
-        at_rest_bytes = restore_at_rest_bytes(ca_key_path, reconstructed)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+    # #674: the reconstructed root-CA plaintext from EITHER arm is handed to the
+    # one buffer this command owns, and that copy is erased on every exit path —
+    # including the validator refusal and the wrong-server-passphrase refusal.
+    # As in export (#538), dropping the producer's name does not erase the
+    # producer's copy; the holder's claim is about its OWN copy only.
+    # The at-rest write happens INSIDE the view because restore_at_rest_bytes can
+    # hand back its input unchanged (the legacy plaintext-target branch), so the
+    # bytes the writer needs may still be the holder's own buffer.
+    with SecretHolder(reconstructed) as holder:
+        del reconstructed
 
-    atomic_write_key(ca_key_path, at_rest_bytes)
+        try:
+            with holder.view() as key_material:
+                validated = _validate_ca_key_pem(key_material)  # entry-path validator, site 3
+                # Re-encrypt into the at-rest envelope before writing (#297): target-
+                # format preserving, probe-verified against the current encrypted
+                # file (wrong server passphrase -> LOUD, ZERO writes, byte-identity),
+                # plaintext never persisted where the envelope is expected.
+                at_rest_bytes = restore_at_rest_bytes(ca_key_path, validated)
+                atomic_write_key(ca_key_path, at_rest_bytes)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     print(f"CA key restored to {ca_key_path}")
     print("WARNING: All existing executor certificates signed by this CA are now valid again.")
@@ -4624,7 +4774,7 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
     """Owner-blessed refusal text for a passphrase under the length floor (#573).
 
-    The wording is the blessed block (flash1's §6, ruled in as R5(a) of the s87 owner
+    The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
     ruling set) with only the two authorized corrections applied: the supported maximum
     stated plainly instead of "there is no maximum below 64 characters", and the floor
     number interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the door
@@ -4642,13 +4792,42 @@ def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
         "of trust for this deployment, and short passphrases are what an attacker tries first.\n"
         "To fix it:\n"
         f"  1. Replace the value of {subject} with a passphrase of at least "
-        f"{MIN_PASSPHRASE_CODE_POINTS} characters. Characters are\n"
-        "     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.\n"
+        f"{MIN_PASSPHRASE_CODE_POINTS} characters.\n"
         "     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.\n"
         f"  2. There is no rule about which characters appear — length is the only requirement, and\n"
-        f"     Venya supports passphrases up to {MAX_PASSPHRASE_CODE_POINTS} characters.\n"
+        f"     Passphrases longer than {MAX_PASSPHRASE_CODE_POINTS} characters are accepted too — "
+        f"{MAX_PASSPHRASE_CODE_POINTS} is the length Venya guarantees to support, not a maximum it enforces.\n"
         "  3. Provide the passphrase through the environment, never as a command-line argument\n"
         "     (command-line values are visible to other processes on the machine).\n"
+        "Your existing CA was not modified by this refusal.\n"
+        "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
+    )
+
+
+def _ca_key_tty_refusal(*, read_path: bool = False) -> str:
+    """#593: named refusal for the CA-key custody doors when stdin is not a TTY.
+
+    Same blessed block as ``_short_passphrase_refusal`` above (REFUSED / why it matters /
+    numbered fix / nothing-modified clause / doc reference), and the same one-builder-
+    both-doors shape: the read door drops the write clause and takes its own in its place.
+    The text carries no value — there is nothing to redact, because the refusal reads no
+    input at all; that is the point of gating before ``getpass``.
+    """
+    head = (
+        "REFUSED: the CA-key backup passphrase must be typed at a terminal and stdin is not a TTY."
+        if read_path
+        else "REFUSED: the CA-key export passphrase must be typed at a terminal and stdin is not a TTY."
+    )
+    state = "Nothing was decrypted." if read_path else "Nothing was written."
+    return (
+        f"{head} {state}\n"
+        "Why it matters: off a terminal the hidden prompt cannot control echo — the passphrase\n"
+        "sealing this CA key would be read from a stream this command does not control, and the\n"
+        "fallback only warns about echo rather than preventing it.\n"
+        "To fix it:\n"
+        "  1. Run this command from an interactive terminal (at the keyboard, or over ssh with a tty).\n"
+        "  2. There is deliberately no passphrase argument or environment variable on this door: a\n"
+        "     value in argv or the environment is visible to other processes, shell history and logs.\n"
         "Your existing CA was not modified by this refusal.\n"
         "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
     )
@@ -4955,7 +5134,7 @@ def _admin_ca_plaintext_key_refusal() -> str:
 
 
 #: #572 — the owner-approved refusal for a wrong passphrase on the admin CA key, recorded verbatim
-#: in the ruling (room wren-37 / the dispatch's §2, single-quoted there for exactness). This is the
+#: in the ruling (room dispatch 37 / the dispatch's §2, single-quoted there for exactness). This is the
 #: ONE hand-written home of those bytes in the product tree — the refusal below and the test cells
 #: read this constant, so a future edit changes the voice in a single place instead of chasing
 #: copies (#568's single-home shape; the sibling cell pins that exactly one line types it).
@@ -5143,7 +5322,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
 
         # #572 — a wrong passphrase used to fall through to the backstop below and answer in
         # cryptography's own sentence. Scope, per the lead's
-        # ruling (room wren-37): the approved sentence fires ONLY when a passphrase was supplied,
+        # ruling (room dispatch 37): the approved sentence fires ONLY when a passphrase was supplied,
         # the file carries the encrypted marker, AND the probe says the file is a structurally
         # parseable encrypted key. The probe is the load-bearing part: the marker alone is True for
         # a TRUNCATED key and for armor kept over a body that no longer decodes, and telling an
@@ -5295,22 +5474,31 @@ def cmd_admin_revoke_admin_cert(client: APIClient, args: Any) -> int:
         print("Error: server URL required. Pass --server-url or set VENYA_SERVER_URL", file=sys.stderr)
         return 1
 
-    # Validate serial format (must be valid hex, up to 16 chars)
+    # Validate serial format (must be valid hex, up to 64 chars — the width the serial_number
+    # columns store; #481 made 16 a write MINIMUM, never a ceiling)
     try:
         int(serial, 16)
-        if len(serial) > 16:
+        if len(serial) > 64:
             raise ValueError("Serial too long")
     except ValueError as e:
-        print(f"Error: invalid serial format — must be hex string (up to 16 chars): {e}", file=sys.stderr)
+        print(f"Error: invalid serial format — must be hex string (up to 64 chars): {e}", file=sys.stderr)
         return 1
 
     url = server_url.rstrip("/")
     try:
-        client.post(
+        result = client.post(
             f"{url}/api/v1/admin/certs/revoke",
             json={"serial": serial, "reason": reason},
         )
-        print(f"Certificate {serial} revoked (reason: {reason})")
+        # The route answers the repeat arm with `already_revoked=true` and the reason that is ON
+        # RECORD, which is not the one typed into this call. The headline follows the answer instead
+        # of asserting the action, so an operator can tell "this call did it" from "it was already
+        # done". Same shape as the relay-credential arm (`cmd_admin_core_relay_cert`), and the exit
+        # status is deliberately UNCHANGED — this is a reporting fix, not a behavior change.
+        if (result or {}).get("already_revoked"):
+            print(f"Certificate {result.get('serial', serial)} was already revoked (no change)")
+        else:
+            print(f"Certificate {serial} revoked (reason: {reason})")
         return 0
     except APIClientAuthenticationError as e:
         print(f"Authentication failed: {e}", file=sys.stderr)
@@ -5387,10 +5575,10 @@ def cmd_admin_core_relay_cert(client: APIClient, args: Any) -> int:
                 return 1
             try:
                 int(serial, 16)
-                if len(serial) > 16:
+                if len(serial) > 64:
                     raise ValueError("serial too long")
             except ValueError as e:
-                print(f"Error: invalid serial format — must be hex string (up to 16 chars): {e}", file=sys.stderr)
+                print(f"Error: invalid serial format — must be hex string (up to 64 chars): {e}", file=sys.stderr)
                 return 1
             reason = getattr(args, "reason", "unspecified")
             result = client.post(f"{base}/revoke", json={"serial": serial, "reason": reason})

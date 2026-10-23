@@ -6,7 +6,7 @@
 
 """Behavioral cells: #587 — stop-before-migrate, and a freshness proof that binds.
 
-The owner ruled LAND on two halves (courier-52): "fix the ordering (stop before
+The owner ruled LAND on two halves (dispatch 52): "fix the ordering (stop before
 migration) and make the freshness proof binding, before beta." These cells
 exercise exactly that shipped text, and nothing else:
 

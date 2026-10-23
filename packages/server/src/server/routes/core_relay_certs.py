@@ -7,7 +7,7 @@
 """Revoke verb for the core's own relay client credentials (#597).
 
 Mounted as its own router rather than into ``routes/admin.py``, which is another
-lane's live file at this seat (s134 batch: flash4 owns it for #662). Same auth
+lane's live file at this seat (s134 batch: a prior worker lane owns it for #662). Same auth
 dependency, same audit shape, same serial vocabulary as the sibling
 ``POST /admin/certs/revoke`` there — copied in form, not imported, so neither leg
 has to edit the other's module.
@@ -115,19 +115,20 @@ class CoreRelayCertRegisterResponse(BaseModel):
 def _validate_serial_or_400(provided: str) -> str:
     """Operator-string gate then canonical WRITE form — same contract as the sibling.
 
-    Non-empty hex, at most 16 digits (unchanged 400 shape), then normalized once at
+    Non-empty hex, at most 64 digits — the width the ``serial_number`` columns store — then
+    normalized once at
     the storage boundary via ``canonical_serial`` (#481). Callers compare with
     ``serial_match_clause`` so any stored legacy spelling still matches.
     """
     text = (provided or "").strip()
     try:
-        if not text or len(text) > 16:
+        if not text or len(text) > 64:
             raise ValueError("bad length")
         int(text, 16)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid serial format — must be hex string (up to 16 chars)",
+            detail="Invalid serial format — must be hex string (up to 64 chars)",
         ) from None
     return canonical_serial(text)
 

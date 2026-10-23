@@ -6,7 +6,7 @@
 
 """Behavioral cells: CLI uninstaller removes writer sites and fails loud (#390).
 
-Root cause (uv 0.12 probe, montana scratch HOME): uv's tool-env + shim removal
+Root cause (uv 0.12 probe, a scratch HOME on the Linux dev box): uv's tool-env + shim removal
 is receipt-driven (uv-receipt.toml). For a de-registered or de-contented tool
 env `uv tool uninstall <pkg>` exits non-zero with "is not installed" and
 removes NOTHING, while ~/.local/bin shims and the tools dir survive — `venya`

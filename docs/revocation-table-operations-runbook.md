@@ -27,7 +27,7 @@ core. This is a fleet-wide outage wearing a migration's clothing.
 
 | # | Statement shape against `executor_cert_revocations` | Readers blocked? | Measured |
 |---|---|---|---|
-| 1 | `INSERT` / `DELETE` (the revoke path, the retention purge) — takes `ROW EXCLUSIVE` | **NO** | 20 s `ROW_EXCLUSIVE` hold: poll `200`, health `200` at every sample, 22 journal lines, **no silence** |
+| 1 | `INSERT` / `DELETE` (the revoke path; the retention purge is gone — see §2a) — takes `ROW EXCLUSIVE` | **NO** | 20 s `ROW_EXCLUSIVE` hold: poll `200`, health `200` at every sample, 22 journal lines, **no silence** |
 | 2 | `LOCK TABLE … IN ACCESS EXCLUSIVE MODE` — held | **YES** | 30 s hold: read waited **27,058 ms**; poll/health/ready `000`; **57 s of zero access-log lines** |
 | 3 | `ACCESS EXCLUSIVE` — **queued, never granted** (blocked behind a reader) | **YES** | read waited **16,048 ms**; ungranted lock requests went 1 → 3; a route died at t=12 s |
 
@@ -38,8 +38,37 @@ keeps starving the liveness plane for as long as it waits. "It will only take a 
 bound the damage, because the queue is upstream of the grant.
 
 Fact 1 is the reason this is a runbook and not a code prohibition: ordinary revocation activity —
-re-enrolling, rotating, the 90-day retention purge — does **not** stall readers under MVCC and
-needs no window.
+re-enrolling, rotating — does **not** stall readers under MVCC and needs no window.
+
+## 2a. There is no retention purge on this table any more (#685)
+
+Up to and including the anchor this runbook was written against, a maintenance-loop pass
+(`maintenance.py` → `CAManager.purge_expired_revocations`, 5-minute schedule) DELETEd
+`executor_cert_revocations` rows older than `crl.crl_retention_days` (default 90). **That pass and
+that method are removed** by the owner's ruling of 2026-10-20 on ticket #685: the table is the
+membership population for credential validity, so truth about a revoked credential is not aged out
+on a timer. It now matches `ExecutorCert`, which was never purged.
+
+Three operational consequences, all of them intended:
+
+- **The table grows.** Rows are permanent for the life of the core's DB. Size is now bounded only
+  by how many executor credentials have ever been revoked, so the §5 scan-cost guidance reads
+  differently: the population is not trimmed any more, and the `DELETE` that used to trim it is not
+  available as a lock-class answer to a slow scan either.
+- **Do not hand-delete history.** `TRUNCATE` and a targeted `DELETE` are the same act the code was
+  removed for: they drop the assertion that a serial is revoked. If the population really must be
+  reduced, that is a ruling to ask for, not an operation to run.
+- **`crl.crl_retention_days` is no longer a knob you can use to shrink this table.** The field is
+  still shipped and still validated — and the validator now REFUSES to start the core on any value
+  below the longest leaf-certificate lifetime whose revocations live in the two revocation tables,
+  `max(EXECUTOR_VALIDITY_DAYS=30, ADMIN_CERT_VALIDITY_DAYS=90)` = **90**. A value like `1` used to
+  be accepted by `ge=1` and would have deleted rows for credentials still inside their own validity
+  window; it now aborts startup, and so does anything from 1 through 89. (The shipped default is 90
+  and sits exactly on that bound, which is why the comparison is `>=` and not `>` — see
+  `test_crl.py::test_shipped_default_retention_sits_on_the_anchor_and_loads`.) The admin half of
+  the anchor is deliberate: `AdminCAManager.purge_expired_revocations` is not wired today, and the
+  guard covers it anyway, so the day someone wires it there is no window that can age out a live
+  credential. That bound is defense-in-depth: it holds even if the exemption is ever reverted.
 
 ## 3. Doing DDL on the revocation table
 
@@ -114,10 +143,16 @@ the plain `serial_number` indexes and is measured as a **Seq Scan** (`EXPLAIN`, 
 table). An index makes the read cheaper; it does **not** make the read immune to a waiting
 `ACCESS EXCLUSIVE`. Do not record an index as the mitigation for this hazard.
 
-No migration currently takes `ACCESS EXCLUSIVE` on this table: it was created in
+No migration took `ACCESS EXCLUSIVE` on this table **until revision `043`**: it was created in
 `002_executor_cert_revocations.py` (table + `UniqueConstraint` on `serial_number` + two indexes)
-and no later revision in `packages/core/alembic/versions/` touches it. That is a fact about today,
-and §3 step 1 is how it stays a fact.
+and no revision through `042` touches it. **`043_revocation_epoch_597t2.py` is the first exception, and
+it is a `CREATE TRIGGER`** — which takes that lock class on every relation it watches, including this one
+and the heartbeat table `executors`. The revision therefore runs its DDL under
+`SET LOCAL lock_timeout = '5s'` / `statement_timeout = '30s'` exactly as §3 step 2 prescribes, so a
+blocked upgrade gives up on the DDL side instead of joining a convoy; when it times out the revision
+aborts and the trigger did not appear, and the fix is a maintenance window or halted daemons (§5, §7) —
+never a retry loop without the bound. §3 step 1 is how every *later* revision keeps this a fact about its
+own day rather than a surprise. §9 records what `043` does and the residual it cannot close.
 
 ## 5. Maintenance statements that take the blocking class
 
@@ -131,10 +166,10 @@ of them arrive from an operator, a backup tool, or a scheduler:
 | `VACUUM FULL executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Do not run on this table in-service. Plain `VACUUM` takes `SHARE UPDATE EXCLUSIVE` and is fine. |
 | `CLUSTER executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Avoid entirely; there is no reason to cluster this table. |
 | `REINDEX TABLE executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Use `REINDEX INDEX CONCURRENTLY` per index instead. |
-| `TRUNCATE executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Never. It also destroys revocation history, which is a security fact, not just data. Use the retention purge. |
+| `TRUNCATE executor_cert_revocations` | `ACCESS EXCLUSIVE` | **YES** | Never. It destroys revocation history, which is a security fact, not just data — and there is no retention purge to point at as the sanctioned alternative any more (#685): the rows are permanent by ruling. |
 | `ALTER TABLE executor_cert_revocations …` (most forms) | `ACCESS EXCLUSIVE` | **YES** | §3. |
 | plain `VACUUM` / `ANALYZE` | `SHARE UPDATE EXCLUSIVE` | no | Safe. |
-| the retention purge (`maintenance.py` → `ca.py:772`, a `DELETE`, 5-minute schedule) | `ROW EXCLUSIVE` | no | Safe as shipped; do not "optimize" it into a `TRUNCATE`. |
+| an operator-run `DELETE` against this table | `ROW EXCLUSIVE` | no | Lock-safe, **ruled wrong**: the retention purge that used to be the sanctioned `DELETE` was removed (#685, §2a). Do not substitute your own. |
 
 **Long transactions** are the other half of the hazard, via fact 3: a transaction that holds
 `ACCESS SHARE` and stays open lets a DDL queue up behind it, and then everyone else queues behind
@@ -196,8 +231,9 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   it is counted on its own cumulative series, `venya_revocation_read_scan_refusals_total{site=…}` —
   never merged into `venya_revocation_read_refusals_total`, because a slow scan and a lock convoy are
   two different diagnoses. If the SCAN counter is what is moving, the table is being read too slowly:
-  the fix is the size of the population (the retention knob `crl.crl_retention_days` and the purge it
-  drives, and the unindexed `executors.revoked_at` scan the poll fallback performs) or an index, not a
+  the fix is the size of the population — which since #685 is NOT reducible by any purge (see §2a: the
+  retention window is no longer consumed, and the rows are permanent by ruling), so the live options
+  are the unindexed `executors.revoked_at` scan the poll fallback performs, and an index, not a
   bigger number here.
 - A slow read that still ANSWERS is visible rather than silent: `venya_revocation_read_duration_seconds{site=…}`,
   bucketed up to 300 s. `venya_request_duration_seconds` tops out at a 10 s bucket, so a 12 s read and
@@ -208,11 +244,12 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   public, unauthenticated endpoint every executor polls.
 
 **The admin plane carries the same bound, on its own table (#658).**
-`_validate_admin_mtls` reads `admin_cert_revocations` — a different table, with its own retention
+`_validate_admin_mtls` reads `admin_cert_revocations` — a different table, whose own retention
 purge (`AdminCAManager.purge_expired_revocations`, a `DELETE`, so `ROW EXCLUSIVE` and safe as
-shipped) — and that read used to be synchronous and unbonded inside an `async def` on the ordinary
-pool. It now runs through the SAME seam and the SAME knob (`crl.revocation_read_lock_timeout_ms`);
-there is no second deadline mechanism and no second config key. It is labelled separately, so a
+shipped) is NOT wired into the maintenance loop and was NOT touched by #685 — and that read used to
+be synchronous and unbonded inside an `async def` on the ordinary pool. It now runs through the
+SAME seam and the SAME knob (`crl.revocation_read_lock_timeout_ms`); there is no second deadline
+mechanism and no second config key. It is labelled separately, so a
 stall on one plane is never misread as a stall on the other:
 `venya_revocation_read_refusals_total{site="admin-mtls"}` against the executor plane's
 `{site="heartbeat"|"executor-mtls"|"audit-ingest"|"executor-session"|"crl"|"register/…"|"dial/…"}`.
@@ -252,3 +289,86 @@ the outage.
 - `cert-rotation-runbook.md` — the credential ceremonies that write to this table (§3, §4 there).
 - `beta-known-limitations.md` — record any window you could not make non-blocking.
 - `wave29-specs-20261016/wren-603-shapeA-ruling-flash2-s130.md` — the ruling that requested this.
+
+## 9. The revocation epoch counter (PB-597T2, revision `043`)
+
+Revision `043` adds a one-row table, `revocation_epoch`, and eight PostgreSQL triggers that advance its
+counter whenever ANY revocation state is written. Revocation state is not one table — it is
+`executor_cert_revocations` and `admin_cert_revocations` (a row *is* the revocation), plus the
+`revoked_at` columns of `executors` and `core_relay_credentials` (a column flip *is* the revocation) — so
+the counter spans all four, and one number answers "has revocation state changed since my last read"
+without enumerating writers. #597 closed conceding that "raw SQL or out-of-band revocations were not
+exhaustively searched"; that enumeration is not finishable, and this replaces the question.
+
+**Why a trigger and not a privilege.** `031_audit_append_only_grants.py` is the nearest precedent and it
+is not one — its append-only guarantee is made of `GRANT`/`REVOKE`, not of a trigger, and there was no
+`CREATE TRIGGER` anywhere in `packages/core/alembic/versions/` before `043`. Privileges bind *who* may
+write; enforcing them here would mean revoking `UPDATE`/`INSERT` from the runtime role, which forbids the
+very product writes the counter exists to count, and they bind nobody at `psql` — the out-of-band writer
+is precisely the one #597 could not find. A trigger runs whatever the writer's identity, so the
+instrument changed because the property needed changed.
+
+**Measured behaviour, on PostgreSQL 17.11** — each row was run, not reasoned; the cells live in
+`packages/core/tests/test_migration_043_revocation_epoch_597t2.py`:
+
+| statement | epoch |
+|---|---|
+| `SELECT` against any watched relation (five, including a CRL-shaped read) | **unchanged** |
+| raw `INSERT` into `executor_cert_revocations` / `admin_cert_revocations` via `psql`, zero ORM | **+1 each** |
+| `UPDATE … SET revoked_at = now()` on `executors` / `core_relay_credentials` | **+1** |
+| `UPDATE … SET revoked_at = NULL` (an un-revoke) | **+1** — a change is a change |
+| `DELETE` from any watched relation | **+1** |
+| **`TRUNCATE`** on either row-table | **+1** — no row trigger fires on `TRUNCATE`, so `043` installs a statement-level `AFTER TRUNCATE` trigger on both; without it this row would read "unchanged", and that is the gap §5 calls the worst maintenance statement |
+| `UPDATE executors SET last_heartbeat = now()` (a heartbeat) | **unchanged** |
+| `UPDATE executors SET hostname = …` | **unchanged** |
+| the product's own ORM write (`ExecutorCertRevocation` insert, committed) | **+1** |
+
+**The heartbeat pair is load-bearing.** `executors` is written on every beat by every daemon, so the two
+`revoked_at`-column triggers carry `AFTER UPDATE OF revoked_at` plus
+`WHEN (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at)`. Without the guard the counter becomes a traffic
+meter: "has revocation state changed?" would answer yes continuously, and the first consumer learns to
+ignore it.
+
+**Fail-closure, measured twice because the first version got it wrong.** The bump is
+`UPDATE revocation_epoch SET epoch = epoch + 1 … WHERE id = 1`. With the seed row deleted, that UPDATE
+matches nothing and, with no further clause, raises nothing — an early build let a real revocation
+`INSERT` answer `INSERT 0 1` while the counter stood still, which is the #597 hole reopened by the thing
+meant to close it. The shipped function therefore checks `GET DIAGNOSTICS … ROW_COUNT` and raises:
+
+```
+ERROR:  revocation_epoch row 1 is missing — revocation state cannot be counted, so this write is refused.
+HINT:  This is deliberate fail-closure (PB-597T2). Do not soften the trigger to let the write through.
+```
+
+The consequence, stated because it is an outage shape: **with that row gone — deleted, or the table
+emptied by a `TRUNCATE` — revocation writes are REFUSED until it is restored**, and the restore is the one
+`INSERT` the error text names. The row is guarded by `chk_revocation_epoch_single_row` (`id = 1`), so a
+second row cannot exist to be read by mistake. Never make the trigger tolerant to unblock a write; restore
+the row.
+
+### The residual — what this mechanism cannot bound
+
+**A DBA who drops a trigger wins, and nothing in the schema says so.** Measured: after
+`DROP TRIGGER trg_revocation_epoch_exec_cert_rev ON executor_cert_revocations`, a revocation `INSERT`
+**succeeded** and the epoch **did not move**. No error, no log line, no readback — the credential is
+revoked, the counter is stale, and the only way to notice is that the counter stopped moving on a table
+that is being written. This is the stated limit of the design ("the last writer that can evade a trigger
+is the DBA who drops the trigger"), and it is why PB-597T2 is a *floor* under an admission check rather
+than a proof of an unchanged table.
+
+Two partial protections, both measured, and neither one claimed away:
+
+- **The function cannot be removed quietly.** `DROP FUNCTION venya_revocation_epoch_bump()` is REFUSED —
+  `cannot drop function … because other objects depend on it`, with the eight dependent triggers named,
+  `HINT: Use DROP ... CASCADE`. Taking it that way prints `drop cascades to 8 other objects`, which is
+  visible in the operator's own output. Dropping the eight triggers individually stays silent, so the
+  quiet path remains the common one.
+- **The downgrade is not a residual.** `alembic downgrade 042` drops all eight triggers, the function and
+  the table, leaves the watched relations and their rows alone, and revocation writes keep working
+  against the pre-`043` schema. Measured both ways, and `upgrade head` re-applies cleanly onto a schema
+  with live revocation rows (the guarded seed `INSERT` re-creates row 1, counters restart at 0).
+
+**What to watch.** `select epoch, updated_at from revocation_epoch where id = 1` on the core's database.
+An `updated_at` that stops moving while `executor_cert_revocations` / `admin_cert_revocations` gain rows is
+the signature of a dropped guard, and it is the only signature there is. The counter restarts at 0 across
+a downgrade/upgrade round trip, so a *decreasing* epoch is a schema event, not a rewind of history.

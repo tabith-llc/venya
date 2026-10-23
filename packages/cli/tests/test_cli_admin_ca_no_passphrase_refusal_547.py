@@ -180,7 +180,7 @@ class TestEncryptedPathStillWorks:
         passphrase set?" differently — that divergence is exactly what #547 was filed to
         end — so the state of the code moved and this assertion moved with it, same shape
         as N1/N2: the refusal plus the filesystem proof. The lead blessed the
-        replacement (wren-9-0ce003). A minimum LENGTH is still not ruled and is not
+        replacement (dispatch 9-0ce003). A minimum LENGTH is still not ruled and is not
         asserted here.
         """
         monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", blank)

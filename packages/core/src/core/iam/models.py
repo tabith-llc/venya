@@ -20,7 +20,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -626,6 +628,83 @@ class AdminCertRevocation(Base):
     reason = Column(String(64))
 
 
+class AdminCredential(Base):
+    """Registry of admin certificates this core issued or holds — the population #684 lacked.
+
+    WHY THIS TABLE EXISTS. ``admin_revoke_admin_cert`` validated the FORMAT of the
+    operator's string and then blind-inserted an ``AdminCertRevocation`` row, so
+    ``venya admin revoke-admin-cert --serial <any hex>`` exited 0 and wrote a revocation
+    naming a serial no credential ever held, while the live admin credential kept
+    transacting (#684, measured by a prior worker lane at leg 232 against the sibling relay route,
+    which refuses the same string). A membership check needs something to be a member
+    OF, and none existed: this was the only admin-certificate relation in the tree,
+    and using ``AdminCertRevocation`` for it is circular — it is what the verb writes.
+
+    ONE DELIBERATE DIVERGENCE FROM THE ``#597`` ``CoreRelayCredential`` SHAPE: there is
+    no ``revoked_at`` column here. The admin plane already has a revocation authority
+    (``AdminCertRevocation``), and ``AdminCAManager.generate_crl`` draws from it — this
+    table answers exactly one question, "was this serial ever a credential this core
+    vouches for", and a second revocation column would be a second source of truth for
+    the same fact. Revocation stays single-writer; membership is what lives here.
+
+    Four writers, all copying the shipped ``#597`` shape (boot ingest, mint-side write,
+    explicit register) plus one observation point, so a credential that exists in the
+    deployment exists here:
+
+    * ``server/admin_registry.py`` at core startup, from the path ``VENYA_ADMIN_CERT``
+      names — the machine-plane bootstrap leaf the installer mints out-of-band (mirrors
+      ``relay_registry.ingest_relay_credential``: the boot covers cores installed by an
+      OLDER installer, which no mint-side write ever would);
+    * ``routes/admin_certs.py::admin_issue_cert`` — every human-plane mint, in the same
+      transaction as its ``ADMIN_CERT_ISSUED`` audit row;
+    * ``middleware/auth.py`` — every credential the admin-mTLS chain has just VERIFIED and
+      admitted (``source=observed-admission``), the writer that keeps this from stranding an
+      operator whose credential the boot never saw and nobody held a PEM for;
+    * ``routes/admin_certs.py::admin_register_admin_cert`` — the operator's explicit remedy
+      for a credential none of the above reached, reading the facts OFF the submitted
+      certificate so a caller cannot enroll an arbitrary serial (same rule and same shape as
+      ``admin_register_core_relay_cert``).
+    """
+
+    __tablename__ = "admin_credentials"
+
+    id = Column(Integer, primary_key=True)
+    serial_number = Column(
+        String(64),
+        unique=True,
+        nullable=False,
+        comment="Certificate serial in the ONE canonical WRITE form (lowercase hex, zero-padded to >=16) per #481",
+    )
+    common_name = Column(
+        String(128),
+        nullable=False,
+        comment="Subject CN as presented — the admin identity for both planes (RF-6 SS6.3 / SS2.1)",
+    )
+    source = Column(
+        String(32),
+        nullable=False,
+        comment="Which writer created the row, and so which plane it belongs to: boot-disk (the machine bootstrap leaf), issue-route (a human mint), register-route (operator-registered)",
+    )
+    cert_fingerprint = Column(
+        String(64),
+        nullable=True,
+        comment="sha256 of the DER certificate, lowercase hex — identifies the credential across a re-mint",
+    )
+    public_key_hash = Column(
+        String(64),
+        nullable=True,
+        comment="sha256 of the SubjectPublicKeyInfo DER — the re-mint-tied identity when the serial moves",
+    )
+    issued_at = Column(DateTime(timezone=True), nullable=True, comment="notBefore of the credential")
+    not_after = Column(DateTime(timezone=True), nullable=True, comment="notAfter of the credential")
+    registered_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        comment="When this registry row was first written",
+    )
+
+
 class VenyaConfig(Base):
     """Global key-material config (C-11).
 
@@ -702,7 +781,7 @@ class CoreRelayCredential(Base):
     common_name = Column(
         String(128),
         nullable=False,
-        comment="Subject CN as presented, e.g. 'idaho-relay' — matched against relay_client_ids",
+        comment="Subject CN as presented, e.g. 'core-1-relay' — matched against relay_client_ids",
     )
     hostname = Column(
         String(128),
@@ -751,3 +830,56 @@ class CoreRelayCredential(Base):
         comment="Revocation time; NULL = live. Terminal for alpha: no un-revoke, same law as Executor.revoked_at",
     )
     revoke_reason = Column(Text, nullable=True)
+
+
+class RevocationEpoch(Base):
+    """A one-row counter that advances whenever ANY revocation state is WRITTEN (#597T2 / PB-597T2).
+
+    WHY THIS EXISTS. Revocation state is not one table. It sits in ``executor_cert_revocations``
+    and ``admin_cert_revocations`` (a row IS the revocation) and in the ``revoked_at`` columns of
+    ``executors`` and ``core_relay_credentials`` (a column flip IS the revocation). #597 closed on
+    the admission that "raw SQL or out-of-band revocations were not exhaustively searched" — an
+    enumeration of writers can never be finished, so it cannot be trusted. This table answers a
+    different question: not "did we see every writer" but "has any of this changed since my last
+    read". The counter makes an out-of-band write OBSERVABLE, which is the floor PB-367's admission
+    check stands on.
+
+    HOW IT ADVANCES. ``043_revocation_epoch_597t2.py`` installs one PL/pgSQL trigger function and
+    eight triggers over those four relations, PostgreSQL-only by dialect guard. The bump is
+    row-level for INSERT/UPDATE/DELETE and statement-level for ``TRUNCATE``, because a TRUNCATE
+    fires no row trigger and an epoch that missed the one maintenance statement that erases all
+    revocation history would be a floor with a hole exactly where the hazard is largest.
+
+    FAIL-LOUD, DELIBERATE. A trigger runs as the writing role and UPDATEs this single row. If the
+    row is missing or the table is dropped, the revocation write ABORTS — an operator cannot revoke
+    a credential without the change being counted. That is fail-closed on the security plane, not a
+    bug to smooth over; the repair is to restore the row, not to make the trigger tolerant.
+
+    RESIDUAL, stated where a reader will meet it. Triggers are ordinary catalog objects: a DBA can
+    ``DROP TRIGGER`` and revocation writes then succeed uncounted, silently. Nothing in the schema
+    bounds that — see ``docs/revocation-table-operations-runbook.md`` §9.
+
+    shortcut: the counter is write-side only; PB-367 owns the read path, the caching, and the
+    admission check that consumes this value, and nothing here is consulted by the runtime yet.
+    """
+
+    __tablename__ = "revocation_epoch"
+
+    __table_args__ = (
+        # Single row by the database, not by convention: every trigger targets ``id = 1``, so a
+        # second row would silently never be bumped and a reader asking this table the question
+        # would get a stale answer. A CHECK is portable and cheap.
+        CheckConstraint("id = 1", name="chk_revocation_epoch_single_row"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    epoch = Column(
+        BigInteger,
+        nullable=False,
+        comment="Write counter; +1 per revocation-state write. No upper bound is asserted — a bigint at one bump per revoke is arithmetic beyond any deployment",
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="When the counter last advanced — the trigger writes it with the same statement as the bump",
+    )

@@ -1,8 +1,8 @@
 # Venya Firewall & Network Requirements
 
-> **ALPHA DOCUMENTATION — UNTESTED.** This guide describes the venya alpha and has
+> **BETA DOCUMENTATION — UNTESTED.** This guide describes the venya beta and has
 > **not** been validated end-to-end against a hardened production deployment. The ports,
-> paths, and directions below are derived from the alpha source tree (installer templates,
+> paths, and directions below are derived from the beta source tree (installer templates,
 > the relay listener, and `docs/architecture.md`) and may change. Verify every rule in your
 > own environment before relying on it. Where this document and a live `nginx -T` /
 > `ss -ltnp` on your host disagree, the host wins — re-derive, do not trust this page.
@@ -28,14 +28,14 @@ install steps see [installation.md](installation.md).
 | Dir | Port | Proto | From / To | Purpose |
 |-----|------|-------|-----------|---------|
 | **inbound** | **443/tcp** | HTTPS (the installer-generated site config floors the handshake at TLS 1.2/1.3 — `ssl_protocols TLSv1.2 TLSv1.3`, so the protocol floor is ours, not inherited) | workstations, executors, admins | The only inbound service. nginx terminates TLS and proxies to the local backend. Admin API paths additionally require an mTLS **client certificate** (`ssl_verify_client optional` at the listener; enforced per-path) chained to the per-install Admin CA. |
-| **outbound** | **8443/tcp** | HTTPS (mTLS) | core → each executor | The relay: the core **dials** the executor's relay listener to run a command, presenting its `<core-host>-relay` client certificate. That credential is registered (`core_relay_credentials`, #597) and is revocable: `venya admin core-relay-cert revoke --serial <hex>`. A revoked one is refused at the executor's handshake — the registry row, not a CRL, is what makes it nameable there. |
+| **outbound** | **8443/tcp** | HTTPS (mTLS) | core → each executor | The relay: the core **dials** the executor's relay listener to run a command, presenting its `<core-host>-relay` client certificate. That credential is registered (`core_relay_credentials`, #597) and is revocable: `venya admin core-relay-cert revoke --serial <hex>`. A revoked one is refused when the connection is ADMITTED — enforcement is post-handshake (the TLS handshake completes, then the accept gate closes the connection before a single request byte is read), and the registry row, not a CRL, is what makes it nameable there — and it is consulted at acceptance, AHEAD of the `relay_client_ids` CN check on the executor's row below, so a revoked credential never reaches the layer that answers `403 unknown client identity` (measured: `wave33-specs-20261020/ultra-676-door2B-capture-s150c-report.md`). `cert-rotation-runbook.md` §4 states the same boundary; do not read either page as saying the handshake itself is refused. |
 
 **Localhost-only — never expose these:**
 
 | Port | Proto | Binding | Why it stays local |
 |------|-------|---------|--------------------|
-| 8080/tcp | HTTPS | `127.0.0.1` | The uvicorn/FastAPI backend. Installer-installed cores serve it over the inner-mTLS channel (`VENYA_INNER_MTLS__ENABLED=true` written at install; `InnerTLSConfig` in `server/config.py`, env `VENYA_INNER_MTLS__*` — the bare config default remains disabled): uvicorn terminates TLS on this loopback bind and requires the nginx client certificate, and nginx proxies to it over HTTPS with `proxy_ssl_verify on`. Exposing this port would still bypass the outer nginx TLS + admin-mTLS layer. |
-| 10011/tcp | HTTP (plain, no TLS, no auth) | `127.0.0.1` | The Prometheus metrics scrape endpoint (#653). `GET /metrics` returns the `venya_*` counters, histograms and gauges — request counts and durations by endpoint/method/status, executor registration and heartbeat totals, token and CA operation totals, rate-limit hits, CRL truncations, and the #603 revocation-read refusal counter. It carries telemetry, never payload or identity: no emails, no token values, no passwords (pinned by `packages/server/tests/test_metrics.py`), and the high-cardinality labels (`executor_id`, `user_id`, `ip`, `session_id`) are absent by design. **The address is hardcoded to loopback and is not configurable** — the endpoint is unauthenticated, so publishing it onto a routable interface would hand a host's operational picture to anyone who can route to the core. A remote Prometheus scrapes it by running on the core host, or through a collector you place there. The port comes from `Environment=VENYA_METRICS_PORT` in `systemd/venya-core.service`; change it with `systemctl edit venya-core`, unset it there to close the door. **A port this host already gives to something else does not stop the core**: the bind is refused, one `ERROR` line says so on every boot that hits it, and the scrape surface stays dark until you name a free port. | It carries telemetry, never payload or identity: no emails, no token values, no passwords (pinned by `packages/server/tests/test_metrics.py`), and the high-cardinality labels (`executor_id`, `user_id`, `ip`, `session_id`) are absent by design. **The address is hardcoded to loopback and is not configurable** — the endpoint is unauthenticated, so publishing it onto a routable interface would hand a host's operational picture to anyone who can route to the core. A remote Prometheus scrapes it by running on the core host, or through a collector you place there. The port comes from `Environment=VENYA_METRICS_PORT` in `systemd/venya-core.service`; change it with `systemctl edit venya-core`, unset it there to close the door. |
+| 8080/tcp | HTTPS | `127.0.0.1` | The uvicorn/FastAPI backend. Installer-installed cores serve it over the inner-mTLS channel (`VENYA_INNER_MTLS__ENABLED=true` written at install; `InnerTLSConfig` in `server/config.py`, env `VENYA_INNER_MTLS__*` — the bare config default remains disabled): uvicorn terminates TLS on this loopback bind and requires the nginx client certificate (the **inner keypair**, `CN=<core-hostname>-inner` — a different leaf from the relay client cert the core uses when it dials executors), and nginx proxies to it over HTTPS with `proxy_ssl_verify on`. Exposing this port would still bypass the outer nginx TLS + admin-mTLS layer. |
+| 10011/tcp | HTTP (plain, no TLS, no auth) | `127.0.0.1` | The Prometheus metrics scrape endpoint (#653). `GET /metrics` returns the `venya_*` counters, histograms and gauges — request counts and durations by endpoint/method/status, executor registration and heartbeat totals, token and CA operation totals, rate-limit hits, CRL truncations, and the #603 revocation-read refusal counter. It carries telemetry, never payload or identity: no emails, no token values, no passwords (pinned by `packages/server/tests/test_metrics.py`), and the high-cardinality labels (`executor_id`, `user_id`, `ip`, `session_id`) are absent by design. **The address is hardcoded to loopback and is not configurable** — the endpoint is unauthenticated, so publishing it onto a routable interface would hand a host's operational picture to anyone who can route to the core. A remote Prometheus scrapes it by running on the core host, or through a collector you place there. The port comes from `Environment=VENYA_METRICS_PORT` in `systemd/venya-core.service`; change it with `systemctl edit venya-core`, unset it there to close the door. **A port this host already gives to something else does not stop the core**: the bind is refused, one `ERROR` line says so on every boot that hits it, and the scrape surface stays dark until you name a free port. |
 | 5432/tcp | PostgreSQL | `localhost` | The `venya` database (connection string `postgresql://venya:…@localhost/venya`). Stock Ubuntu PostgreSQL listens on loopback; keep it that way. |
 
 A host firewall on the core needs **443/tcp inbound** (from workstations, executors, and
@@ -48,7 +48,7 @@ external rule and must not be forwarded.
 
 | Dir | Port | Proto | From / To | Purpose |
 |-----|------|-------|-----------|---------|
-| **inbound** | **8443/tcp** | HTTPS (mTLS, `CERT_REQUIRED`) | core → executor | The relay listener. Accepts connections **only** from client certificates whose CN is in `relay_client_ids` (derived from the core hostname, e.g. `venya-core-1-relay`). An empty allowlist makes the listener refuse to bind (fail-closed). Restrict the source to your core host(s) if your firewall can. |
+| **inbound** | **8443/tcp** | HTTPS (mTLS, `CERT_REQUIRED`) | core → executor | The relay listener. Accepts connections **only** from client certificates whose CN is in `relay_client_ids` (derived from the core hostname, e.g. `venya-core-1-relay`). An empty allowlist makes the listener refuse to bind (fail-closed). Restrict the source to your core host(s) if your firewall can. **This CN allowlist is the SECOND gate, not the first** — the #597 revocation check on the core's row above closes a revoked peer at connection acceptance, before this rule is ever consulted. Fail-closed applies to both gates. |
 | **outbound** | **443/tcp** | HTTPS (TLS, executor client cert) | executor → core | Registration/enrollment, the ~30 s heartbeat, and the revocation-list poll. The executor's `server_url` must be an `https://` URL to the core host — operator-supplied (`VENYA_SERVER_URL`, required; the installer has no hardcoded default). |
 | **outbound** | **443/tcp** | HTTPS | executor → Docker Hub | sbx pulls its agent template on first sandbox create (and `sbx login` authenticates a Docker account). Steady-state only on a cold/uncached template; see `sbx-cold-start-prepull`. The pull is **executor-side** — the core never talks to Docker Hub; the install-time cache pre-pull is the "sbx agent-template warm" block in `install-venya-executor.sh`. |
 | **outbound** | **22/tcp** (and any allowlisted port) | SSH | sandbox → target | Command execution against targets. **See the sandbox-egress note below — this is governed by the sbx allowlist, not the host firewall.** |
@@ -73,6 +73,21 @@ target on 22/tcp, you add the target to that **allowlist** — opening 22/tcp in
 executor's *host* firewall does nothing for sandbox traffic. (Conversely, the executor's
 own daemon traffic to the core on 443 *is* host-stack traffic and *is* subject to the
 host firewall.)
+
+**Who does the denying, and what that proxy can see.** The enforcing component is
+Docker's `sbx` egress proxy, not a venya process: venya registers a per-host allow rule
+for each entry in the file (`sbx policy allow network <host> --sandbox <name>`,
+`apply_network_policy` in `packages/executor/src/executor/strategies/sbx_strategy.py`)
+and the `sbx` proxy denies everything else. The proxy is a layer-7 policy engine, so to
+rule on HTTPS it terminates the sandbox's TLS and serves a per-hostname certificate
+minted by its own CA, which is pre-installed in the sandbox image's trust store. Two
+properties of that enforcement point, stated here because they are not properties of
+venya's design: **content is what gets denied** — a tunnel to a destination that is not
+on the allowlist is established before the deny lands on the request inside it, so the
+destination name and SNI can leave the sandbox even when the payload is blocked — and a
+certificate verified from inside a sandbox is verified **against that proxy**, not
+against the endpoint an operator assumes was reached. The deny-by-default guarantee
+above is unchanged by this; what it governs is payload.
 
 **Host firewall on an executor:** **8443/tcp inbound** from the core, **443/tcp outbound**
 to the core (and to Docker Hub for template pulls). Target reachability is configured in
@@ -128,7 +143,7 @@ you install from a local package cache.
 | Executor (sandbox) | Target | 22 | SSH | via sbx egress allowlist, **not** host firewall |
 | Executor | Docker Hub | 443 | HTTPS | agent-template pull (cold start) |
 | Core / Executor / WS | GitHub Releases | 443 | HTTPS | install-time artifact fetch |
-| (local) | Core backend | 8080 | HTTPS (inner-mTLS, loopback only — nginx presents the relay client cert) | loopback only — never expose |
+| (local) | Core backend | 8080 | HTTPS (inner-mTLS, loopback only — nginx presents the **inner** client cert, `/etc/venya/tls/inner.crt`; not the relay leaf) | loopback only — never expose |
 | (local) | Core metrics | 10011 | HTTP (plain, loopback only) | Prometheus scrape endpoint (#653) — loopback only, never expose. Not bound at all if the host will not give the port up; the core serves either way. |
 | (local) | Core PostgreSQL | 5432 | TCP | loopback only — never expose |
 

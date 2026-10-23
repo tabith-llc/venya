@@ -133,7 +133,7 @@ class TestRowBothSources:
         assert "ignored" in notes[0].lower()
 
     def test_section_key_file_wins_and_is_announced(self, tmp_path, monkeypatch):
-        """RF-3's knob, the case flash1 measured: the [executor] section and the
+        """RF-3's knob, the case a prior worker lane measured: the [executor] section and the
         VENYA_EXECUTOR__ spelling resolve through the alias pair, so the detector has
         to see this class too — not just plain top-level keys."""
         monkeypatch.setenv(SECTION_ENV, "8")
@@ -278,7 +278,7 @@ class TestDetectorItsOwnTruthTable:
 
 class TestNoThirdSpellingIsInvented:
     """The env source the detector reads is pydantic's own, so a spelling pydantic does
-    not honour must not produce a note either — flash3's #589 cells show how many shapes
+    not honour must not produce a note either — a prior worker lane's #589 cells show how many shapes
     a name can take; only the ones the model reads are live."""
 
     @pytest.mark.parametrize(

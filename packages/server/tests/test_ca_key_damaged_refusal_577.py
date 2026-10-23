@@ -103,7 +103,7 @@ def _swapped_body(data: bytes) -> bytes:
     return (lines[0] + "\n" + filler + "\n" + lines[-1] + "\n").encode("ascii")
 
 
-#: The three damaged shapes flash1 measured at s87, all constructible as bytes with no product run.
+#: The three damaged shapes a prior worker lane measured at s87, all constructible as bytes with no product run.
 DAMAGED_SHAPES = {
     "truncated-mid-body": _truncated,
     "armor-over-non-base64": _non_base64_body,

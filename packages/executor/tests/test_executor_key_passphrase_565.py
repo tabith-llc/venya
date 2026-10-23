@@ -14,7 +14,7 @@ passphrase-blind (the load half of the pair: a file nobody can unlock is as dead
 as one anybody can read).
 
 The posture is ruled, not re-decided here. R7-Q3 (`decisions.md` commit
-`1bf25ae`, quoted in `docs/design-fido2-keywrap-565.md` §6) makes a **file
+`1bf25ae`, quoted in `docs/design-fido2-keywrap.md` §6) makes a **file
 passphrase delivered through the service environment** the interim shape for
 these unattended sites — disk protection, explicitly **not** hardware custody —
 and forbids a partial ship: the read side lands in this same changeset or neither

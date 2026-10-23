@@ -949,6 +949,16 @@ async def register_executor(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid enrollment token",
             )
+        # #672 DEAD-STATE DISCLOSURE: no shipped verb ever writes state="revoked" on the
+        # EXECUTOR plane. The complete writer set for ExecutorEnrollmentToken is the mint
+        # (routes/admin.py::admin_enroll_executor -> "created", plus the model default) and
+        # the consume UPDATE below (-> "consumed"); maintenance.purge_admin_identity_metadata
+        # writes no state at all, and expiry is computed, never stored as "expired". The
+        # state="revoked" writers that DO exist live in core/iam/enrollment_manager.py and act
+        # on EnrollmentToken — the USER plane. Refusal kept as-is; a real revoke verb on this
+        # plane is feature-scope and unruled, so tokens here expire on TTL, full stop.
+        # Guard: server/tests/test_executor_token_revoked_state_672.py fails if a writer is
+        # ever added, so this branch cannot silently become load-bearing.
         if token.state == "revoked":
             metrics.TOKEN_CONSUMED.labels(result="revoked").inc()
             raise HTTPException(
@@ -1017,6 +1027,9 @@ async def register_executor(
                     detail="Enrollment token not found",
                 )
             elif token.state == "revoked":
+                # #672: same dead state as the pre-check above — unreadable in practice on
+                # this plane because no shipped writer can set it here. See that block and
+                # test_executor_token_revoked_state_672.py.
                 metrics.TOKEN_CONSUMED.labels(result="revoked").inc()
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1296,8 +1309,10 @@ async def get_revocation_list(
     """
     # READ-ONLY (ticket sec-sweep-low-informational #23b): this public GET
     # used to purge expired revocations on every poll (~30s x fleet) — an
-    # unauthenticated write-on-read. The purge now runs as a maintenance-loop
-    # pass (maintenance.run_maintenance, 5-minute schedule).
+    # unauthenticated write-on-read. The purge moved to a maintenance-loop pass
+    # and has since been REMOVED outright (#685, owner ruling 2026-10-20):
+    # ExecutorCertRevocation is exempt from time-based purge, so neither this
+    # route nor the maintenance loop deletes a revocation row any more.
 
     # The one place the poll decides whether it has an answer at all. Raises
     # RevocationSnapshotUnavailable for a missing/stale snapshot; the refusal detail is
@@ -1347,7 +1362,9 @@ async def get_crl(
 
     Public endpoint — no authentication required. READ-ONLY: the expired-
     revocation purge moved to the maintenance loop (ticket
-    sec-sweep-low-informational #23b — public GETs must not write).
+    sec-sweep-low-informational #23b — public GETs must not write) and the
+    maintenance pass itself is gone (#685: `ExecutorCertRevocation` is exempt
+    from time-based purge), so this GET deletes nothing.
     Supports conditional GET via ETag for caching.
     """
     from core.iam.models import ExecutorCertRevocation
@@ -2068,7 +2085,7 @@ async def execute_command_on_executor(
         raise HTTPException(status_code=503, detail="Executor unreachable (connection lost mid-response)")
     except httpx2.HTTPStatusError as e:
         logger.warning("Executor returned HTTP %d for session %s: %s", e.response.status_code, session.id, e)
-        detail = "Executor returned an error"
+        detail = GENERIC_RELAY_ERROR_DETAIL
         if e.response.status_code == 422:
             # Ticket policy-reject-flat-503 #410: the executor's 422 lane is
             # the CommandRejected reply — a pre-run policy/structural rejection
@@ -2088,6 +2105,33 @@ async def execute_command_on_executor(
                 # gates (the spool copy only reaches core if the forwarder is
                 # configured; see _record_rejection_audit).
                 _record_rejection_audit(request, session.id, id, display_command, auth_user["user_id"], relay_detail)
+        elif e.response.status_code == 503:
+            # #697 OPTION 1 (owner ruling 2026-10-23): forward the listener's HONEST
+            # operational-fault refusal, so the one component that knew what happened is
+            # the sentence the operator reads. Gated by the shared opening, not by an
+            # exact-sentence list, because both 503 refusals in relay_listener.py are
+            # allowed to be re-worded while keeping the class name. This is a SEPARATE
+            # class from the #410 422 lane and it records NO rejection audit: nothing was
+            # rejected on policy — the daemon could not answer. Everything else on this
+            # status keeps the generic detail (the #410 control stands).
+            fault_detail = _relay_refusal_detail(e.response)
+            if isinstance(fault_detail, str) and fault_detail.startswith(OPERATIONAL_FAULT_DETAIL_PREFIX):
+                detail = fault_detail
+        if detail == GENERIC_RELAY_ERROR_DETAIL and e.response.status_code in _RELAY_REFUSAL_STATUSES:
+            # #697 AC3 — the un-forwarded half is at least recoverable. Logged as STRUCTURE
+            # only (byte length + a 12-hex digest prefix), never the text, because a body on
+            # this hop can be the listener's 400-class echo lane carrying request fragments,
+            # and prefixless content is invisible to the RedactingFormatter layer-2 (the #11
+            # class, same reasoning as the response-shape arm below). The length and digest
+            # let a reader CONFIRM which shipped literal arrived by hashing the candidate,
+            # and prove a detail that is NOT one of them — with zero chance of writing an
+            # echoed secret to the journal.
+            logger.warning(
+                "Relay %d detail not forwarded for session %s (generic served) — shape: %s",
+                e.response.status_code,
+                session.id,
+                _relay_detail_shape(_relay_refusal_detail(e.response)),
+            )
         raise HTTPException(status_code=e.response.status_code, detail=detail)
 
     # Validate executor response shape before any field access
@@ -2128,3 +2172,63 @@ async def execute_command_on_executor(
     db.commit()
 
     return RelayResponse(**result)
+
+
+# --- #697 OPTION 1: what a relay error is allowed to SAY (owner ruling 2026-10-23) -------
+#
+# THESE THREE NAMES SIT AT THE FOOT OF THE MODULE ON PURPOSE. `docs/beta-known-limitations.md`
+# is a machine-guarded page: every `file:line` coordinate it prints must still land on the symbol
+# it names (test_beta_terms_cite_interlock.py::test_pins_match_the_tree_they_claim_at_when_pinned,
+# live whenever a cited file moves), and the highest coordinate it prints into THIS file is :2042.
+# Measured at `e9c7c258`: inserting one line at :60 reddens that cell with 9 mismatches. New
+# module-level code therefore goes below every cite, and only the relay arm itself (2086-2130) is
+# edited above that line. Re-pinning the page is a CUT-COMMIT act by generator, never a worker
+# leg's hand-edit — so this block moves itself out of the way instead of moving the page.
+#
+#: The detail the core substitutes for every relay error it does not recognise. Named, because
+#: the AC3 log predicate below compares against it and a re-typed literal drifts.
+GENERIC_RELAY_ERROR_DETAIL = "Executor returned an error"
+
+#: The shared opening of the executor relay listener's two honest operational-fault refusals —
+#: `REFUSE_NO_ANSWER` ("… no revocation answer received this boot …") and `REFUSE_NOT_WIRED`
+#: ("… the relay listener holds no daemon state, so revocation cannot be consulted at all") in
+#: `packages/executor/src/executor/relay_listener.py`. Restated here, NOT imported: this package
+#: must not import `executor`, and `venya-contract` carries no refusal literals at all, so a
+#: shared constant there would be a NEW contract concept and is out of this row's scope.
+#: DRIFT RISK, STATED PLAINLY: if either sentence changes its OPENING, this door stops forwarding
+#: it silently — the operator is back to the generic detail and nothing fails. That is what
+#: `tests/test_relay_503_relay_697.py::test_server_prefix_matches_both_executor_literals` exists
+#: to catch; it reads the executor source as text, so it goes RED on a re-worded sentence.
+OPERATIONAL_FAULT_DETAIL_PREFIX = "503 OPERATIONAL FAULT — "
+
+#: The statuses whose relay bodies are the listener's own honest refusals. AC3 logs the
+#: un-forwarded half only on these, and on nothing else: the listener's 400 lane is where a
+#: detail echoes a request fragment, so every other status keeps the shipped log line as-is.
+_RELAY_REFUSAL_STATUSES = (422, 503)
+
+
+def _relay_refusal_detail(response: httpx2.Response) -> object:
+    """The relay body's ``detail`` value, or None — never raises.
+
+    Same guard set the #410 arm uses (the shipped 422 arm is byte-unchanged; this one is the
+    #697 503 lane's copy), so a non-JSON body or a JSON document that is not an object degrades
+    to the generic detail instead of turning a 503 into a 500.
+    """
+    try:
+        return response.json().get("detail")
+    except (ValueError, AttributeError, RuntimeError):
+        return None
+
+
+def _relay_detail_shape(detail: object) -> str:
+    """A STRUCTURE-ONLY description of an un-forwarded detail: bytes and a digest prefix.
+
+    masker law, applied to a log line — length and ``sha256`` prefix, never the text. The value
+    is enough to CONFIRM which shipped literal arrived (hash the candidate and compare) and to
+    prove that the body was not one of them, and it cannot carry an echoed request fragment or a
+    secret onward into the journal.
+    """
+    if not isinstance(detail, str):
+        return "no string detail" if detail is None else f"non-string detail type={type(detail).__name__}"
+    raw = detail.encode("utf-8", "surrogatepass")
+    return f"chars={len(raw)} sha256={hashlib.sha256(raw).hexdigest()[:12]}"

@@ -335,7 +335,7 @@ class TestSandboxMemoryDefault:
     installer's TOML, because `from_file` ends in `cls(**data)` (#598) and a TOML
     key therefore silently outranks the documented env spelling. Each cell below
     NAMES which carrier won, so a fixture TOML can never quietly decide what an
-    env cell measured — the failure flash1 pinned for `max_concurrent_commands`.
+    env cell measured — the failure a prior worker lane pinned for `max_concurrent_commands`.
     """
 
     ENV_PINNED = "VENYA_EXECUTOR_SANDBOX_MEMORY_MB"

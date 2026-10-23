@@ -22,7 +22,7 @@ certificate. Three numbers describe it, and they are not interchangeable:
 |---|---|---|
 | **60 minutes** | the lifetime of a person's certificate | `ADMIN_SHORT_CERT_LIFETIME_SECONDS = 3600`, `packages/server/src/server/ca.py:803` (module-level, the `# --- Admin CA constants ---` block) |
 | **90 days** | the lifetime of the core's own machine-plane pair | `ADMIN_CERT_VALIDITY_DAYS = 90`, same module, consumed by `AdminCAManager.sign_admin_cert` |
-| **15 code points** | the length floor on the passphrase that protects the key this page's renewal writes | `MIN_PASSPHRASE_CODE_POINTS = 15`, `packages/cli/src/venya_cli/commands.py:4497` |
+| **15 characters** | the length floor on the passphrase that protects the key this page's renewal writes | `MIN_PASSPHRASE_CODE_POINTS = 15`, `packages/cli/src/venya_cli/commands.py:4497` |
 
 The 60-minute value is not a remembered convention: it is consumed at signing time
 (`packages/server/src/server/routes/admin_certs.py:317`, inside `async def
@@ -198,7 +198,7 @@ Using only surfaces that exist at this tip:
    (`cli.py:875-882`; `cmd_setup`). Use the product command, never a hand-copied CA file.
    Pin it when you can: `--ca-sha256`.
 5. **Make sure the passphrase is in that environment before you start:**
-   `VENYA_ADMIN_CA_KEY_PASSPHRASE` set to a value of at least 15 code points. `renew` refuses
+   `VENYA_ADMIN_CA_KEY_PASSPHRASE` set to a value of at least 15 characters. `renew` refuses
    without it and refuses a short one, both BEFORE the ceremony (§3) — so the check costs you
    nothing if you do it first.
 6. **Session, then ceremony:** `venya login <user-id>`, then `venya admin cert renew`. A
@@ -246,8 +246,9 @@ paired rejection it must also prove, and, where it applies, the reason it is out
 | 2 — the ceremony from an interactive desktop | **RUN AND PASSING (s124, session 2)** — evidence `8c73fc0c`, report `wave27-specs-20261015/ultra-rf8-cells23-s124-report.md`, target **core-3**, identity **`venya-adm3`** |
 | 3 — the renewal round trip | **RUN AND PASSING (s124, session 2)** — same evidence, same target and identity |
 
-> **What the guest gives, and what it does not.** The `win11` guest is a montana domain and
-> montana is frozen: no lane boots, halts, defines or queries it (`virsh` reads included) —
+> **What the guest gives, and what it does not.** The `win11` guest is a domain on the owner's
+> workstation, and that box is frozen for lanes: no lane boots, halts, defines or queries it
+> (`virsh` reads included) —
 > that stays the owner's. Its booted state, its PowerShell version and its installed CLI were
 > read over SSH as `win` (rc=0) from the agent box; that read is the preflight table under
 > Cell 1. **That preflight is no longer the live face of the guest.** A current CLI has since
@@ -463,7 +464,7 @@ carry (parser error quoted under Cell 2). It runs on the current installed CLI.
 - **Success:** `venya admin cert status` before → renew at the console → `status` after shows
   a lifetime inside the committed hour, and the ceremony's refusal order holds: with no login
   session, renew refuses and sends nothing; with `VENYA_ADMIN_CA_KEY_PASSPHRASE` unset or
-  shorter than 15 code points, renew refuses BEFORE any key touch.
+  shorter than 15 characters, renew refuses BEFORE any key touch.
 - **Paired rejection:** an EXPIRED certificate must still be renewable (the mint is bound to
   the session, so the old leaf is not presented — `cli.py:530-532`), while an expired
   certificate presented to an ordinary admin command must be refused locally with the ONE

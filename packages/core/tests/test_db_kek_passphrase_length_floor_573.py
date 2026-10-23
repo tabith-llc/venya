@@ -178,7 +178,12 @@ class TestFloorUnit:
     def test_the_sentence_carries_the_ruled_digits_and_no_library_voice(self):
         message = short_passphrase_refusal()
         assert f"at least {MIN_PASSPHRASE_CODE_POINTS} characters" in message
-        assert f"up to {MAX_PASSPHRASE_CODE_POINTS} characters" in message
+        # #675 AC3: the ceiling is a documented PERMIT (owner OPTION 1 / clause C2), so the
+        # sentence must read as an allowance and not as a limit. The old cell asserted
+        # "up to 64 characters", which is the wording the row calls inaccurate about its own
+        # enforcement; this asserts the ruled replacement instead.
+        assert f"longer than {MAX_PASSPHRASE_CODE_POINTS} characters are accepted too" in message
+        assert "not a maximum it enforces" in message
         for voice in _BINDING_VOICES:
             assert voice not in message, f"the binding's own sentence reached the refusal: {voice!r}"
 

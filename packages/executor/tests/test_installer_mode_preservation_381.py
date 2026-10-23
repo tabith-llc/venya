@@ -7,7 +7,7 @@
 """Source-pin: executor installer mode-preservation sites (#381, executor half).
 
 Same incumbent-inode class as the core half (X13/X14/X15 unit files +
-venya-executor.seccomp 0644 physically observed, flash4 LEG-3 sweep, lead
+venya-executor.seccomp 0644 physically observed, a prior worker lane's LEG-3 sweep, lead
 live spot-check). Fix shape per the ticket: rm-then-create + explicit chmod
 at the cat > sites; the three cp unit installs become install -m 0600
 (unlink+create with the mode pinned); the bootstrap-token write gets a

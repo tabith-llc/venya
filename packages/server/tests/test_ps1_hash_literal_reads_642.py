@@ -21,7 +21,7 @@ to this file's scope, in the open, not a silent miss.
 **These are STATIC SOURCE CELLS — the Linux limit, stated where it cannot be missed.** No ``pwsh`` runs
 here and no ``.ps1`` is executed by this file; a green read establishes only that the shipped TEXT binds the
 literal form. Behavioural proof needs the shipping platform (``win11``), which is an owner-present window.
-``flash6``'s caveat, carried on the row and not in a footnote: **a Linux-green pin proves source, never a
+A prior worker lane's caveat, carried on the row and not in a footnote: **a Linux-green pin proves source, never a
 ``.ps1`` acceptance criterion.**
 
 Truth table, in the #628 idiom. POSITIVE: every covered-verb call site binds ``-LiteralPath``, and each of
@@ -36,7 +36,7 @@ EXEMPTIONS, pinned as decisions rather than left as gaps:
   is INTENTIONAL (it means every user profile). It is text inside another command's quoted argument, the
   detector must not count it, and the line must not be "corrected";
 * the four ``New-Item -ItemType Directory -Force -Path`` sites are **unconvertible** — ``New-Item`` has no
-  ``-LiteralPath`` parameter. ``flash6``'s measurement, not PowerShell folklore: pinned as count and form,
+  ``-LiteralPath`` parameter. A prior worker lane's measurement, not PowerShell folklore: pinned as count and form,
   with the fake conversion refused, so nobody buys a green by writing a parameter that does not exist.
 
 No product byte moves. This file reads two ``.ps1`` texts and asserts. The exemption comment AC6 permits was

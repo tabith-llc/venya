@@ -116,9 +116,11 @@ unauthenticated transport.
     Execution sessions are ephemeral. File injection is the default
     consumption shape; a secret's `usage` metadata selects alternatives
     (`ssh-password`, `ssh-key`, `http-netrc`, `http-header-file`,
-    `mysql-defaults`, `ipmi-passfile`, `askpass` for sudo/git, `env:NAME`,
-    custom names) — every shape is mediated through the same per-session
-    tmpfs staging, never through the caller's context.
+    `mysql-defaults`, `ipmi-passfile`, `askpass` for sudo/git, `sudo-stdin`,
+    `env:NAME`, custom names) — every shape is mediated through the same per-session
+    tmpfs staging, never through the caller's context. The shipped built-in set is
+    `BUILTIN_SHAPES` in `packages/server/src/server/routes/secrets.py` — read it there
+    rather than trusting this list, which is prose and can lag.
  4. **Filter.** Masking runs in two stages: the executor's Rust filter
     (Stage 1) replaces any occurrence of secret material with
     `[REDACTED:...]`, then the server-side **definitive** filter (Stage 2,
@@ -183,26 +185,60 @@ deny-by-default against `/etc/venya/egress-allowlist.txt` (written empty by
 design at install — fail-closed; seed it via `VENYA_EGRESS_ALLOW` or edit it
 directly; the configured DNS resolver is always permitted); a compromised
 command cannot phone home.
+
+**Where that decision is made, and what the decider can see.** Venya registers
+one per-host allow rule for every entry in the file (`sbx policy allow network
+<host> --sandbox <name>`, `apply_network_policy` in
+`packages/executor/src/executor/strategies/sbx_strategy.py`) and the `sbx`
+proxy denies everything else, so the enforcing component is Docker's, not
+Venya's. It is a layer-7 proxy: to apply a hostname policy to HTTPS it
+terminates the sandbox's TLS and serves a per-hostname leaf minted by its own
+CA, which is pre-installed in the sandbox image's system trust store. Two
+consequences follow from that enforcement point, not from anything Venya does:
+
+- **Payload is denied; the destination name is not.** A tunnel request for a
+  host that is not on the allowlist is established first, and the deny lands
+  one layer later on the inner request — so destination and SNI can leave the
+  sandbox even when the content is blocked.
+- **A certificate check run from inside a sandbox is a check of that proxy, not
+  of the remote endpoint.** A chain the sandbox reports as verified may be the
+  inspection proxy's leaf, issued by the CA the image already trusts.
 The executor service runs under a seccomp profile, `PrivateTmp`, and no
-`CAP_IPC_LOCK` (mlock is confined to the core by design and enforced by
-tests in both packages). The daemon user has KVM access for sandboxing;
+`CAP_IPC_LOCK` (mlock is confined to the core by design; the pair that pins it is
+`packages/core/tests/test_capability_isolation.py` and
+`packages/cli/tests/test_capability_isolation.py` — core and CLI, not core and
+executor). The daemon user has KVM access for sandboxing;
 sandbox SSH tooling requires commands to resolve into trusted directories
-(absolute paths, or bare names resolved via PATH; shell builtins and
-unresolvable tokens are rejected by design — 503).
+(`DEFAULT_TRUSTED_PATHS`: `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`) — absolute paths
+qualify only inside those directories, and bare names are PATH-resolved first, so a name
+that resolves outside them is refused too. What the gate computes is RESOLUTION into a
+trusted directory, not shell-ness: `echo`, `true`, `test`, `printf` and `pwd` are shell
+builtins that have real binaries in a trusted dir and therefore PASS, while `cd`,
+`export`, `source`, `eval`, `set` and `read` have no file to resolve and are refused — and
+so is any non-builtin that fails the same test, including one that resolves cleanly but
+outside the trusted set. A refusal from THIS gate reads `Command not in trusted paths:
+'<name>'` (other gates have their own reasons — the dangerous-pattern block and the empty
+command check fire before it); the
+validator keeps no builtin table to consult, so nothing in the product reasons about
+builtins as a class. Unresolvable and non-trusted tokens are rejected — 503.
 
 ## Data stores
 
 - **PostgreSQL** (core only): users, credentials (WebAuthn), sessions,
   secrets (ciphertext), roles, executors, enrollment tokens (hashed),
   execution sessions, audit events. All timestamps are timezone-aware UTC.
-- **Filesystem state:** `/opt/venya/.env` is the sole runtime config on the
-  core (pydantic settings; nested keys as `VENYA_<SECTION>__<KEY>`);
-  executors use `/etc/venya/executor.toml`. There is no TOML config on the
-  core.
+- **Filesystem state:** `/opt/venya/.env` is the runtime **settings** file on the
+  core (pydantic settings; nested keys as `VENYA_<SECTION>__<KEY>`). It is not the only
+  file the service reads: the CA key passphrases arrive through a separate root-only
+  systemd `EnvironmentFile`, `/etc/venya/venya-core.env` (0640 `root:venya`), which
+  pydantic never sees — it lands in `os.environ` — and the metrics port is set the same
+  way, by a unit `Environment=` line; a name placed in `.env` instead is read by nobody.
+  See `deployment-config.md`. Executors use `/etc/venya/executor.toml`. There is no TOML
+  config on the core.
 
 ## Deployment shape
 
-Single-core deployments are the alpha norm; the core is stateless apart from
+Single-core deployments are the norm for beta; the core is stateless apart from
 PostgreSQL and its CA material, so HA is a replication problem (tracked for
 beta). Executors scale horizontally — each is an independent daemon with its
 own certificate. Targets are untouched: Venya installs nothing on them;

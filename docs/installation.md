@@ -1,6 +1,6 @@
 # Venya Installation Guide
 
-Full deployment guide for the alpha. Venya runs on dedicated Linux VMs or
+Full deployment guide for the Venya beta. Venya runs on dedicated Linux VMs or
 bare metal. All artifacts — installers, tarballs, SHA-256 sidecars — are
 published on the GitHub releases page:
 https://github.com/tabith-llc/venya/releases. The `releases/latest/download`
@@ -55,8 +55,7 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 (interactive runs are prompted; re-runs reuse the stored value and an explicit
 value must MATCH it).
 
-It also carries a **minimum length of 15 Unicode code points**, counted as you
-type them and not as bytes, so a passphrase in any alphabet counts the same. The
+It also carries a **minimum length of 15 characters**. The
 installer asks that question where the value resolves and **before it changes
 anything on the host**, mirroring the core's own boot door
 (`MIN_PASSPHRASE_CODE_POINTS` in `packages/core/src/core/engine/backend.py`): a
@@ -64,7 +63,7 @@ short passphrase can no longer walk an install halfway and only fail at service
 start. The floor is measured on the final value, so a **re-run that reuses a
 stored passphrase under it refuses at that same gate** — repairing such an install
 is a deliberate reinstall, never a silent rotation of the stored key-encryption
-key. The 64-code-point maximum is stated and NOT enforced: a longer passphrase is
+key. The 64-character length is an allowance and NOT a limit: a longer passphrase is
 accepted and used.
 
 The installer is SHA-256-gated and fail-closed: with `VENYA_TARBALL_SHA256`
@@ -88,7 +87,7 @@ Key environment variables (all optional):
 |---|---|---|
 | `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch. Required (no sidecar fallback) whenever the tarball origin is not https:// — file:// paths (#327) and plain-http:// sources alike (#375, #328). |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL password |
-| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-19 (`803acd9`, first shipped 2026-09-20 on the pre-beta alpha line, tag `v0.1.0alpha12` — that line is withdrawn by owner order 2026-10-18, so the tag names the release that proved it, not one to install from) and a **15 Unicode code-point minimum** (counted as typed, not as bytes) refused by the installer before any mutation, the same floor the core enforces at boot; 64 is stated as the maximum, not enforced; on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts, and a re-run reusing a stored passphrase under the floor refuses at that gate |
+| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-19 (`803acd9`, first shipped 2026-09-20 on the pre-beta alpha line, tag `v0.1.0alpha12` — that line is withdrawn by owner order 2026-10-18, so the tag names the release that proved it, not one to install from) and a **15-character minimum** refused by the installer before any mutation, the same floor the core enforces at boot; 64 is the length Venya guarantees to support, not an enforced maximum; on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts, and a re-run reusing a stored passphrase under the floor refuses at that gate |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | admin client-cert enforcement |
 | `VENYA_ADMIN_CA_PASSPHRASE` | auto-generated | stored in `/etc/venya/venya-core.env` (0640) |
@@ -173,7 +172,9 @@ needed. `venya config set-server <url>` remains for the offline case
 
 Touch the security key when prompted. A **recovery code is printed once** —
 store it securely; it is the only way back if the key is lost. Migrations
-already ran at install time; `venya init` never migrates.
+already ran at install time; `venya init` never migrates. The first-comer rule this step depends on
+is a disclosed limitation, not a bug: see [beta-known-limitations.md](beta-known-limitations.md),
+entry **"Bootstrap is trust-on-first-use"**.
 
 The pair at `/etc/venya/admin/` is the core's **own** admin credential: it names
 that core, not a person, and it does not leave that host. A person's admin
@@ -271,15 +272,99 @@ at the context build. The renewal-side rule is written up once in
 [cert-rotation-runbook.md](cert-rotation-runbook.md) §0; this section points at it
 rather than restating it.
 
-- The **CLI** (installer-banner shape) — note `VENYA_SERVER_URL` is required
-  unless a stored config names the server:
+- The **CLI** — run it as the `venya` service account. This is the shape the core
+  installer's closing banner prints, and every part of it is load-bearing:
 
 ```bash
-SSL_CERT_FILE=/var/lib/venya/ca/ca.crt \
-VENYA_SERVER_URL=https://<core-host> \
-VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
-venya admin executor-enroll <executor-id>
+# ON THE CORE. /opt/venya is the default install directory — use yours if you chose another.
+sudo -u venya env PATH="/opt/venya/.venv/bin:$PATH" \
+  SSL_CERT_FILE=/var/lib/venya/ca/ca.crt \
+  VENYA_SERVER_URL=https://<core-host> \
+  VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt \
+  VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
+  /opt/venya/.venv/bin/venya admin executor-enroll <executor-id>
 ```
+
+Why each piece has to be there — the short form people reach for first is the one
+that fails, and it fails for three separate reasons:
+
+- **`sudo -u venya`.** The admin pair sits in `/etc/venya/admin`, which the core
+  installer creates `install -d -m 0700 -o venya -g venya`, and the CA sits under a
+  `/var/lib/venya/ca` pinned at `700`. **An ordinary login cannot read either
+  directory, so no amount of `chmod`-ing your own copy fixes it — running as the
+  `venya` identity is the recipe.** That mode is deliberate (#610: `install -d`
+  re-applies the mode on every run, and a group bit left the machine-plane key
+  directory group-writable on every re-run). Do not widen it.
+  Expect the refusal to arrive as a shell error, not a venya one. On the default
+  install directory `/opt/venya` is itself `drwxr-x--- venya:venya`, so an ordinary
+  login cannot even execute `/opt/venya/.venv/bin/venya`: the shell says
+  `Permission denied` and the exit status is **126**, one step ahead of the pair
+  above. That is this control working, not a broken install. The fix is the
+  `venya` identity, never a `chmod` on your own copy.
+- **The assignments go inside `env`, not in front of `sudo`.** `sudo`'s `env_reset`
+  does not carry your shell's variables across the privilege change, so an
+  `export`-ed `SSL_CERT_FILE` arrives unset. And putting the assignment after
+  `sudo` (`sudo -u venya SSL_CERT_FILE=… venya …`) depends on a `setenv` grant that
+  the stock sudoers does not give, so on a default install it refuses outright. The
+  `env …` form the installer's banner prints works under both.
+- **`SSL_CERT_FILE` named explicitly.** The CLI picks its trust anchor from
+  `SSL_CERT_FILE`, and only then from the `ca.crt` beside the config file in **the
+  home directory the command actually runs in** (`api_client.py::_resolve_tls_anchor`,
+  which checks `os.environ["SSL_CERT_FILE"]` first and falls back to
+  `config.ca_path`). The CA that §2's `venya setup` wrote sits beside
+  *your* `config.json`; a mint run under a different account does not look there, and
+  it dies before sending a request with `no Venya TLS trust anchor is configured` —
+  naming a `ca.crt` path under some other home. Passing `SSL_CERT_FILE` inside the
+  `env` list is what makes the trust anchor travel with the privilege change.
+
+The banner also prints a one-time shape — install the anchor into an account-owned
+config directory so a later call finds it without `SSL_CERT_FILE`:
+
+```bash
+sudo -u venya /opt/venya/.venv/bin/venya config set-server https://<core-host>
+sudo mkdir -p /home/venya/.config/venya
+sudo cp /var/lib/venya/ca/ca.crt /home/venya/.config/venya/ca.crt
+sudo chown venya:venya /home/venya/.config/venya/ca.crt
+```
+
+**Read the fallback caveat before you rely on it.** The CLI looks for that `ca.crt`
+under *whatever home the command actually runs in*, and a `sudo -u` change does not
+always move `HOME`. The refusal is explicit about where it looked — it prints
+`no SSL_CERT_FILE set and no config-dir CA at <path>` naming the home that was
+actually searched (`api_client.py::_resolve_tls_anchor`). If that path is not the
+directory you wrote to, do not chase permissions: pass `SSL_CERT_FILE` in the `env`
+list, as the block above does. That is why the mint is given with the anchor named
+explicitly.
+
+The bare form — `VENYA_ADMIN_CERT=… VENYA_ADMIN_KEY=… venya admin executor-enroll
+<executor-id>` typed as your own login — is what the product's own error text names
+when an install has no token (`install-venya-executor.sh`: *"Mint one from an admin
+workstation: venya admin executor-enroll <executor-id>"*), and on a headless core it
+is not runnable as written: the pair is unreadable to you, and with no admin pair
+loaded the CLI falls back to an interactive FIDO2 login, which dies on a machine with
+no workstation key.
+
+**Then check the mint produced a token, not just a directory.** With `--output-dir`,
+the command creates that directory **before** it dials the core
+(`commands.py::cmd_admin_executor_enroll`, the #616 ordering), so the directory
+sitting there is not evidence of a token — it also exists when the mint failed. A
+failed mint does print `Enrollment failed:` on stderr and exits non-zero, but a shell
+that swallows the output loses that. Verify the file itself:
+
+```bash
+sudo -u venya test -s /secure/enroll/token && echo "token present"
+sudo -u venya ls -l /secure/enroll/    # token 0600, directory 0700, plus core-server-ca.crt / admin-ca.crt
+```
+
+Pick the output directory so the **`venya`** identity can create it, not so yours
+can — the command runs as `venya` and makes that directory as `venya`. A path
+inside your own home directory is refused outright, with
+`Enrollment failed: cannot create --output-dir <path>: Permission denied. Nothing
+was minted.` and exit status 1. That refusal is the ordering above doing its job:
+nothing was minted, so a failed run leaves no stale token to clean up.
+
+Without `--output-dir` the token is printed to stdout and written nowhere, so capture
+it from the output instead of looking for a file.
 
 - Or the cert-only API path directly:
 
@@ -297,12 +382,10 @@ install burns is the **wall clock** (apt/Docker/sbx steps run before
 registration). The TTL is server-configurable:
 `executor_enrollment.token_ttl_seconds` (raise it for slow or air-gapped
 installs). If the token expires, re-mint and re-run — the installer re-run is
-fast (idempotent: apt/Docker/sbx steps skip or cache):
-
-```bash
-# re-mint on a core (admin mTLS), then re-run the executor installer with the fresh token
-venya admin executor-enroll <executor-id>          # add --output-dir for offline/air-gapped CA copy
-```
+fast (idempotent: apt/Docker/sbx steps skip or cache). Re-mint with the
+`sudo -u venya env …` command above, then re-run the executor installer with the
+fresh token; add `--output-dir <dir>` to write the token and both CA certs into a
+directory for transfer (the offline/air-gapped shape).
 
 The core
 **requires a token for executor registration by default**
@@ -326,7 +409,7 @@ dial. Two sanctioned strategies:
   echo "<executor-ip> <executor-id>" >> /etc/hosts
   ```
 
-  **Minimal alpha recipe (one core host + one executor VM, no DNS):** pick a
+  **Minimal two-node recipe (one core host + one executor VM, no DNS):** pick a
   dedicated executor-id — not the executor's own hostname (Ubuntu's
   `127.0.1.1 <hostname>` self-entry makes the installer's local pre-check pass
   trivially while saying nothing about the core's view) — and map it to the
@@ -528,12 +611,18 @@ venya login <user-id>
 
 ## 5. Enroll regular users
 
-Run this on the core with its machine-plane pair (that site-1 shape; see §3 for
-what the CLI can and cannot load):
+Run this on the core with its machine-plane pair, **as `venya`** — the same shape as
+the §3 mint, including the `env` assignments inside `sudo` and an explicit
+`SSL_CERT_FILE` (that site-1 credential pair; see §3 for what the CLI can and cannot
+load):
 
 ```bash
-VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
-venya admin create-user <user-id> --roles user
+sudo -u venya env PATH="/opt/venya/.venv/bin:$PATH" \
+  SSL_CERT_FILE=/var/lib/venya/ca/ca.crt \
+  VENYA_SERVER_URL=https://<core-host> \
+  VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt \
+  VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
+  /opt/venya/.venv/bin/venya admin create-user <user-id> --roles user
 ```
 
 The response carries a 15-minute single-use enrollment token; the user runs
@@ -593,6 +682,77 @@ don't type `/list_secrets`. On 401/expired: `venya login <user-id>` (key
 touch) and retry — the MCP server reads the refreshed token from the same
 `VENYA_CONFIG` file.
 
+### pi
+
+`pi` is another stdio MCP client. It talks to `venya-mcp` the same way; what
+differs is where its config lives and that the server exposes a small, named
+tool set rather than a large catalogue.
+
+Log in first. The MCP server authenticates with **your user access token** — the
+one `venya login` writes into `config.json` — not with an admin certificate:
+
+```bash
+venya setup <core-host>
+venya login <user-id>
+```
+
+Then register the server in pi's **user-level** config
+(`~/.pi/agent/mcp.json`), which is where credentials belong:
+
+```bash
+pi mcp add venya --exposure direct \
+  --env VENYA_CONFIG="$HOME/.config/venya/config.json" \
+  --env VENYA_CA_CERT="$HOME/.config/venya/ca.crt" \
+  --description "Run commands on Venya executors, list secrets, read the audit trail" \
+  -- venya-mcp
+```
+
+Check it without starting a session. `pi mcp list` connects to every enabled
+server, prints its state and tools, and exits 1 if an entry is invalid or a
+server did not connect:
+
+```bash
+pi mcp list
+```
+
+You should see four tools — `run_command`, `list_executors`, `list_secrets`,
+`get_audit` — registered to pi as `mcp__venya__run_command` and so on. Then
+start `pi` and use them by asking: "list the venya secrets", "run `uptime` on
+exec-3". They are model-invoked, not slash commands. `/mcp` inside a session
+shows each server's state, tool count, and the tail of stderr if it failed to
+start; run `/reload` after adding or changing a server outside the session.
+
+Two pi-specific choices in that command:
+
+- **`--exposure direct`.** pi's default exposure for an MCP server is
+  `codemode`: the tools are registered but not declared to the model, and the
+  model reaches them through its own scripts. Venya's four tools are meant to
+  be called by name, so declare them. You can change exposure later from `/mcp`
+  in a session; `pi mcp list` marks tools whose exposure differs from their
+  server's.
+- **user-level vs project config.** Add `-l` to write this project's
+  `.pi/mcp.json` instead of the user-level file. pi reads the project file only
+  after you grant project trust, and a project entry replaces a user-level
+  entry of the same name. Keep the Venya entry user-level unless every user of
+  the repo should carry its token path.
+
+If the server shows as failed, read which prerequisite it stopped on: the
+startup checks the session token first, then the CA, so it prints exactly one of
+`No Venya session token found. Run the venya CLI …` (log in — the file at
+`VENYA_CONFIG`, default `~/.config/venya/config.json`, is missing) or
+`Venya CA certificate not found. Set the VENYA_CA_CERT environment variable …`
+(the CA file `venya setup` installs beside `config.json` is not being passed).
+There is no way to skip either one: `VENYA_TLS_VERIFY=false` is an alpha debug
+mode that warns and its shipped message says "never use in production".
+`venya-mcp` parses no flags at all — no `--version` — so `pi mcp list` and
+`/mcp` are how you read why a server did not come up; `/mcp` shows the full
+connection error and the tail of stderr from a failed stdio server. On
+401/expired: the server says what to do in its own words — *"Run the `venya` CLI
+(e.g. `venya list`) and approve your security key, then restart the MCP server."*
+The running process holds the token it read at startup, so it does not pick up a
+new login on the next call; in pi, `/mcp reconnect venya` restarts the stdio
+server for you.
+
 ### Next: create a secret and prove the redaction path
 
 With the client wired, run the 5-minute end-to-end demo —
@@ -621,10 +781,15 @@ so they work offline and after the serving origin is gone.
 
 ## Air-gapped networks
 
-Full offline installation is a tracked beta goal, not yet turnkey: the
-installers fetch Python toolchains and package dependencies at install time.
-For air-gapped alpha sites, contact info@tabith.com — a local mirror
-procedure exists but is not yet packaged.
+Offline installation — installers that fetch nothing at install time, for
+customers on air-gapped networks — is **coming soon**: it is **not part of
+beta1**, and no scheduled release carries it yet. Beta1's installers fetch
+Python toolchains and package dependencies at install time, so a beta1
+install requires internet.
+For air-gapped beta sites, contact info@tabith.com — a local mirror
+procedure exists but is not yet packaged. Air-gapped and fully offline
+installation is a committed roadmap capability, not a present feature; guided
+air-gap deployment is planned at the Professional tier when it ships.
 
 The offline tarball path (`file://` source or `/tmp`/`/opt` fallback) and any
 plain-`http://` source require an out-of-band `VENYA_TARBALL_SHA256` pin — a
@@ -674,7 +839,10 @@ only, not a security boundary.
   requires commands to resolve into trusted directories (`/usr/bin`,
   `/usr/sbin`, `/bin`, `/sbin`) — absolute paths like `/bin/echo` always
   qualify; bare names are resolved via PATH and accepted if they land in a
-  trusted dir; shell builtins are rejected by design. A leading `--`
+  trusted dir; whatever does not resolve is refused as "command not in
+  trusted paths" — there is no builtin table, so the rule is RESOLUTION, not
+  shell-ness: `echo`, `true`, `test`, `printf` have real binaries and PASS,
+  while `cd`, `export`, `source`, `eval` have none and are refused. A leading `--`
   separator on `venya run` is consumed by the CLI (not sent to the
   executor) and is safe to pass.
 - `Host key verification failed` / TLS failures between components: the CA

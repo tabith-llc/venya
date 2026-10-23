@@ -6,7 +6,7 @@
 
 """Static honesty cells for the ps1 protected-DACL gate (ticket #400).
 
-No pwsh runner on montana — execution UNVERIFIED, riding the #328 win11
+No pwsh runner on the Linux dev box — execution UNVERIFIED, riding the #328 win11
 window; static review cells mirror the ps1 idiom in
 test_installer_origin_pin_posture.py. The gate counts files under the install
 root for protected DACLs; it must never print a bare PASS over a

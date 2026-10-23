@@ -32,7 +32,7 @@ from server.ca import (
     parse_plane_marker,
 )
 
-_ADMIN_IDENTITY = "admin@venya-test-workstation"
+_ADMIN_IDENTITY = "admin@example.com"
 
 
 _ADMIN_PASSPHRASE = b"test_admin_passphrase_504"

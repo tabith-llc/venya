@@ -616,7 +616,7 @@ venya admin core-relay-cert revoke [OPTIONS]
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
-| `--serial` | no | string | — | Hex serial of the relay credential to revoke (up to 16 chars, any case/padding). Give this OR --cert-file. A serial the registry does not name is REFUSED, not accepted. |
+| `--serial` | no | string | — | Hex serial of the relay credential to revoke (up to 64 chars, any case/padding). Give this OR --cert-file. A serial the registry does not name is REFUSED, not accepted. |
 | `--reason` | no | string | `unspecified` | Revocation reason (default: unspecified) |
 | `--cert-file` | no | string | — | Revoke the serial READ from this certificate instead of typing one. Mutually exclusive with --serial; one of the two is required. |
 
@@ -656,7 +656,7 @@ venya admin revoke-executor <EXECUTOR_ID> [OPTIONS]
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `EXECUTOR_ID` (positional) | **yes** | string | — | Executor ID to revoke |
-| `--serial` | no | string | — | Revoke ONLY this certificate serial (hex, up to 16 chars) without revoking the executor identity — for orphaned/predecessor credentials. Omit for the identity form (terminal: re-enrollment then requires a NEW executor_id). |
+| `--serial` | no | string | — | Revoke ONLY this certificate serial (hex, up to 64 chars) without revoking the executor identity — for orphaned/predecessor credentials. Omit for the identity form (terminal: re-enrollment then requires a NEW executor_id). |
 
 **Examples**
 

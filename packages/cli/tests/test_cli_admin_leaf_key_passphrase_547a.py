@@ -70,7 +70,7 @@ def _minted_cert_pem(public_key) -> bytes:
     signer = ec.generate_private_key(ec.SECP256R1())
     cert = (
         x509.CertificateBuilder()
-        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dusty@workstation")]))
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "admin-bot@workstation")]))
         .issuer_name(CA_SUBJECT)
         .public_key(public_key)
         .serial_number(0x7777_0001)
@@ -162,7 +162,7 @@ def _seed_pair(tmp_path: Path):
     """An existing cert/key pair on disk so the renew cell has a path to write over."""
     key = ec.generate_private_key(ec.SECP256R1())
     now = datetime.datetime.now(UTC)
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "dusty@old")])
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "admin-bot@old")])
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -389,7 +389,7 @@ class TestThePartBReadSide:
 
 
 class TestSharedHintFragment:
-    """P3 — the two dead-end hints flash5 found reuse the ONE fragment, not a third."""
+    """P3 — the two dead-end hints a prior worker lane found reuse the ONE fragment, not a third."""
 
     def test_missing_ca_hint_names_the_precondition(self, tmp_path, capsys, monkeypatch):
         """The pre-#547 text pointed at `init-admin-ca` with no word about the
@@ -432,7 +432,7 @@ class TestSharedHintFragment:
         assert len([n for n in (ADMIN_CA_SETUP_FRAGMENT,) if n]) == 1
         assert "VENYA_ADMIN_CA_KEY_PASSPHRASE" in ADMIN_CA_SETUP_FRAGMENT
 
-    def test_fragment_wording_matches_the_shape_flash5_landed(self):
+    def test_fragment_wording_matches_the_shape_a_prior_lane_landed(self):
         """Set-what-then-run-what, in that order, naming the variable exactly."""
         assert ADMIN_CA_SETUP_FRAGMENT.startswith("Set VENYA_ADMIN_CA_KEY_PASSPHRASE")
         assert "then run: venya admin init-admin-ca" in ADMIN_CA_SETUP_FRAGMENT

@@ -71,7 +71,7 @@ def _embed(src: str, hash_hex: str) -> str:
 
 def _legacy_guard(name: str, hash_hex: str) -> str:
     """Pre-#368 bytes reproduced from source: contiguous comparison literal
-    plus unanchored global embed — the self-nulling combination flash1 proved."""
+    plus unanchored global embed — the self-nulling combination a prior worker lane proved."""
     src = (REPO_ROOT / name).read_text(encoding="utf-8")
     assert SPLIT_LITERAL in src, "test expects the fixed source to carry the split literal"
     src = src.replace(" = " + SPLIT_LITERAL, ' = "' + PLACEHOLDER + '"')
@@ -272,3 +272,79 @@ def test_serve_time_embed_lands_exactly_once_with_guard_intact() -> None:
         assert served.count(hash_hex) == 1, f"{name}: embedded hash appears {served.count(hash_hex)} times"
         assert PLACEHOLDER not in served, f"{name}: placeholder survived the embed"
         assert SPLIT_LITERAL in served, f"{name}: embed damaged the guard comparison"
+
+
+# --- #690: the PUBLISHED face is raw tag bytes, so the sidecar is the only ---
+# --- expectation an off-LAN `curl | bash` install can resolve. These cells   ---
+# --- run the unreplaced guard body of EACH installer against a sidecar in the ---
+# --- exact format the build tool writes (`printf '%s  %s\n'` — two spaces),   ---
+# --- because `RELEASES.md` §5 publishes those bytes verbatim. The pre-#690    ---
+# --- manifest never staged the sidecar, so all three installs hit the wall.   ---
+
+#: The one format the tool emits — see create-tarball-and-serve.sh:345 (the private
+#: git remote, dust/venya-installer.git master). NOT a bare hash: the sibling tarball sidecars
+#: and this one are all `<hash>  <name>`, and the installer reads `awk '{print $1}'`.
+PUBLISHED_SIDECAR_NAME = "venya-common.sh"
+
+
+def _published_sidecar_text(hash_hex: str) -> str:
+    """Byte-for-byte the shape the build tool writes, two spaces included."""
+    return f"{hash_hex}  {PUBLISHED_SIDECAR_NAME}\n"
+
+
+def test_published_sidecar_format_verifies_on_all_three_installers() -> None:
+    """POSITIVE, per script: raw tag bytes (placeholder UNREPLACED — what GitHub
+    serves), no operator pin, sidecar published in the real two-space format.
+    The guard must resolve the sidecar and pass for core, executor AND cli."""
+    for name in INSTALLERS:
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = _make_origin(tmp, "MARKER_SOURCED=1\n", sidecar=None)
+            real = _sha256_file(str(origin / "venya-common.sh"))
+            (origin / "venya-common.sh.sha256").write_text(_published_sidecar_text(real), encoding="utf-8")
+            fetch_dir = Path(tmp) / "fetch"
+            fetch_dir.mkdir()
+            r = _run_guard(_guard_body(name), str(origin), str(fetch_dir), pin=None)
+            assert r.returncode == 0, f"{name}: published sidecar format not accepted\n{r.stderr}"
+            assert f"verified (sha256 {real})" in r.stderr, f"{name}: {r.stderr}"
+
+
+def test_missing_published_sidecar_refuses_by_name_on_all_three_installers() -> None:
+    """NEGATIVE half A (the shipped #690 defect): same raw tag bytes, sidecar
+    REMOVED — exactly the published asset set of the 16 releases so far. All three
+    must abort rc=1 and name the artifact that is missing."""
+    for name in INSTALLERS:
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = _make_origin(tmp, "MARKER_SOURCED=1\n", sidecar=None)
+            fetch_dir = Path(tmp) / "fetch"
+            fetch_dir.mkdir()
+            r = _run_guard(_guard_body(name), str(origin), str(fetch_dir), pin=None)
+            assert r.returncode == 1, f"{name}: sourced an unverified library\n{r.stderr}"
+            # Pin THIS refusal, not any refusal: the MISMATCH sentence also contains
+            # the words "Refusing to source", so a looser match is satisfied by a
+            # different failure path and stops being a guard (measured — a mutation
+            # that deleted this branch entirely still passed the loose version).
+            assert (
+                "unset and no hash sidecar at the origin" in r.stderr
+            ), f"{name}: did not take the missing-sidecar refusal: {r.stderr}"
+            assert "venya-common.sh.sha256" in r.stderr, f"{name}: refusal does not name the artifact: {r.stderr}"
+            # The refusal must come BEFORE the source: the guard prints its verified
+            # line only on the pass path.
+            assert "verified (sha256" not in r.stderr, f"{name}: refused but still reported verified: {r.stderr}"
+
+
+def test_altered_published_sidecar_refuses_on_all_three_installers() -> None:
+    """NEGATIVE half B: the sidecar is present but its hash does not match the
+    library it attests (truncated/corrupted upload). rc=1 with a MISMATCH naming
+    both values — a present-but-wrong sidecar must never be treated as "no
+    expectation", and publishing one is worthless if a bad one is accepted."""
+    for name in INSTALLERS:
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = _make_origin(tmp, "MARKER_SOURCED=1\n", sidecar=None)
+            wrong = "0" * 64
+            (origin / "venya-common.sh.sha256").write_text(_published_sidecar_text(wrong), encoding="utf-8")
+            fetch_dir = Path(tmp) / "fetch"
+            fetch_dir.mkdir()
+            r = _run_guard(_guard_body(name), str(origin), str(fetch_dir), pin=None)
+            assert r.returncode == 1, f"{name}: accepted a sidecar that does not match\n{r.stderr}"
+            assert "MISMATCH" in r.stderr, f"{name}: {r.stderr}"
+            assert wrong in r.stderr, f"{name}: refusal does not name the expected value"

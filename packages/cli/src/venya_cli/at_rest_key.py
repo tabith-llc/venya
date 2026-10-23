@@ -90,7 +90,7 @@ def unwrap_at_rest(data: bytes, server_passphrase: str | None = None) -> bytes:
     )
 
 
-def rewrap_at_rest(plaintext_pem: bytes, server_passphrase: str | None) -> bytes:
+def rewrap_at_rest(plaintext_pem: bytes | memoryview, server_passphrase: str | None) -> bytes | memoryview:
     """Re-encrypt plaintext PEM into the at-rest envelope.
 
     No passphrase (legacy install / disaster restore): the plaintext is
@@ -125,10 +125,23 @@ def acquire_server_passphrase(env_var: str) -> str:
         return value
     if not sys.stdin.isatty():
         raise ValueError(f"server passphrase required but {env_var} is not set and stdin is not a TTY")
-    return getpass.getpass(f"Server CA key passphrase ({env_var}, hidden): ")
+    # #675 AC1: the bound is stated BEFORE the value is read. This is a READ door — it
+    # unlocks a key that already exists and deliberately refuses nothing here, because a
+    # floor at a read door locks an operator out of his own key. The sentence therefore
+    # names the rule and where it bites (the core's own load gate, server/ca.py), and adds
+    # no new check. Imported inside the function because commands.py imports this module at
+    # module level, so a top-level import would be a cycle.
+    from venya_cli.commands import MAX_PASSPHRASE_CODE_POINTS, MIN_PASSPHRASE_CODE_POINTS
+
+    return getpass.getpass(
+        f"Server CA key passphrase ({env_var}, hidden) — the core cannot load a CA key "
+        f"protected by a passphrase shorter than {MIN_PASSPHRASE_CODE_POINTS} characters, and "
+        f"{MAX_PASSPHRASE_CODE_POINTS} is an allowance it supports rather than a limit it "
+        f"enforces: "
+    )
 
 
-def restore_at_rest_bytes(key_path: Path, plaintext_pem: bytes) -> bytes:
+def restore_at_rest_bytes(key_path: Path, plaintext_pem: bytes | memoryview) -> bytes | memoryview:
     """Decide the at-rest envelope for a restore write (Q3b/Q5).
 
     Target encrypted  -> acquire + PROBE against the current file (a wrong
@@ -171,7 +184,7 @@ def restore_at_rest_bytes(key_path: Path, plaintext_pem: bytes) -> bytes:
     return plaintext_pem
 
 
-def atomic_write_key(key_path: Path, data: bytes) -> None:
+def atomic_write_key(key_path: Path, data: bytes | memoryview) -> None:
     """Atomic at-rest key write: temp file in the same dir, fsync, 0600,
     ownership per installer precedent (inherit the current file's, else the
     directory's — the CA dirs are owned by the ``venya`` service account),

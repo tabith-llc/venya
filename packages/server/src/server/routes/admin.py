@@ -293,6 +293,12 @@ class AdminRevokeExecutorResponse(BaseModel):
     revoked: bool
     executor_id: str
     serial_number: str | None = None
+    # #687, serial-form duplicate only: when the path executor_id disagrees with the owner the
+    # revocation row stored, `executor_id` names the STORED owner and these two carry the attempt.
+    # Both default to None and the route serializes with response_model_exclude_none, so a
+    # correctly-paired repeat answers with exactly the three keys it always sent.
+    requested_executor_id: str | None = None
+    executor_id_mismatch: bool | None = None
 
 
 class AdminRemoveExecutorResponse(BaseModel):
@@ -1427,6 +1433,10 @@ def _revoke_record_serial(db: Session, executor_id: str, serial_number: str, rev
 @router.post(
     "/admin/executors/{executor_id}/revoke",
     response_model=AdminRevokeExecutorResponse,
+    # #687: keeps the mismatch pair out of a correctly-paired response (see the model above).
+    # Every shipped return on this route passes serial_number, and that column is NOT NULL, so
+    # nothing that answers today loses a key to this flag.
+    response_model_exclude_none=True,
     status_code=status.HTTP_200_OK,
 )
 async def admin_revoke_executor(
@@ -1448,6 +1458,11 @@ async def admin_revoke_executor(
       predecessor serial whose record pointer has moved on). Note: a serial
       form on the CURRENT record serial also refuses dial (the shared
       revocation state checks the record serial when none is presented).
+
+    A DUPLICATE serial-form call is attributed to the owner the revocation ROW names, not to the
+    executor_id in the path it was sent to (#687): that arm answers before the population gate
+    below, so its path value is unverified, and audit_events is append-only. A caller whose path
+    value disagrees is still recorded — in `requested_executor_id`, flagged.
     """
     from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation
 
@@ -1458,12 +1473,12 @@ async def admin_revoke_executor(
         # --- Serial form: credential-only, identity untouched ---
         try:
             int(serial_arg, 16)
-            if len(serial_arg) > 16 or len(serial_arg) == 0:
+            if len(serial_arg) > 64 or len(serial_arg) == 0:
                 raise ValueError("bad length")
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="serial must be hex, 1-16 chars",
+                detail="serial must be hex, 1-64 chars",
             )
         # ONE canonical serial form (ticket cert-serial-canonicalization-mismatch
         # #481); the duplicate check below reads case/padding-insensitively, so a
@@ -1477,14 +1492,74 @@ async def admin_revoke_executor(
         if existing is not None:
             # Q3 (#301): the ATTEMPT is the record — the duplicate still
             # emits, with the no-op visible in fields.
-            audit_lifecycle(
-                db,
-                EXECUTOR_CERT_REVOKED,
-                admin.get("user_id"),
-                {"executor_id": executor_id, "serial_number": serial_arg, "already_revoked": True},
-            )
+            #
+            # #687: WHAT gets attributed is the row's owner, not the caller's path value. This
+            # arm returns before the population gate below, so `executor_id` here has been checked
+            # against nothing, and audit_events is append-only — an admin could name any executor
+            # in a permanent record. `existing.executor_id` is the value the ORIGINAL, gated
+            # revocation stored (the identity arm through _revoke_record_serial, the serial arm
+            # through its own gate, rotation through routes/executors.py), so it is the recoverable
+            # truth and it is already in hand. A disagreement stays ON the record as
+            # requested_executor_id + the mismatch flag rather than being dropped: the attempt to
+            # mis-attribute is itself evidence. The event and the response carry the same owner, so
+            # the client is not fed the value the log refused to write.
+            #
+            # executor_id is nullable on this table (alembic 002_executor_cert_revocations:31), so a
+            # row with no stored owner has no truth to prefer and the path value stands — with no
+            # mismatch flag, because there is nothing on this side to disagree with. shortcut: a
+            # NULL-owner row stays attributed to the unverified path value; upgrade if the column
+            # is ever made NOT NULL by a backfill migration.
+            owner = existing.executor_id or executor_id
+            fields = {
+                "executor_id": owner,
+                "serial_number": serial_arg,
+                "already_revoked": True,
+            }
+            mismatch = owner != executor_id
+            if mismatch:
+                fields["requested_executor_id"] = executor_id
+                fields["executor_id_mismatch"] = True
+            audit_lifecycle(db, EXECUTOR_CERT_REVOKED, admin.get("user_id"), fields)
             db.commit()
-            return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=serial_arg)
+            return AdminRevokeExecutorResponse(
+                revoked=False,
+                executor_id=owner,
+                serial_number=serial_arg,
+                requested_executor_id=executor_id if mismatch else None,
+                executor_id_mismatch=True if mismatch else None,
+            )
+        # #685: consult the credential population BEFORE writing, the way the identity
+        # arm already does at the bottom of this route. Until this check the serial arm's
+        # only lookup was the idempotency query above, so a serial no certificate holds
+        # was accepted with 200 + a stored row, and a path executor_id present in no table
+        # was accepted too — the row was attributed to nothing and revoked nothing.
+        #
+        # Ordered AFTER the idempotency check on purpose. A predecessor serial auto-revoked
+        # at rotation (F6) has no ExecutorCert row any more — `routes/executors.py` rewrites
+        # the one record row to the new serial — so a gate in front would turn a legitimate
+        # repeat into a refusal and change idempotency semantics that #301/#481 pinned.
+        # A known-and-already-revoked serial therefore stays 200 revoked=False, unchanged.
+        #
+        # The population this binds to is `ExecutorCert`, not the `executors` status table:
+        # that is what the identity arm checks, what registration writes, and what survives
+        # a status-row gap, so a live credential stays revocable while a fabricated one is not.
+        cert = db.query(ExecutorCert).filter(serial_match_clause(ExecutorCert.serial_number, serial_arg)).first()
+        if cert is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Executor certificate not found for serial: {serial_arg}",
+            )
+        if cert.executor_id != executor_id:
+            # The serial is real but belongs to a different executor than the path names.
+            # Writing this row would attribute another credential's revocation to an
+            # executor that never held it — the same attribution defect, other direction.
+            # The sentence names the PAIRING as the unknown thing, not the executor: this
+            # executor may exist perfectly well, and a 404 reading "Executor not found"
+            # would tell the operator something false about a row that is there.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Serial {serial_arg} is not a certificate of executor {executor_id}",
+            )
         db.add(
             ExecutorCertRevocation(
                 serial_number=serial_arg,
@@ -2039,6 +2114,23 @@ class AdminRevokeCertRequest(BaseModel):
     reason: str = Field(default="unspecified", description="Revocation reason", max_length=64)
 
 
+#: The named refusal for a serial the admin-credential population does not name (#684).
+#: Kept as a module constant in the project's existing refusal-string shape (the shipped
+#: ``REFUSE_UNREGISTERED`` in ``core_relay_certs.py`` is the sibling), so a test can pin the
+#: vocabulary rather than pattern-match prose.
+REFUSE_UNREGISTERED_ADMIN_CERT = "REFUSE_UNREGISTERED_ADMIN_CERT"
+
+#: The one refusal sentence: cause, consequence, remedy.
+_ADMIN_UNREGISTERED_DETAIL = (
+    f"{REFUSE_UNREGISTERED_ADMIN_CERT}: serial {{serial}} names no admin credential this core "
+    "vouches for, so there is no certificate for this request to revoke and no consumer that "
+    "could ever honour it. Register it first: restart the core with VENYA_ADMIN_CERT pointing at "
+    "the admin credential it presents, or enroll it explicitly at "
+    "POST /api/v1/admin/certs/register. An unregistered serial is NOT treated as revoked and NOT "
+    "treated as live-by-default — revoking the unknown is how a store becomes an allowlist."
+)
+
+
 class AdminRevokeCertResponse(BaseModel):
     serial: str
     revoked: bool
@@ -2055,9 +2147,31 @@ async def admin_revoke_admin_cert(
     """Revoke an admin certificate by serial number.
 
     Admin only. Idempotent — revoking the same serial twice returns success.
+
+    Default-deny on MEMBERSHIP (#684): the serial must name a credential this core
+    vouches for in ``admin_credentials``, or the verb refuses. Format was never
+    membership — the old path validated the operator's string, found no row in the
+    revocation table, and blind-inserted one anyway, exiting 0 over a credential that
+    does not exist while the live admin credential kept transacting.
+
+    Truth table (every accept paired with a reject, same shape as the shipped relay
+    route in ``core_relay_certs.py``):
+
+    | registry row for the serial | revocation row | outcome |
+    |---|---|---|
+    | present | absent | 200 ``revoked=true``, row inserted, audit written |
+    | present OR absent | present | 200 ``revoked=true, already_revoked=true`` — idempotent, unchanged (``revoked=False`` is not this route's shipped face) |
+    | ABSENT | absent | **403 ``REFUSE_UNREGISTERED_ADMIN_CERT``**, nothing written, nothing audited |
+    | — | — | malformed serial -> 400 before any lookup |
+
+    The already-revoked arm stays reachable without a registry row on purpose: a
+    credential revoked by a boot predating the 041 population is a fact already recorded,
+    and refusing the repeat would turn a truthful no-op into an error and make the
+    idempotency depend on when the row was written.
     """
     # Validate the OPERATOR STRING first — the 400 contract is unchanged: non-empty
-    # hex, up to 16 digits. Then normalize at the STORAGE BOUNDARY in the ONE
+    # hex, up to 64 digits — the width the serial_number columns store (#481 made 16 a write
+    # MINIMUM, not a ceiling). Then normalize at the STORAGE BOUNDARY in the ONE
     # canonical serial form (ticket cert-serial-canonicalization-mismatch #481,
     # superseding the 2026-09-20 uppercase ruling B — whose stated reason was that
     # nginx $ssl_client_serial is uppercase, and the middleware has since moved to
@@ -2067,18 +2181,18 @@ async def admin_revoke_admin_cert(
     provided = req.serial.strip()
     try:
         int(provided, 16)
-        if not provided or len(provided) > 16:
+        if not provided or len(provided) > 64:
             raise ValueError("bad length")
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid serial format — must be hex string (up to 16 chars)",
+            detail="Invalid serial format — must be hex string (up to 64 chars)",
         )
     serial = canonical_serial(provided)
 
     # Check if already revoked (idempotent) — same insensitive match as the
     # enforcement lookup, so the answer cannot disagree with what refuses.
-    from core.iam.models import AdminCertRevocation
+    from core.iam.models import AdminCertRevocation, AdminCredential
 
     existing = (
         db.query(AdminCertRevocation).filter(serial_match_clause(AdminCertRevocation.serial_number, serial)).first()
@@ -2095,6 +2209,20 @@ async def admin_revoke_admin_cert(
         db.commit()
         logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
         return AdminRevokeCertResponse(serial=serial, revoked=True, reason=existing.reason, already_revoked=True)
+
+    # MEMBERSHIP, default-deny (#684). Nothing is written and NOTHING IS AUDITED on a
+    # miss: an ADMIN_CERT_REVOKED row for a serial that names no credential is the false
+    # statement this defect exists to stop, and an audit trail that asserts a revocation
+    # that never happened is worse than no answer at all.
+    known = db.query(AdminCredential).filter(serial_match_clause(AdminCredential.serial_number, serial)).first()
+    if known is None:
+        # DEFAULT DENY. Not 404 — same reasoning the relay route records: the point is that
+        # the caller is REFUSED, and a 404 reads like "nothing of that name exists
+        # anywhere" rather than "this store does not vouch for it, so I will not act on it".
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_ADMIN_UNREGISTERED_DETAIL.format(serial=serial),
+        )
 
     # Insert new revocation
     now = datetime.now(UTC)

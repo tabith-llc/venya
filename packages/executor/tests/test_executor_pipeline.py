@@ -102,8 +102,8 @@ def test_mock_sbx_run_signature_is_call_compatible():
     """#378 truth-table half: the pipeline calls _run_command_sbx with keyword
     arguments (argv included, #322 LEG B) and the fixture mock replaces the
     method wholesale. If the mock's parameter set ever falls behind the real
-    signature the swap dies TypeError ONLY on sbx-present hosts — montana
-    errors earlier at the strategy boundary and never reaches the mock. Pin
+    signature the swap dies TypeError ONLY on sbx-present hosts — an sbx-absent
+    dev box errors earlier at the strategy boundary and never reaches the mock. Pin
     the mock to accept every parameter the real method declares (values may
     be ignored; argv behavior itself stays pinned by the #322 cells).
     Module-level: inside TestExecute the autouse patch would make the

@@ -126,7 +126,7 @@ def is_passphrase_below_floor(passphrase: bytes | str | None) -> bool:
 def short_passphrase_refusal(subject: str = DB_PASSPHRASE_ENV, *, read_path: bool = False) -> str:
     """Owner-blessed refusal text for a passphrase under the floor, on the DB-KEK plane.
 
-    The block is the one ruled in as R5(a) (flash1's §6, with the two authorized
+    The block is the one ruled in as R5(a) (a prior worker lane's §6, with the two authorized
     corrections applied) — the same bytes ``server/ca.py`` and ``venya_cli.commands``
     ship, with only the SUBJECT and the plane's ARTIFACT nouns varied, exactly as
     ``executor/key_passphrase.py`` did for its plane in #565. Both numbers interpolate
@@ -140,11 +140,11 @@ def short_passphrase_refusal(subject: str = DB_PASSPHRASE_ENV, *, read_path: boo
         "secret this deployment stores, and short passphrases are what an attacker tries first.\n"
         "To fix it:\n"
         f"  1. Replace the value of {subject} with a passphrase of at least "
-        f"{MIN_PASSPHRASE_CODE_POINTS} characters. Characters are\n"
-        "     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.\n"
+        f"{MIN_PASSPHRASE_CODE_POINTS} characters.\n"
         "     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.\n"
         f"  2. There is no rule about which characters appear — length is the only requirement, and\n"
-        f"     Venya supports passphrases up to {MAX_PASSPHRASE_CODE_POINTS} characters.\n"
+        f"     Passphrases longer than {MAX_PASSPHRASE_CODE_POINTS} characters are accepted too — "
+        f"{MAX_PASSPHRASE_CODE_POINTS} is the length Venya guarantees to support, not a maximum it enforces.\n"
         "  3. Provide the passphrase through the environment, never as a command-line argument\n"
         "     (command-line values are visible to other processes on the machine).\n"
         "Your existing database and its stored secrets were not modified by this refusal.\n"

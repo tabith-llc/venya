@@ -165,7 +165,7 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 def _short_passphrase_refusal(passphrase_env: str, *, read_path: bool = False) -> str:
     """Owner-blessed refusal text for a passphrase under the length floor (ticket #573).
 
-    The wording is the blessed block (flash1's §6, ruled in as R5(a) of the s87 owner
+    The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
     ruling set) with only the two authorized corrections applied: the supported maximum
     stated plainly instead of "no maximum below 64 characters", and the floor number
     interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the check uses,
@@ -183,11 +183,11 @@ def _short_passphrase_refusal(passphrase_env: str, *, read_path: bool = False) -
         "of trust for this deployment, and short passphrases are what an attacker tries first.\n"
         "To fix it:\n"
         f"  1. Replace the value of {passphrase_env} with a passphrase of at least "
-        f"{MIN_PASSPHRASE_CODE_POINTS} characters. Characters are\n"
-        "     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.\n"
+        f"{MIN_PASSPHRASE_CODE_POINTS} characters.\n"
         "     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.\n"
         f"  2. There is no rule about which characters appear — length is the only requirement, and\n"
-        f"     Venya supports passphrases up to {MAX_PASSPHRASE_CODE_POINTS} characters.\n"
+        f"     Passphrases longer than {MAX_PASSPHRASE_CODE_POINTS} characters are accepted too — "
+        f"{MAX_PASSPHRASE_CODE_POINTS} is the length Venya guarantees to support, not a maximum it enforces.\n"
         "  3. Provide the passphrase through the environment, never as a command-line argument\n"
         "     (command-line values are visible to other processes on the machine).\n"
         "Your existing CA was not modified by this refusal.\n"
@@ -780,26 +780,15 @@ class CAManager:
         crl = builder.sign(ca_key, hashes.SHA256())
         return crl.public_bytes(serialization.Encoding.DER)
 
-    def purge_expired_revocations(self, db_session, retention_days: int) -> int:
-        """Delete revocation records older than retention_days.
-
-        Args:
-            db_session: SQLAlchemy session.
-            retention_days: Keep records for this many days.
-
-        Returns:
-            Number of deleted records.
-        """
-        from core.iam.models import ExecutorCertRevocation
-
-        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
-        deleted_count = (
-            db_session.query(ExecutorCertRevocation)
-            .filter(ExecutorCertRevocation.revoked_at < cutoff)
-            .delete(synchronize_session=False)
-        )
-        db_session.commit()
-        return deleted_count
+    # NO purge_expired_revocations on this manager. #685 (owner ruling 2026-10-20):
+    # ExecutorCertRevocation is exempt from time-based purge — it is the membership
+    # population for credential validity, and truth-about-state is not aged out on a
+    # timer. The method and its maintenance-loop caller were REMOVED, not neutered, so
+    # there is no shipped code path left that can delete an executor revocation row.
+    # The `AdminCAManager.purge_expired_revocations` twin below is untouched: it is not
+    # wired to the maintenance loop, and the ruling named the executor table only.
+    # Defense-in-depth for a revert lives where the window is declared —
+    # `config.CRLConfig._retention_covers_revoked_population_lifetime`.
 
 
 # --- Admin CA constants ---
@@ -865,7 +854,7 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # foreign arc is then only a foreign registration kept alive in our source plus
 # a path that resolves bytes we never mint. The earlier per-plane re-mint
 # precondition, the dual-arc HOW it gated, and the owner's sentence are on
-# #601; clerk holds the ticket pen. The paired negative that pins the closure
+# #601; the ticket seat holds the pen. The paired negative that pins the closure
 # lives at tests/test_plane_marker_pen_arc_601.py, class
 # TestAnyOtherArcIsNoLongerRead, and that class name IS the claim: a marker on
 # ANY arc not ours collapses into the same missing-marker refusal. It drives the

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from venya_mcp import config as config_module
 from venya_mcp.client import (
     SessionExpiredError,
     VenyaAPIError,
@@ -112,6 +114,105 @@ def test_config_update_token_permissions(tmp_path: Path) -> None:
     config.update_token("new-token")
     mode = config_file.stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def _publish_boundary(monkeypatch) -> dict:
+    """Watch the publish boundary of ``update_token`` and report what it saw.
+
+    Replaces only the ``os`` name bound in ``venya_mcp.config`` with a shim that
+    delegates every call to the real module, so nothing else in the process is
+    perturbed. Two observations are taken, both at the instant ``os.replace``
+    runs — i.e. while the staged temp file still exists under its own name:
+
+    ``mode_at_replace``
+        the mode of the staged temp file at that instant;
+    ``fchmod_before_replace``
+        whether the explicit ``os.fchmod`` pin had already been called by then.
+    """
+    seen: dict = {}
+    real = os
+
+    class _OsShim:
+        def __getattr__(self, name: str):
+            return getattr(real, name)
+
+        def fchmod(self, fd: int, mode: int) -> None:
+            seen["fchmod_mode"] = mode
+            return real.fchmod(fd, mode)
+
+        def replace(self, src, dst):
+            seen["fchmod_before_replace"] = "fchmod_mode" in seen
+            seen["mode_at_replace"] = stat.S_IMODE(real.stat(src).st_mode)
+            return real.replace(src, dst)
+
+    monkeypatch.setattr(config_module, "os", _OsShim())
+    return seen
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o000])
+def test_config_update_token_pins_0600_before_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, umask: int
+) -> None:
+    """The custody guard for the MCP config write (owner commission, s147 release).
+
+    ``update_token`` stages the token in a temp file, pins it 0o600 with
+    ``os.fchmod``, then publishes with ``os.replace``. **The order is the whole
+    guard:** both orders leave the destination 0o600, so
+    ``test_config_update_token_permissions`` above — which stats the destination
+    after the call — cannot see the difference, and neither can any assertion on
+    the end state. This cell watches the boundary instead: the pin must have
+    landed while the staged file still exists under its own name.
+
+    Truth table, both halves, and how the negative half was proved (mutation,
+    not a shipped second case, because the wrong order is not reachable without
+    editing the writer):
+
+    - positive: mode at the publish boundary is 0o600 and the ``fchmod`` landed
+      before it — asserted below;
+    - negative: with the ``fchmod`` moved after ``os.replace`` (end state still
+      0o600) this cell reddens on ``fchmod_before_replace``. Verified at the
+      anchor of this leg, then restored byte-identically.
+
+    The parametrised umask is not decoration: ``tempfile.NamedTemporaryFile``
+    already creates 0o600, so on a healthy tree the mode arm cannot tell the two
+    orders apart. Its job is the sibling regression class — a writer swapped to a
+    plain ``open()`` creates 0o666 under ``umask(0)``, and this arm is what
+    reddens on it. The ordering arm is what reddens on the moved ``fchmod``.
+    """
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "https://venya-core-1",
+                "access_token": "old-token",
+            }
+        )
+    )
+    config = MCPConfig(config_file)
+    seen = _publish_boundary(monkeypatch)
+
+    old = os.umask(umask)
+    try:
+        config.update_token("new-token")
+    finally:
+        os.umask(old)
+
+    # Positive half — the window is closed: the pin landed on the staged file.
+    assert seen.get("fchmod_before_replace") is True, (
+        "the 0o600 pin did not land before os.replace published the staged file — "
+        "the token existed under its temp name at the create-time mode"
+    )
+    assert seen.get("fchmod_mode") == 0o600
+    assert (
+        seen.get("mode_at_replace") == 0o600
+    ), f"staged temp was {oct(seen['mode_at_replace'])} at the publish boundary under umask {oct(umask)}"
+
+    # And the guarantees the neighbouring cells already make, held in one place.
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+    assert json.loads(config_file.read_text())["access_token"] == "new-token"
+    assert not [
+        p for p in tmp_path.iterdir() if p.name.startswith(".venya-config-")
+    ], "a staged temp survived the publish"
 
 
 def test_config_env_override(tmp_path: Path) -> None:

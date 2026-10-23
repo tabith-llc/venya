@@ -20,6 +20,14 @@ import pytest
 from venya_cli.commands import cmd_admin_export_ca_key, cmd_admin_restore_ca_key
 
 
+@pytest.fixture(autouse=True)
+def _operator_terminal(monkeypatch):
+    """#593: both CA-key custody doors now refuse before prompting when stdin is not a TTY.
+    Every cell in this file is the operator-at-a-terminal path, so the tty is faked here;
+    the non-tty half of the truth table is test_ca_key_nontty_refusal_593_flash3.py."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+
 def _boom(*_a, **_k):
     raise AssertionError("secret-material prompt regressed to echoed input()")
 
@@ -115,7 +123,9 @@ class TestCaKeyPromptsHidden:
             assert cmd_admin_export_ca_key(args) == 0
         assert out.exists() and out.read_bytes() != key, "the export must not be the plaintext key"
         (ca_dir / "ca.key").unlink()
-        with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=[typed]):
+        # #593: trailing "" declines the absent-target server-passphrase prompt (Enter = leave
+        # unencrypted) — the door guard now requires a tty, so that second prompt is reachable.
+        with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=[typed, ""]):
             rc = cmd_admin_restore_ca_key(
                 SimpleNamespace(mode="backup", backup_file=str(out), shares=None, ca_dir=str(ca_dir))
             )
@@ -148,8 +158,10 @@ class TestCaKeyPromptsHidden:
         ):
             assert cmd_admin_export_ca_key(SimpleNamespace(output=str(backup), ca_dir=str(ca_dir))) == 0
         (ca_dir / "ca.key").unlink()
+        # #593: trailing "" declines the absent-target server-passphrase prompt (Enter = leave
+        # unencrypted), which the faked-tty path now reaches.
         with patch("builtins.input", _boom), patch(
-            "venya_cli.commands.getpass.getpass", side_effect=["prompt-export-passphrase"]
+            "venya_cli.commands.getpass.getpass", side_effect=["prompt-export-passphrase", ""]
         ):
             rc = cmd_admin_restore_ca_key(
                 SimpleNamespace(mode="backup", backup_file=str(backup), shares=None, ca_dir=str(ca_dir))

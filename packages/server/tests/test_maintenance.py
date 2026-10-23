@@ -173,10 +173,30 @@ def test_cleanup_rate_limit_counters_runs_delete_and_commits():
     db.commit.assert_called_once()
 
 
+def _code_identifiers(module) -> set[str]:
+    """Every name the module's CODE touches — via ``ast``, so comments and docstrings are not
+    evidence. A text grep over these files cannot answer "is the purge still called": the
+    exemption is DOCUMENTED in the very comments that replaced the pass, and a green drawn from
+    a string scan would be an instrument that reports what the prose says rather than what the
+    code does.
+    """
+    import ast
+    import inspect
+
+    names: set[str] = set()
+    tree = ast.parse(inspect.getsource(module))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+    return names
+
+
 def test_run_maintenance_happy_path_runs_all_four():
     db = MagicMock()
     db.execute.return_value.rowcount = 0
-    run_maintenance(db, None, None)  # config=None → defaults, must not raise
+    run_maintenance(db, None)  # config=None → defaults, must not raise
     assert db.commit.call_count == 4
 
 
@@ -187,7 +207,7 @@ def test_run_maintenance_respects_config_values():
         session=SimpleNamespace(session_timeout=123, max_session_duration=456),
         clock_skew=SimpleNamespace(token_tolerance_seconds=7),
     )
-    run_maintenance(db, config, None)
+    run_maintenance(db, config)
     assert db.commit.call_count == 4
 
 
@@ -198,7 +218,7 @@ def test_run_maintenance_secondary_failure_is_isolated():
         "server.maintenance.purge_admin_identity_metadata",
         side_effect=RuntimeError("boom"),
     ):
-        run_maintenance(db, None, None)  # must NOT raise
+        run_maintenance(db, None)  # must NOT raise
     # sessions + execution-sessions + rate-limit commits; purge failed before its commit
     assert db.commit.call_count == 3
     db.rollback.assert_called_once()
@@ -208,41 +228,147 @@ def test_run_maintenance_primary_failure_propagates_no_rollback_here():
     db = MagicMock()
     db.execute.side_effect = RuntimeError("db down")
     with pytest.raises(RuntimeError):
-        run_maintenance(db, None, None)
+        run_maintenance(db, None)
     # Primary failure is rolled back by the caller (app.py loop), not run_maintenance.
     db.rollback.assert_not_called()
 
 
+# --- #685: the revocation population is exempt from time-based purge -----------------
+#
+# Three cells used to PIN THE PURGE PASS here ("5th pass RUNS", "retention comes from config",
+# "a purge blowup is isolated"). All three defs are kept and re-paired to the new guarantee;
+# the survival proof runs against REAL SQLite because the predicate is the mechanism, and the
+# cycle is proven to have RUN by pairing the survivor with a row the sweep must delete.
+
+
+def _revocation_db():
+    """Real SQLite with the full Base metadata — the house pattern for predicate-shaped cells."""
+    from core.iam.models import Base
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)(), engine
+
+
 def test_run_maintenance_revocation_purge_pass_runs():
-    """5th pass RUNS when ca_manager is wired (user ruling 2026-09-21: a
-    never-called pass with a defaulted-to-None manager is a quiet dead
-    feature — pinned with the real signature; relocated from the public CRL
-    GETs, ticket sec-sweep-low-informational #23b). Default retention 90."""
-    db = MagicMock()
-    db.execute.return_value.rowcount = 0
-    ca_manager = MagicMock()
-    ca_manager.purge_expired_revocations.return_value = 3
-    run_maintenance(db, None, ca_manager)
-    ca_manager.purge_expired_revocations.assert_called_once_with(db, 90)
+    """RE-PAIRED (was: "5th pass RUNS when ca_manager is wired ... Default retention 90").
+
+    #685 (owner ruling 2026-10-20) removed the pass AND the parameter that carried it: a
+    required `ca_manager` whose only documented purpose was the purge, left in place calling
+    nothing, is exactly the silent no-op the 2026-09-21 ruling was written to prevent. So the
+    guarantee is now structural — the cycle takes no CA manager, and there is nothing on it
+    that could age a revoked credential out.
+    """
+    import inspect
+
+    from server.maintenance import run_maintenance as rm
+
+    params = list(inspect.signature(rm).parameters)
+    assert params == ["db", "config"], f"run_maintenance grew a purge carrier back: {params}"
+
+    import server.maintenance as maintenance_module
+
+    code = _code_identifiers(maintenance_module)
+    assert (
+        "purge_expired_revocations" not in code
+    ), "the maintenance module still CALLS the executor purge — #685 is not shipped"
 
 
 def test_run_maintenance_revocation_purge_retention_from_config():
-    """Retention days come from config.crl when present."""
-    db = MagicMock()
-    db.execute.return_value.rowcount = 0
-    config = SimpleNamespace(crl=SimpleNamespace(crl_retention_days=30))
-    ca_manager = MagicMock()
-    ca_manager.purge_expired_revocations.return_value = 0
-    run_maintenance(db, config, ca_manager)
-    ca_manager.purge_expired_revocations.assert_called_once_with(db, 30)
+    """RE-PAIRED (was: "Retention days come from config.crl when present", asserted
+    ``purge_expired_revocations(db, 30)``). Non-vacuous survival proof for #685.
+
+    A revocation row aged 400 days — far past every window the knob can hold (`le=365`) — is
+    still there after the real maintenance cycle runs. The pairing that keeps this honest is
+    the session row: same cycle, same commit path, and THAT row is gone. A green here can only
+    mean the cycle ran and made no room for the revocation row; it cannot mean the pass was
+    never called.
+    """
+    from core.iam.models import Executor, ExecutorCertRevocation
+    from core.iam.models import Session as SessionModel
+
+    db, engine = _revocation_db()
+    try:
+        old = datetime.now(UTC) - timedelta(days=400)
+        db.add(ExecutorCertRevocation(serial_number="000000000000beef", executor_id="exec-1", revoked_at=old))
+        # Past the hard cap AND idle past the sliding window: the sweep's own predicate.
+        db.add(
+            SessionModel(
+                user_id="u-swept",
+                created_at=datetime.now(UTC) - timedelta(seconds=999999),
+                expires_at=datetime.now(UTC) - timedelta(seconds=999999),
+                access_token="swept-token",
+            )
+        )
+        db.commit()
+
+        # Pre-flight: prove the fixture is ARMED, on the SQL side — the row really is past every
+        # window the knob can hold, so the survival assertion below cannot be vacuous. This is
+        # also the count re-taken after the run: the same predicate, one row before, one row
+        # after, and nothing in between that could have been deleted and re-inserted.
+        cutoff_365 = datetime.now(UTC) - timedelta(days=365)
+        past_every_window = (
+            db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.revoked_at < cutoff_365).count()
+        )
+        assert past_every_window == 1, "the fixture is not armed: no row is past the window"
+
+        config = SimpleNamespace(
+            session=SimpleNamespace(session_timeout=900, max_session_duration=14400),
+            clock_skew=SimpleNamespace(token_tolerance_seconds=60),
+            # Deliberately BELOW the #685/F2 guard anchor (90): this is a SimpleNamespace, so it
+            # never passes through the validator, and that is the point — a window the guard would
+            # now refuse cannot delete anything either, because the cycle does not read the knob.
+            crl=SimpleNamespace(crl_retention_days=30),
+        )
+        run_maintenance(db, config)
+
+        db.expire_all()
+        assert (
+            db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.revoked_at < cutoff_365).count()
+            == past_every_window
+        ), "an exempt, past-window row disappeared — #685's exemption is not shipped"
+        assert db.query(ExecutorCertRevocation).count() == 1
+        assert db.query(ExecutorCertRevocation).first().serial_number == "000000000000beef"
+        assert db.query(SessionModel).filter(SessionModel.access_token == "swept-token").count() == 0, (
+            "the session sweep did not run — the survival above proves nothing about a cycle " "that never executed"
+        )
+        assert db.query(Executor).count() == 0  # nothing else was minted by this fixture
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_run_maintenance_purge_failure_is_isolated():
-    """A purge blowup rolls back and does not abort the run (isolated-pass
-    contract shared with the other secondary passes)."""
+    """RE-PAIRED (was: "A purge blowup rolls back and does not abort the run").
+
+    There is no purge left to blow up, so the isolated-pass contract is pinned on the secondary
+    pass that IS still shipped: a rate-limit cleanup failure rolls back, is journalled, and does
+    not abort the cycle — the same contract, moved to a live site rather than deleted with the
+    pass it used to describe.
+    """
     db = MagicMock()
     db.execute.return_value.rowcount = 0
-    ca_manager = MagicMock()
-    ca_manager.purge_expired_revocations.side_effect = RuntimeError("boom")
-    run_maintenance(db, None, ca_manager)  # must not raise
+    with patch(
+        "server.maintenance.cleanup_rate_limit_counters",
+        side_effect=RuntimeError("boom"),
+    ):
+        run_maintenance(db, None)  # must not raise
     db.rollback.assert_called()
+    # sessions + execution-sessions + admin-identity still committed: the cycle finished.
+    assert db.commit.call_count == 3
+
+
+def test_run_maintenance_takes_no_crl_knob_for_the_revocation_table():
+    """The retention knob must not be READ by the cycle any more — the paired negative to the
+    survival cell above. #685 left `crl_retention_days` declared and startup-validated precisely
+    so a REVERT cannot reintroduce the hazard, and this is the half that says the window is not
+    consumed today. Read off the AST, not off the module's prose.
+    """
+    import server.maintenance as maintenance_module
+
+    code = _code_identifiers(maintenance_module)
+    assert "crl_retention_days" not in code, "the cycle reads the retention window again"
+    assert "CA_REVOCATIONS_PURGED_TOTAL" not in code, "the purge counter is being incremented again"

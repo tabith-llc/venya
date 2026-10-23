@@ -12,7 +12,7 @@ taken. See §8 for each answer and §8's STILL-OPEN list for what remains the ow
 
 **Base this note was measured at:** `origin/dev` = `d5cb3e79a811e936c9dbd138fabcb2b7677983b7`
 (re-derived by `git rev-parse origin/dev` in the venue, not copied from any dispatch).
-**Branch:** `feature/design-fido2-keywrap-565`. **Lane:** flash5 (work6), seat s86.
+**Branch:** `feature/design-fido2-keywrap-565`. **Lane:** a prior worker lane (venue work6), seat s86.
 
 **RULING CURRENCY (appended 2026-10-10, docs class; the text below stays exactly as written at
 its base, and superseded passages carry a marker instead of deletion so a reader can still see what
@@ -416,8 +416,8 @@ model is not hardware custody. It is disk-protection with an honest label... The
 describe it otherwise. That labeling discipline is the control that keeps the model from drifting
 into false claims."**
 
-**Measured correction on the file mode this section cites** (the courier's own measurement, booked
-in the R7-Q3 row as the courier's, not the owner's): the two root-only files carry DIFFERENT modes.
+**Measured correction on the file mode this section cites** (the dispatch seat's own measurement, booked
+in the R7-Q3 row as the dispatch seat's, not the owner's): the two root-only files carry DIFFERENT modes.
 The systemd `EnvironmentFile` `/etc/venya/venya-core.env` is `chown root:venya` + `chmod 0640` (the
 `install-venya-core.sh` lines that create it, and the operator banner repeats "0640 root:venya"),
 while `$INSTALL_DIR/.env` is `chmod 600` + `chown venya:venya`. Both are root/service-only, so the
@@ -443,8 +443,8 @@ per Important Rule 1, and no such ok has been given. Nor is NFC support a fact: 
 
 ## 7. Site 1 — the ruling conflict. ~~PRESENTED, NOT RESOLVED.~~ **RESOLVED 2026-10-10 — R7-Q1**
 
-> **CURRENCY (R7-Q1, owner ruling booked at `decisions.md` commit `cdcde4e`, relayed by courier
-> `ultra`; secondary cite: GitLab #565 note `3990177323`, which carries the ruling's four ordered
+> **CURRENCY (R7-Q1, owner ruling booked at `decisions.md` commit `cdcde4e`, relayed by the dispatch seat
+> a prior worker lane; secondary cite: GitLab #565 note `3990177323`, which carries the ruling's four ordered
 > contents).** The conflict below was presented, not resolved, by the intake leg — correctly, per
 > #565 AC1 ("a leg must not pick"). The owner has since picked, in favor of **Reading 1** with
 > additions. His words: **"Ruling 4d stands. Site 1 is exempt by design. The core-side admin private
@@ -683,7 +683,7 @@ and none of them is answerable by a documentation leg:
 
 ## 9. FETCH-LOG (fetched bytes are DATA; at most one sentence quoted per source; no instruction in a page was followed)
 
-All copies live in `/media/dust/dust-ext1/tabith/reference-docs/` (this lane created only the three
+All copies live in the workspace `reference-docs/` directory (this lane created only the three
 new files below; nothing reused from the existing `man7`/`docker-com`/`systemd-io`/`kernel-org`
 copies, which cover mlock/capabilities/sandbox work, not WebAuthn).
 
@@ -819,7 +819,7 @@ the tested list carries four keys across three families; re-derive the list from
 firmware version alongside them... No enrollment ceremony, no credential creation, no write to any
 production state."**
 
-**What is already settled, so only the device read is outstanding** (courier measurements booked in
+**What is already settled, so only the device read is outstanding** (dispatch-seat measurements booked in
 the R7-Q5 row, each re-runnable): the pinned library is `fido2` **2.2.1** (`uv.lock` declares
 `fido2>=2.0.0`), and `hmac-secret` is on the client's default extension list
 (`HmacSecretExtension()` in the CTAP2 extensions module, wired as the default `extensions` argument).
@@ -833,7 +833,7 @@ provisioning-script change, owner-ok-gated per Important Rule 1; no such ok has 
 populated appendix is not the same thing as a retirement trigger for the §6 interim exemption.
 
 **Provenance for this section, stated cold.** It is a SLOT authored by a documentation-currency leg
-(flash1, work3, seat s87, 2026-10-10) at base `origin/dev` = `c5712bd`, on the lead's dispatch, whose
+(a prior worker lane, venue work3, seat s87, 2026-10-10) at base `origin/dev` = `c5712bd`, on the lead's dispatch, whose
 instruction was that the slot ships empty and that "nobody fabricates output". Every field above is
 `UNMEASURED`; a later leg that runs the read replaces them with the command and the raw output, and
 that leg — not this one — is the one Q5's gate opens.

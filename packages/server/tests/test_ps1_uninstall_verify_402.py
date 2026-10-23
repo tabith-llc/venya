@@ -6,7 +6,7 @@
 
 """Static honesty cells for the ps1 uninstaller verify-absent loop (#402).
 
-No pwsh runner on montana — execution UNVERIFIED, riding the #328 win11
+No pwsh runner on the Linux dev box — execution UNVERIFIED, riding the #328 win11
 window (repo idiom for ps1: static review cells only; no PSParser/tokenize
 harness exists — this file states so per #402 AC-3). The old shape printed
 "Removed $Base" unverified and checked only the two shims; the #396 bash

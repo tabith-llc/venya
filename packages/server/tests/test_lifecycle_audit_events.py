@@ -1551,9 +1551,21 @@ class TestRevocationLifecycle:
         assert _f(rows[0]) == {"executor_id": "exec-1", "form": "identity", "already_revoked": True}
 
     def test_executor_serial_revoke_row(self):
-        from core.iam.models import ExecutorCertRevocation
+        from core.iam.models import ExecutorCert, ExecutorCertRevocation
 
-        db = _keyed_db(MagicMock(), {ExecutorCertRevocation: None})
+        # #685: the serial arm now consults the issuance population before it writes, so the
+        # keyed double has to ANSWER that query. This is a TABLE ADDITION only — the assertion
+        # below is untouched, and the cell still proves the same thing it always did (one
+        # executor_cert_revoked row, canonical serial, already_revoked False). A model the table
+        # does not key returns None from _KeyedQ.first(), which after the gate reads as "no such
+        # certificate" and refused the call this cell means to observe.
+        db = _keyed_db(
+            MagicMock(),
+            {
+                ExecutorCertRevocation: None,
+                ExecutorCert: SimpleNamespace(serial_number="ab12", executor_id="exec-1"),
+            },
+        )
         client = TestClient(_admin_app(db), raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/exec-1/revoke", json={"serial": "ab12"})
         assert resp.status_code == 200
@@ -1570,7 +1582,15 @@ class TestRevocationLifecycle:
     def test_executor_serial_duplicate_emits_noop_row(self):
         from core.iam.models import ExecutorCertRevocation
 
-        db = _keyed_db(MagicMock(), {ExecutorCertRevocation: SimpleNamespace(serial_number="ab12")})
+        # #687: the duplicate arm now READS the stored owner off this row, so the double has to
+        # carry the column a real `ExecutorCertRevocation` always has (nullable, but present). This
+        # is a TABLE ADDITION only — the assertion below is untouched, and it still proves the same
+        # thing it always did. The value is the SAME executor the path names, which is exactly the
+        # correctly-paired repeat: the payload is byte-for-byte what this cell asserted before the
+        # fix, so this row is also the negative-2 byte-identity proof on the shipped-double side.
+        db = _keyed_db(
+            MagicMock(), {ExecutorCertRevocation: SimpleNamespace(serial_number="ab12", executor_id="exec-1")}
+        )
         client = TestClient(_admin_app(db), raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/exec-1/revoke", json={"serial": "ab12"})
         assert resp.status_code == 200
@@ -1585,10 +1605,16 @@ class TestRevocationLifecycle:
         db.commit.assert_called_once()  # no-op row still gets its commit
 
     def test_admin_cert_revoke_row_and_duplicate(self):
-        from core.iam.models import AdminCertRevocation
+        from core.iam.models import AdminCertRevocation, AdminCredential
 
         existing = SimpleNamespace(serial_number="AB12", reason="leaked")
-        db = _keyed_db(MagicMock(), {AdminCertRevocation: None})
+        # #684: the route checks membership in admin_credentials before it writes, so the
+        # accept arm needs the population keyed too — a table that names no credential is
+        # the refusal case, and it is asserted in its own half below.
+        db = _keyed_db(
+            MagicMock(),
+            {AdminCertRevocation: None, AdminCredential: SimpleNamespace(serial_number="ab12")},
+        )
         client = TestClient(_admin_app(db), raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/certs/revoke", json={"serial": "ab12", "reason": "compromised"})
         assert resp.status_code == 200
@@ -1600,7 +1626,7 @@ class TestRevocationLifecycle:
             "already_revoked": False,
         }
 
-        db2 = _keyed_db(MagicMock(), {AdminCertRevocation: existing})
+        db2 = _keyed_db(MagicMock(), {AdminCertRevocation: existing, AdminCredential: None})
         client2 = TestClient(_admin_app(db2), raise_server_exceptions=False)
         resp2 = client2.post("/api/v1/admin/certs/revoke", json={"serial": "AB12"})
         assert resp2.status_code == 200
@@ -1612,6 +1638,15 @@ class TestRevocationLifecycle:
             "reason": "leaked",
             "already_revoked": True,
         }
+
+        # PAIRED NEGATIVE (#684): no population row and no revocation row -> refused, and
+        # the refusal audits NOTHING. This is the half the shipped route lacked.
+        db3 = _keyed_db(MagicMock(), {AdminCertRevocation: None, AdminCredential: None})
+        client3 = TestClient(_admin_app(db3), raise_server_exceptions=False)
+        resp3 = client3.post("/api/v1/admin/certs/revoke", json={"serial": "ab12", "reason": "never issued"})
+        assert resp3.status_code == 403, resp3.text
+        assert "REFUSE_UNREGISTERED_ADMIN_CERT" in resp3.json()["detail"], resp3.json()
+        assert not _lifecycle_events(db3), f"a refused revoke must audit nothing, got {_lifecycle_events(db3)}"
 
     def test_revocation_negatives_write_no_rows(self):  # Q7
         from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation

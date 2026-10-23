@@ -16,7 +16,7 @@ those writers in the fix set, and R7-Q3 (`decisions.md`, booked at commit
 `1bf25ae`) rules the shape for these unattended sites: a **write-time ceremony
 plus a file passphrase delivered by a root-only systemd `EnvironmentFile`**.
 
-Read this module's posture out of `docs/design-fido2-keywrap-565.md` §6 before
+Read this module's posture out of `docs/design-fido2-keywrap.md` §6 before
 editing it. Two of its clauses bind the code here:
 
 * **"This is NOT hardware custody."** The passphrase lives on the host. The
@@ -99,11 +99,11 @@ def short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
         "executor's mTLS identity, and short passphrases are what an attacker tries first.\n"
         "To fix it:\n"
         f"  1. Replace the value of {subject} with a passphrase of at least "
-        f"{MIN_PASSPHRASE_CODE_POINTS} characters. Characters are\n"
-        "     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.\n"
+        f"{MIN_PASSPHRASE_CODE_POINTS} characters.\n"
         "     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.\n"
         f"  2. There is no rule about which characters appear — length is the only requirement, and\n"
-        f"     Venya supports passphrases up to {MAX_PASSPHRASE_CODE_POINTS} characters.\n"
+        f"     Passphrases longer than {MAX_PASSPHRASE_CODE_POINTS} characters are accepted too — "
+        f"{MAX_PASSPHRASE_CODE_POINTS} is the length Venya guarantees to support, not a maximum it enforces.\n"
         "  3. Provide the passphrase through the service environment (the systemd EnvironmentFile\n"
         "     the executor installer maintains), never as a command-line argument — command-line\n"
         "     values are visible to other processes on the machine.\n"

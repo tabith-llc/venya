@@ -115,7 +115,7 @@ class TestRefusesBeforeTheLoader:
         #569's Problem asks FOUR things of a refusal, so the cell now demands all four:
         which key, which posture, that nothing was written, AND what to do (the shipped
         ``Reference:`` line, naming both doc paths). The fourth is this leg's addendum —
-        the checker measured that dropping the block's tail threw away posture-TRUE bytes.
+        the verification seat measured that dropping the block's tail threw away posture-TRUE bytes.
         """
         ca = _admin_ca(tmp_path)
         _flatten_to_plaintext(ca)

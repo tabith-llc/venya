@@ -33,7 +33,7 @@ directory, which this document did not previously list. Each row names the pin t
 |---|---|---|---|---|
 | `/var/lib/venya/ca/` | **`0700`** | `venya:venya` | `chmod 700 /var/lib/venya/ca` in `venya_create_directories` (`venya-common.sh`), plus `os.chmod(str(ca_dir), 0o700)` in the CA-generation step (`install-venya-core.sh`) | **yes, unconditionally** — neither pin is inside the admin-mTLS block |
 | `/var/lib/venya/ca/admin-ca/` | **`0700`** | `venya:venya` | `install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"` (`install-venya-core.sh`) | every admin-mTLS run — `install -d` re-applies the mode to an existing directory. Skipped when admin mTLS is off. |
-| `/etc/venya/admin/` | **`0700`** | `venya:venya` | `install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"` (`install-venya-core.sh`); inside it the mint writes `admin.crt` `0644` and `admin.key` `0600` | every admin-mTLS run. Skipped when admin mTLS is off. |
+| `/etc/venya/admin/` | **`0700`** | `venya:venya` | `install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"` (`install-venya-core.sh`); inside it the mint writes `admin.crt` `0644` and `admin.key` `0600` — that pair is **excluded from the backup set**, see "The machine-plane admin pair is excluded from the backup set" below | every admin-mTLS run. Skipped when admin mTLS is off. |
 | `/opt/venya/.env` | `0600` | `venya:venya` | item 2 above (`chmod 600`) | every run |
 | `/etc/venya/venya-core.env` | `0640` | `root:venya` | item 3 above (`chmod 0640`) | every run |
 
@@ -98,9 +98,74 @@ re-issue them from the restored CAs — see step 5 of "Restore".
   previously-issued recovery codes stop working.
 
 Net: back up **#1 + #2 + #3 + #4 together, every time.** A DB dump without `.env` and
-`venya-core.env` is encrypted noise. `/etc/venya/admin/` is deliberately **not** a fifth artifact:
-the installer re-mints that pair on every admin-mTLS run (see "Delivered modes" above), so a
-reinstall replaces it and an off-site copy of it buys nothing.
+`venya-core.env` is encrypted noise. `/etc/venya/admin/` is deliberately **not** a fifth artifact —
+see the exclusion row below.
+
+### The relay credential registry — backed up inside #1, and it is revocation state
+
+The core presents its own relay **client** certificate when it dials an executor's `:8443`
+listener (CN `<core-hostname>-relay`, minted by the core installer with `openssl`). #597 gave that
+credential a registry: one row per credential in the **`core_relay_credentials`** table, written at
+core boot by `server/relay_registry.py` (the function `ingest_relay_credential`, which reads the facts
+off the certificate the process actually presents) or explicitly by
+`venya admin core-relay-cert register --cert-file <path>`.
+
+Two consequences a backup plan has to carry:
+
+- **The registry lives in artifact #1, so it is backed up with the database dump and nowhere else.**
+  The certificate file itself is in the *regenerable* list above — a re-mint replaces it and losing it
+  costs nothing but a re-enrolment. The **revocation record** is the row: `revoked_at` is a column on
+  that row, and revoking is `venya admin core-relay-cert revoke` (by `--serial` or `--cert-file`).
+  There is **no delete and no un-revoke** — a revoked row is **retained as the record**, and
+  `register_relay_credential` never clears `revoked_at` on a row it re-sees, so rebooting a core cannot
+  un-revoke itself. Restore the database and you restore exactly that history, intact.
+- **A stale dump un-revokes.** Because revocation state is ordinary table state, restoring a dump taken
+  *before* a revoke brings that credential back as live — the new row has `revoked_at` NULL and the
+  executor's door admits it. That is true of every revocation table in this product
+  (`executor_cert_revocations`, `admin_cert_revocations`, and this one), not only the relay registry.
+  **After any restore, re-check the registry before you trust it:**
+
+  ```bash
+  venya admin core-relay-cert list --json   # revoked must still read true for everything you killed
+  ```
+
+  Mechanism read at the shipped schema and the two writers above, not from a physical restore drill —
+  the 2026-09-30 drill did not exercise a revoked row. Treat it as a check to run, not a bug to assume.
+
+**The boundary of that record, stated so nobody over-reads it:** the revoke takes effect at the
+executor's connection **acceptance**, ahead of the `relay_client_ids` CN check, and only on **new**
+connections — a relay call already in flight is not terminated. It is **not** a handshake-layer CRL
+refusal, and there is no un-revoke path. `FIREWALL.md` and
+`cert-rotation-runbook.md` § *Revoking the core's relay client credential (#597)* state the same
+boundary; the registry row, not a CRL, is what makes the credential nameable at that door.
+
+### The machine-plane admin pair is excluded from the backup set
+
+**`/etc/venya/admin/admin.key` (delivered mode `0600`) and `/etc/venya/admin/admin.crt` (`0644`) are
+excluded from the backup set above, on purpose.** The `tar` command in "How to back up" does not name that
+directory and no step in "Restore" expects a copy of it. The mechanism, read at the shipped bytes: the mint
+`AdminCAManager.sign_admin_cert` (`packages/server/src/server/ca.py:1151`) hands back the leaf and its key
+(`:1265-1272`, the key serialized `NoEncryption()` at `:1268`), and the installer writes that pair and sets
+its modes — `install-venya-core.sh:569` unpacks `cert, key_pem, cert_pem`, `:572-573` write `admin.crt` and
+`admin.key`, `:574-575` set `0644`/`0600`, inside the `0700` directory the same script creates with
+`install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"` (`:431` names the path, `:433` opens the admin-mTLS
+block). **What replaces a lost copy is a re-mint, not a restore:** re-running the core installer preserves an
+existing CA and re-issues that pair unconditionally, and the same call can be made directly —
+`venya admin generate-admin-cert <identity> --output-dir /etc/venya/admin` (see
+[beta-known-limitations.md](beta-known-limitations.md)). That is what the installer's own line means when it
+prints "never copied off this core" (`install-venya-core.sh:580`).
+
+**What this row does NOT claim, and a reader should not infer it:**
+- It is **not** a claim that `admin.key` is protected by encryption at rest. It is written in the clear; the
+  file mode and the directory mode are the control, and that posture is a ruled exemption, listed in
+  [beta-known-limitations.md](beta-known-limitations.md) — it is not an oversight.
+- It is **not** a claim that excluding this pair weakens the rest of the set: the CA material in **#4** is still
+  irreplaceable and still must be backed up with **#3**.
+- It is **not** a statement about every install. Both directories are created inside the
+  `VENYA_ADMIN_MTLS_ENABLED` block, so an install run with that flag `false` holds no such pair to exclude.
+- It is **not** enforced by anything. No shipped check asserts that a backup archive omits
+  `/etc/venya/admin/`; this is the documented posture of the commands on this page. If you add the directory to
+  your own archive the product will not stop you — it only means you are carrying a plaintext key off the core.
 
 ## How to back up (core server)
 
@@ -146,9 +211,13 @@ sudo tar -tzf /root/venya-backup/venya-secrets-*.tar.gz | grep -E '\.env$|ca\.ke
 > custody fix makes export/split/restore honor the at-rest envelope; **live-core
 > verification of the round-trip is scheduled for the next fleet window**. Until that
 > passes, treat this custody path as REHEARSE-BEFORE-YOU-NEED-IT — exercise it against a
-> test CA before an incident; the tar backup above remains the drill-proven path. The
-> shares path, `split-ca-key`, reads the same at-rest bytes and is same-class suspect — not
-> exercised.
+> test CA before an incident; the tar backup above remains the drill-proven path.
+> The shares path is NOT a separate suspect: `split-ca-key` reads the same at-rest
+> envelope through the same helper (`cmd_admin_split_ca_key` and
+> `cmd_admin_export_ca_key` both call `unwrap_at_rest` in
+> `packages/cli/src/venya_cli/commands.py`, fix `066f4c8`, ticket #297), so what is
+> unverified for one is unverified for the other — the code path is shared, the fleet
+> round-trip is not yet run.
 
 For off-site / escrow custody of the CA key, the CLI has purpose-built break-glass commands
 (they never write the plaintext key to disk or stdout):

@@ -13,7 +13,7 @@ the requirement, so an operator following the hint walked straight into the refu
 — a dead end, the same class RF-8a/RF-8b closes on the CLI surface.
 
 Both halves are checked, per the paired-negative rule: the shipped text names the
-variable (positive), and the pre-#547 text does NOT (the checker is proven to bite
+variable (positive), and the pre-#547 text does NOT (the verification seat is proven to bite
 rather than passing on everything).
 
 Mechanism of verification matters here, so nothing in this file re-types the
