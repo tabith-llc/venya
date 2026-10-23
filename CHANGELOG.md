@@ -597,14 +597,20 @@ Notable changes to Venya will be documented in this file.
   asserting one. Merges `685e3cca9`, `fcd1b34c6`, `daf745e2b`. Tickets named by those merges: (`#481`) (`#666`).
 - **Authorization is scoped to the caller, and unauthenticated paths that could claim an identity are closed.** Secret writes and session reads are checked against the calling principal, the
   registration route refuses an unauthenticated takeover, the reset wipe is no longer reachable as a race, and role removal or admin disable refuse the state that leaves no way back in. Merges
-  `50364584a`, `03097624f`, `0dd03ae0f`, `f159fcc13`, `851f7e6db`, `bdf6e073b`, `08bf24df5`, `d3245c739`. Tickets named by those merges: (`#3`) (`#15`) (`#16`) (`#450`).
+  `50364584a`, `03097624f`, `0dd03ae0f`, `f159fcc13`, `bdf6e073b`, `08bf24df5`, `d3245c739`. Tickets named by those merges: (`#3`) (`#15`) (`#16`) (`#450`).
+- **Admin mTLS callers are checked against an allowlist, and a revoked certificate stops working.** The admin middleware reads the client certificate serial and tests it against the known admin set and the in-process revocation record; an empty allowlist fails closed, as does a missing serial or a lookup error, so no caller is admitted by an absent answer. Merges `851f7e6db`.
+
 - **Re-running init over a database that was wiped but still seeded converges instead of failing.** Role creation is now get-or-create on `roles.name`, so the stale-roles path no longer raises; the full detail, including any SQL, is logged server-side and the client receives a generic `Reset failed` rather than the internals. Merges `985acc698`.
 - **Elevation is bound to the session that asked for it.** An elevation token is bound to the session and challenge state it was minted with, and refresh refuses when no active user backs it. Merges
   `d3b264a48`, `53352d089`, `ce81db155`, `efa7660ef`, `d8ec78f18`. Tickets named by those merges: (`#341`) (`#345`).
-- **Failures that were swallowed, or read clean without having run, are reported — and a configured ceiling is obeyed.** The concurrency ceiling is read from configuration, a capture honours its
+- **Runtime settings are obeyed where they were ignored, and failures no longer read as clean.** The concurrency ceiling is read from configuration, a capture honours its
   timeout, a relay stop runs its cleanup under systemd, credential load and removal stop swallowing failures, a file-descriptor scan with an empty set no longer reads clean, and debug logging stopped
-  carrying session cookies. Merges `dca43dd43`, `ea9414175`, `02823ab7f`, `2d51ed9f2`, `3527ce4fd`, `7525d072c`, `19aabdada`, `876286ab2`, `8f7647a3e`, `ad8e5f59e`. Tickets named by those
+  carrying session cookies. Merges `dca43dd43`, `ea9414175`, `02823ab7f`, `2d51ed9f2`, `3527ce4fd`, `7525d072c`, `19aabdada`, `876286ab2`. Tickets named by those
   merges: (`#453`) (`#477`).
+- **One canonical certificate serial everywhere, so a revocation actually takes effect.** The same serial was written zero-padded and presented unpadded, and revocation lookups compared the two by exact string equality — a leading zero nibble (roughly one certificate in sixteen) left a revoked credential matching as live. Serial handling now lives in one shared module used by the CLI, the executor daemon, the server CA, its admin middleware and the revocation paths. Merges `8f7647a3e` (`#481`).
+
+- **Error responses stopped carrying internals to the client.** Registration and authentication failures return a generic detail while the full text, including any SQL or library message, is logged server-side; the WebAuthn manager forwards only what an operator needs, and the core installer's nginx config now sets `server_tokens off`. Merges `ad8e5f59e`.
+
 - **The broken browser-enrolment FIDO2 helper is removed, and with it the `venya-fido2` command.** The server no longer ships `server.fido2.cli_enroll` (228 lines) or its tests (121 lines), the `venya-fido2` console entry point is gone from the server package, and the generated suppression register moved down with it — the page and the dependency list are already in step, so nothing else rides on the removal. Merges `8078a4a33`.
 - **Requirements are now generated from the lock, so an install gets the versions that were tested.** The core and executor
   requirement files went from five hand-written lines to a frozen `uv export` pin set (125 and 92 lines added), so a fresh
