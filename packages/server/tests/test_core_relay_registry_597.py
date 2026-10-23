@@ -800,8 +800,8 @@ class TestMigrationAndModelAgree:
         # ADVANCED by the #684 leg, exactly as the 037-era head cell documents: the
         # invariant is ONE head, and the identifier is the acknowledgement that a
         # migration landed. 040 -> 041 (#684 admin credential registry)
-        # -> 042 (#689 relay CN column-comment scrub).
-        assert heads == ["042"], f"the version tree has more than one head: {heads}"
+        # -> 042 (#689 relay CN column-comment scrub) -> 043 (PB-597T2 revocation epoch counter).
+        assert heads == ["043"], f"the version tree has more than one head: {heads}"
 
 
 def core_alembic_dir() -> str:

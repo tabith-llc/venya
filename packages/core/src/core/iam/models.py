@@ -20,7 +20,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -828,3 +830,56 @@ class CoreRelayCredential(Base):
         comment="Revocation time; NULL = live. Terminal for alpha: no un-revoke, same law as Executor.revoked_at",
     )
     revoke_reason = Column(Text, nullable=True)
+
+
+class RevocationEpoch(Base):
+    """A one-row counter that advances whenever ANY revocation state is WRITTEN (#597T2 / PB-597T2).
+
+    WHY THIS EXISTS. Revocation state is not one table. It sits in ``executor_cert_revocations``
+    and ``admin_cert_revocations`` (a row IS the revocation) and in the ``revoked_at`` columns of
+    ``executors`` and ``core_relay_credentials`` (a column flip IS the revocation). #597 closed on
+    the admission that "raw SQL or out-of-band revocations were not exhaustively searched" — an
+    enumeration of writers can never be finished, so it cannot be trusted. This table answers a
+    different question: not "did we see every writer" but "has any of this changed since my last
+    read". The counter makes an out-of-band write OBSERVABLE, which is the floor PB-367's admission
+    check stands on.
+
+    HOW IT ADVANCES. ``043_revocation_epoch_597t2.py`` installs one PL/pgSQL trigger function and
+    eight triggers over those four relations, PostgreSQL-only by dialect guard. The bump is
+    row-level for INSERT/UPDATE/DELETE and statement-level for ``TRUNCATE``, because a TRUNCATE
+    fires no row trigger and an epoch that missed the one maintenance statement that erases all
+    revocation history would be a floor with a hole exactly where the hazard is largest.
+
+    FAIL-LOUD, DELIBERATE. A trigger runs as the writing role and UPDATEs this single row. If the
+    row is missing or the table is dropped, the revocation write ABORTS — an operator cannot revoke
+    a credential without the change being counted. That is fail-closed on the security plane, not a
+    bug to smooth over; the repair is to restore the row, not to make the trigger tolerant.
+
+    RESIDUAL, stated where a reader will meet it. Triggers are ordinary catalog objects: a DBA can
+    ``DROP TRIGGER`` and revocation writes then succeed uncounted, silently. Nothing in the schema
+    bounds that — see ``docs/revocation-table-operations-runbook.md`` §9.
+
+    shortcut: the counter is write-side only; PB-367 owns the read path, the caching, and the
+    admission check that consumes this value, and nothing here is consulted by the runtime yet.
+    """
+
+    __tablename__ = "revocation_epoch"
+
+    __table_args__ = (
+        # Single row by the database, not by convention: every trigger targets ``id = 1``, so a
+        # second row would silently never be bumped and a reader asking this table the question
+        # would get a stale answer. A CHECK is portable and cheap.
+        CheckConstraint("id = 1", name="chk_revocation_epoch_single_row"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    epoch = Column(
+        BigInteger,
+        nullable=False,
+        comment="Write counter; +1 per revocation-state write. No upper bound is asserted — a bigint at one bump per revoke is arithmetic beyond any deployment",
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="When the counter last advanced — the trigger writes it with the same statement as the bump",
+    )

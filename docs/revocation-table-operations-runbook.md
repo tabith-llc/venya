@@ -143,10 +143,16 @@ the plain `serial_number` indexes and is measured as a **Seq Scan** (`EXPLAIN`, 
 table). An index makes the read cheaper; it does **not** make the read immune to a waiting
 `ACCESS EXCLUSIVE`. Do not record an index as the mitigation for this hazard.
 
-No migration currently takes `ACCESS EXCLUSIVE` on this table: it was created in
+No migration took `ACCESS EXCLUSIVE` on this table **until revision `043`**: it was created in
 `002_executor_cert_revocations.py` (table + `UniqueConstraint` on `serial_number` + two indexes)
-and no later revision in `packages/core/alembic/versions/` touches it. That is a fact about today,
-and §3 step 1 is how it stays a fact.
+and no revision through `042` touches it. **`043_revocation_epoch_597t2.py` is the first exception, and
+it is a `CREATE TRIGGER`** — which takes that lock class on every relation it watches, including this one
+and the heartbeat table `executors`. The revision therefore runs its DDL under
+`SET LOCAL lock_timeout = '5s'` / `statement_timeout = '30s'` exactly as §3 step 2 prescribes, so a
+blocked upgrade gives up on the DDL side instead of joining a convoy; when it times out the revision
+aborts and the trigger did not appear, and the fix is a maintenance window or halted daemons (§5, §7) —
+never a retry loop without the bound. §3 step 1 is how every *later* revision keeps this a fact about its
+own day rather than a surprise. §9 records what `043` does and the residual it cannot close.
 
 ## 5. Maintenance statements that take the blocking class
 
@@ -283,3 +289,86 @@ the outage.
 - `cert-rotation-runbook.md` — the credential ceremonies that write to this table (§3, §4 there).
 - `beta-known-limitations.md` — record any window you could not make non-blocking.
 - `wave29-specs-20261016/wren-603-shapeA-ruling-flash2-s130.md` — the ruling that requested this.
+
+## 9. The revocation epoch counter (PB-597T2, revision `043`)
+
+Revision `043` adds a one-row table, `revocation_epoch`, and eight PostgreSQL triggers that advance its
+counter whenever ANY revocation state is written. Revocation state is not one table — it is
+`executor_cert_revocations` and `admin_cert_revocations` (a row *is* the revocation), plus the
+`revoked_at` columns of `executors` and `core_relay_credentials` (a column flip *is* the revocation) — so
+the counter spans all four, and one number answers "has revocation state changed since my last read"
+without enumerating writers. #597 closed conceding that "raw SQL or out-of-band revocations were not
+exhaustively searched"; that enumeration is not finishable, and this replaces the question.
+
+**Why a trigger and not a privilege.** `031_audit_append_only_grants.py` is the nearest precedent and it
+is not one — its append-only guarantee is made of `GRANT`/`REVOKE`, not of a trigger, and there was no
+`CREATE TRIGGER` anywhere in `packages/core/alembic/versions/` before `043`. Privileges bind *who* may
+write; enforcing them here would mean revoking `UPDATE`/`INSERT` from the runtime role, which forbids the
+very product writes the counter exists to count, and they bind nobody at `psql` — the out-of-band writer
+is precisely the one #597 could not find. A trigger runs whatever the writer's identity, so the
+instrument changed because the property needed changed.
+
+**Measured behaviour, on PostgreSQL 17.11** — each row was run, not reasoned; the cells live in
+`packages/core/tests/test_migration_043_revocation_epoch_597t2.py`:
+
+| statement | epoch |
+|---|---|
+| `SELECT` against any watched relation (five, including a CRL-shaped read) | **unchanged** |
+| raw `INSERT` into `executor_cert_revocations` / `admin_cert_revocations` via `psql`, zero ORM | **+1 each** |
+| `UPDATE … SET revoked_at = now()` on `executors` / `core_relay_credentials` | **+1** |
+| `UPDATE … SET revoked_at = NULL` (an un-revoke) | **+1** — a change is a change |
+| `DELETE` from any watched relation | **+1** |
+| **`TRUNCATE`** on either row-table | **+1** — no row trigger fires on `TRUNCATE`, so `043` installs a statement-level `AFTER TRUNCATE` trigger on both; without it this row would read "unchanged", and that is the gap §5 calls the worst maintenance statement |
+| `UPDATE executors SET last_heartbeat = now()` (a heartbeat) | **unchanged** |
+| `UPDATE executors SET hostname = …` | **unchanged** |
+| the product's own ORM write (`ExecutorCertRevocation` insert, committed) | **+1** |
+
+**The heartbeat pair is load-bearing.** `executors` is written on every beat by every daemon, so the two
+`revoked_at`-column triggers carry `AFTER UPDATE OF revoked_at` plus
+`WHEN (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at)`. Without the guard the counter becomes a traffic
+meter: "has revocation state changed?" would answer yes continuously, and the first consumer learns to
+ignore it.
+
+**Fail-closure, measured twice because the first version got it wrong.** The bump is
+`UPDATE revocation_epoch SET epoch = epoch + 1 … WHERE id = 1`. With the seed row deleted, that UPDATE
+matches nothing and, with no further clause, raises nothing — an early build let a real revocation
+`INSERT` answer `INSERT 0 1` while the counter stood still, which is the #597 hole reopened by the thing
+meant to close it. The shipped function therefore checks `GET DIAGNOSTICS … ROW_COUNT` and raises:
+
+```
+ERROR:  revocation_epoch row 1 is missing — revocation state cannot be counted, so this write is refused.
+HINT:  This is deliberate fail-closure (PB-597T2). Do not soften the trigger to let the write through.
+```
+
+The consequence, stated because it is an outage shape: **with that row gone — deleted, or the table
+emptied by a `TRUNCATE` — revocation writes are REFUSED until it is restored**, and the restore is the one
+`INSERT` the error text names. The row is guarded by `chk_revocation_epoch_single_row` (`id = 1`), so a
+second row cannot exist to be read by mistake. Never make the trigger tolerant to unblock a write; restore
+the row.
+
+### The residual — what this mechanism cannot bound
+
+**A DBA who drops a trigger wins, and nothing in the schema says so.** Measured: after
+`DROP TRIGGER trg_revocation_epoch_exec_cert_rev ON executor_cert_revocations`, a revocation `INSERT`
+**succeeded** and the epoch **did not move**. No error, no log line, no readback — the credential is
+revoked, the counter is stale, and the only way to notice is that the counter stopped moving on a table
+that is being written. This is the stated limit of the design ("the last writer that can evade a trigger
+is the DBA who drops the trigger"), and it is why PB-597T2 is a *floor* under an admission check rather
+than a proof of an unchanged table.
+
+Two partial protections, both measured, and neither one claimed away:
+
+- **The function cannot be removed quietly.** `DROP FUNCTION venya_revocation_epoch_bump()` is REFUSED —
+  `cannot drop function … because other objects depend on it`, with the eight dependent triggers named,
+  `HINT: Use DROP ... CASCADE`. Taking it that way prints `drop cascades to 8 other objects`, which is
+  visible in the operator's own output. Dropping the eight triggers individually stays silent, so the
+  quiet path remains the common one.
+- **The downgrade is not a residual.** `alembic downgrade 042` drops all eight triggers, the function and
+  the table, leaves the watched relations and their rows alone, and revocation writes keep working
+  against the pre-`043` schema. Measured both ways, and `upgrade head` re-applies cleanly onto a schema
+  with live revocation rows (the guarded seed `INSERT` re-creates row 1, counters restart at 0).
+
+**What to watch.** `select epoch, updated_at from revocation_epoch where id = 1` on the core's database.
+An `updated_at` that stops moving while `executor_cert_revocations` / `admin_cert_revocations` gain rows is
+the signature of a dropped guard, and it is the only signature there is. The counter restarts at 0 across
+a downgrade/upgrade round trip, so a *decreasing* epoch is a schema event, not a rewind of history.
