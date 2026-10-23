@@ -16,7 +16,7 @@ those writers in the fix set, and R7-Q3 (`decisions.md`, booked at commit
 `1bf25ae`) rules the shape for these unattended sites: a **write-time ceremony
 plus a file passphrase delivered by a root-only systemd `EnvironmentFile`**.
 
-Read this module's posture out of `docs/design-fido2-keywrap-565.md` §6 before
+Read this module's posture out of `docs/design-fido2-keywrap.md` §6 before
 editing it. Two of its clauses bind the code here:
 
 * **"This is NOT hardware custody."** The passphrase lives on the host. The
