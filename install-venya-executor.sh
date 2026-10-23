@@ -582,7 +582,7 @@ info "Executor config written to /etc/venya/executor.toml"
 # secret in a root-owned file is what makes the mode the control.
 # MEASURED: the core installer's EnvironmentFile is 0640 root:venya, NOT 0600
 # venya-owned (install-venya-core.sh, the venya-core.env write). Copied deliberately,
-# per the correction booked in docs/design-fido2-keywrap-565.md section 6.
+# per the correction booked in docs/design-fido2-keywrap.md section 6.
 rm -f /etc/venya/venya-executor.env
 printf 'VENYA_EXECUTOR_KEY_PASSPHRASE=%s\n' "$EXECUTOR_KEY_PASSPHRASE" > /etc/venya/venya-executor.env
 chown root:venya /etc/venya/venya-executor.env

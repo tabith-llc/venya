@@ -849,7 +849,7 @@ the lists below.
   disk and keep loading unchanged — the requirement lands on the next write. This is
   disk protection by a file passphrase, not hardware-key custody; the interim shape
   and its retirement trigger are recorded in `docs/cert-rotation-runbook.md` §2 and
-  `docs/design-fido2-keywrap-565.md` §6. refs #565
+  `docs/design-fido2-keywrap.md` §6. refs #565
 - **End-to-end mTLS: client identity is crypto-verified at the app.** Admin
   and executor mTLS now read identity from the client certificate the app
   verifies itself (forwarded by nginx over the new inner nginx→uvicorn mTLS

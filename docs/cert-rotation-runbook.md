@@ -299,7 +299,7 @@ requirement applies to the next write, so set the passphrase once and rotate.
 This is disk protection by a file passphrase, **not** hardware-key custody: the
 passphrase lives on the host, delivered through the service environment. The interim
 exemption and its retirement trigger are written up in
-`docs/design-fido2-keywrap-565.md` §6 (owner ruling R7-Q3).
+`docs/design-fido2-keywrap.md` §6 (owner ruling R7-Q3).
 
 `renew` authenticates with the CURRENT cert — run it while the cert is still valid
 (the same 3-day window the daemon uses). If the cert already expired, re-register
