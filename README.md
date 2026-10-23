@@ -10,6 +10,54 @@
 
 **To our knowledge, this combination ships nowhere else** — the side-by-side comparison is published in [docs/security-landscape.md](docs/security-landscape.md). Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more. The same holds for the humans operating Venya: frontline operators authorize sessions, run commands, and read filtered output without ever seeing the credential values doing the work. Disclosure is a separate, deliberate act — FIDO2-elevated, single-use, audited — never part of normal operation. (Mechanized: values leave the server only through the elevation-gated unmask route or the mTLS executor-injection path; every disclosure is an audit event — see [docs/architecture.md](docs/architecture.md) "Secret lifecycle" and the Security Guarantees table below.)
 
+### How it is controlled
+
+Every mechanism named on this page is in the open: what a control enforces is written in
+the doc that governs it, and you can hold the code to it.
+
+- **Command policy, before execution.** The default blocklist — `scp`, `rsync`, `nc`,
+  `ncat`, `sudo`, `su`, `dd`, `rm -rf`, `mkfs`, `fdisk`, `shred`, `mount`, `insmod`,
+  `modprobe`, `chmod 4755`, `setuid` — ships on every executor, and an administrator can
+  replace it wholesale —
+  [docs/agents.md](docs/agents.md) "Hard rules" is the authority for what it covers, and
+  it covers the **local (sandbox) half** of an `ssh`/`sshpass` command: tokens past the
+  destination are remote-side and are not scanned by it. Name that scope when you depend
+  on it.
+- **Egress, deny-by-default, including names.** The sandbox reaches only what an
+  allowlist authorizes, and its DNS is a policy-enforcing proxy: a hostname resolves if
+  and only if that exact name is an entry. A target that is not allowlisted fails closed
+  rather than quietly routing — [docs/architecture.md](docs/architecture.md) "Sandbox and
+  egress", [docs/FIREWALL.md](docs/FIREWALL.md).
+- **Command resolution.** Binaries must resolve into trusted directories, and whatever
+  does not is refused before it starts. **No shell runs an agent's command — with one
+  ruled exception:** a standalone `<` token naming a secret injected in the same call is
+  the one form that does go through the guest shell, so the shell can open that file for
+  the command it wraps; every other pipe, `&&`, or redirect is rejected
+  ([docs/agents.md](docs/agents.md) "Hard rules", which carries the exception in full).
+- **Secret handling.** Values are injected inside the sandbox and never enter the
+  agent's context; output comes back redacted, and a filter failure returns nothing raw.
+  Each kind of secret declares how it may be consumed, including the pairing a
+  passphrase-protected key needs in the same call —
+  [docs/secret-shapes.md](docs/secret-shapes.md).
+- **Human authorization and revocation.** A session is authorized by a human touching a
+  physical security key. Executor identity is mTLS-bound and revocable, and the
+  revocation plane's lock behaviour is measured, not asserted —
+  [docs/revocation-table-operations-runbook.md](docs/revocation-table-operations-runbook.md).
+- **Audit.** Actor, command string, executor, secret ids (never values) and timestamps
+  are recorded for every step; an admin or an auditor-tier caller querying `get_audit`
+  sees the whole log and everyone else sees only their own events, enforced server-side.
+  Reading a secret value is a separate, elevation-gated act that writes its own audit
+  event — [docs/architecture.md](docs/architecture.md) "Secret lifecycle", and the tier
+  itself in [docs/auditor-role.md](docs/auditor-role.md).
+- **Change and recovery governance.** Deployed bytes trace to committed source
+  ([docs/deploy-gate.md](docs/deploy-gate.md)), and backup is validated by a restore drill
+  rather than by a file existing ([docs/BACKUPS.md](docs/BACKUPS.md)).
+
+**No certification is claimed here.** Venya is software you host; it carries no
+attestation and this page asserts none. What beta does **not** do is published, entry by
+tracked entry, in [docs/beta-known-limitations.md](docs/beta-known-limitations.md) — read
+that before treating any bullet above as a signed report.
+
 ---
 
 [![Animated walkthrough: an agent runs a NAS failover incident — jreyes authorizes with a FIDO2 key and types one sentence; the agent lists executors and secrets, probes from network-01, fails over to storage-01, the credential travels Venya → executor → sandbox and the echoed password is redacted; every command audited](docs/diagrams/workflow.gif)](docs/example-workflow.md)
