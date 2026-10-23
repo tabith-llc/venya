@@ -4,157 +4,10 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- Nothing is unreleased at this cut: the entries that sat here are folded
+  into `0.1.0beta1` below, in this same commit.
 
-- **The shipped tree carries no development-site names (`#689`).** Test fixtures, two
-  docs and one database column comment named real development hosts, an operator
-  identity and a workspace path. They now use the documentation forms the tree already
-  uses (`admin@example.com`, RFC 5737 ranges, a `<core-host>`-shaped example). The
-  interlock that was written to stop this only matched IP literals and only walked
-  `packages/` and `docs/`, so it could not see a hostname, an email or a path, and it
-  never opened the root `CHANGELOG.md` at all; it now matches hostnames, operator
-  identities and workspace paths too, and walks every top level the release bundle
-  actually ships. No product behavior change — one column COMMENT changes, through a
-  migration (`042`).
-- **A revoke command now accepts the whole serial it can be shown (`#682`, `#676`).**
-  Certificate serials on this product are wider than the sixteen characters the revoke
-  inputs used to allow, so a serial copied from a listing or a journal line could be
-  refused as malformed. The input bound now matches the width the store holds, at every
-  gate that reads one, and the help text names the new length. Nothing about how a serial
-  is stored or matched changed — the same value is accepted where part of it used to be
-  cut off.
-- **`venya exec list` prints a certificate's full serial (`#682`, `#481`).** The listing
-  showed a sixteen-character prefix, which is the value an operator then typed back into
-  a revoke command. It now prints the whole canonical serial, and the cell that guards
-  the row asserts it against the same helper the write path uses, so the listing and the
-  store cannot drift apart again.
-- **An administrator certificate with a protected key now works for admin calls
-  (`#565` Part B).** The TLS layer supplies a passphrase callback, so a key written
-  encrypted at rest by `venya admin cert renew` or `venya admin generate-admin-cert` can
-  authenticate an admin request. A key that is already plaintext is untouched; an
-  encrypted key with no passphrase in the environment is refused by name before anything
-  is sent, and a wrong passphrase gets its own sentence. The passphrase is read through
-  the same rule the writers use, so the length and blank checks answer once on both sides.
-- **The install summary names the variable an admin command needs (`#673`).** Where the
-  banner formerly said that loading a protected admin key was still open work, it now
-  names `VENYA_ADMIN_CA_KEY_PASSPHRASE`, says it must be in the environment of any admin
-  command presenting a renewed pair, and states that the machine-plane pair needs no
-  passphrase and stays the headless pattern. The banner no longer prints a command that
-  reads a stored secret back; it points at the runbook section that describes where it
-  lives and how it is recovered.
-- **The installer no longer advertises a way to turn admin mTLS off (`#673`).** The
-  variable stays documented where documentation lives; it is left out of the text an
-  operator reads at the moment a connection is refusing, where the pressure to disable a
-  check is highest. The heartbeat route's role comment now describes what it does, and a
-  new suite names that contract as a test — a revoked executor still receives the
-  cooperative-stop answer that lets it wind down on its own.
-- **`venya admin revoke-token` reads the core's answer before it reports success (`#666`).**
-  The route returns a per-token result, so an identity it did not touch used to arrive
-  with the request accepted. The command now requires the answer to say the token was
-  revoked, names the user plane in its confirmation, and otherwise exits non-zero saying
-  nothing was revoked.
-- **CA key custody keeps its unwrapped material under management (`#674`).** The split path
-  and both restore arms now run the decrypted key through the same holder the file
-  already uses elsewhere, so plaintext CA material is not held past the act that needed
-  it. No format change, no encryption change, no migration; the share files an operator
-  already holds restore exactly as before.
-- **`/ready` answers on capacity reserved for it (`#603` AC2).** The readiness probe reads
-  on the liveness pool, so it keeps answering while ordinary traffic holds every shared
-  slot, and it no longer reports itself healthy after winning a slot on a contended path.
-  A capacity event stays a capacity event: the probe answers degraded rather than raising
-  out of a health endpoint. The refusal counter, its threshold and its cadence are
-  unchanged.
-- **A passphrase prompt says where its rule bites (`#675`).** The read door that unlocks an
-  existing CA key states the length rule and names the gate that enforces it, rather than
-  implying a check that is not there — the floor governs writing a new passphrase, and a
-  read that refused one would lock an operator out of their own key.
-- **The beta terms page names only a variable that exists (`#678`, `#675`).** The entry for
-  the administrator key passphrase carried a name the shipped installer never wrote; the
-  page now names the one it does, so following the documented recovery step cannot point
-  an operator at an unset variable.
-- **The revocation registry is described where an operator would look (`#597` AC5, `#597`).**
-  `BACKUPS.md`, `cert-rotation-runbook.md` and `FIREWALL.md` now state that the core's own
-  relay credential holds a registry row, how to list it, and that revoking it is a step
-  with its own command. The firewall page's loopback rows name the certificate that hop
-  actually presents, and its relay row says a revoked credential is refused when the
-  connection is admitted — before any request is served, not at the handshake.
-- **The backup page states the one artifact it excluded (`#221`).** The machine-plane
-  administrator pair under `/etc/venya/admin/` is named as deliberately not backed up,
-  with the reason: the installer re-mints that pair on every run that turns admin mTLS on,
-  so an off-site copy of it buys nothing. The delivered-mode table already carried the
-  modes; the exclusion is now written down beside them.
-- **Documentation reads to the beta program.** The installation guide, the FAQ, the
-  README, `FIREWALL.md`, `architecture.md`, `BACKUPS.md`, `secret-shapes.md`,
-  `beta-known-limitations.md` and `installation.md`'s air-gap section now describe the
-  program as it is priced and admitted, and the trusted-path rule as the gate actually
-  computes it — a command is refused when it does not resolve into a trusted directory,
-  which is not the same claim as "shell builtins are rejected". A command that has a real
-  binary behind it is accepted; the refusal reason is printed for the ones that do not.
-- **Three install-time writes are atomic, and the surface scan that checks them is
-  installed (`#447`, `#675`).** The beta-terms generator, the citation helper beside it and
-  the install-time fix application now write through a temporary file and a rename, so an
-  interrupted run leaves the previous file in place rather than a half-written one. A
-  pre-commit census keeps every bound on the HTTP client named in one place.
-
-- **`admin revoke-admin-cert` refuses a serial no admin credential ever held (`#684`).**
-  That verb used to check the shape of the string, find nothing in the revocation table,
-  and write a revocation anyway: exit 0, while the live administrator credential kept
-  transacting. The core now keeps a registry of the admin credentials it has seen — at
-  boot for the machine-plane pair, at every issuance, at every connection the admin check
-  admits, and by an explicit register command — so there is something to be a member of.
-  A serial that registry does not name is refused before anything is written, and the
-  refusal says so by name. A serial already revoked keeps its repeat answer. The registry
-  is a new table, so an existing install picks it up on the normal migration step.
-- **The executor revoke verb binds a serial to the certificate holding it (`#685`).**
-  The same gap on the executor plane: a serial no certificate carries, or a serial that
-  belongs to a different executor than the command names, is now refused instead of stored
-  as a revocation attributed to nothing. A predecessor serial that a rotation already
-  retired keeps its repeat answer, so revoking the same value twice does not become a
-  refusal.
-- **A revoked executor is no longer aged out on a timer (`#685`).** The maintenance pass
-  that deleted executor revocation rows older than the retention window is gone, together
-  with the method it called, so no shipped path can drop a revocation while the credential
-  it names may still be valid. A dropped row stopped answering the lookup and stopped being
-  listed, and the revoked executor kept connecting. The counter that tracked those deletes
-  stays published at zero on purpose: an operator who ever sees it above zero is watching a
-  purge run again, which is the behavior this change removed. And the retention setting is
-  now checked when a core loads its config — a
-  window shorter than the longest lifetime among the credentials these tables name is
-  refused at startup rather than quietly honored, which is why that setting's usable range
-  no longer reaches down to 1.
-- **A revoke command says whether this call did it (`#666` class).** Revoking a credential
-  that was already revoked reported the reason typed into this call, which is not the
-  reason on record. The command now prints that nothing changed. The executor removal
-  headline names the serial it revoked, or says there was no certificate record to revoke,
-  and an already-revoked certificate or identity is reported as such. Exit status is
-  unchanged: the report follows the core's answer rather than asserting the action.
-- **A revocation limit claims only the door it was measured at (`#676`).** The beta
-  limitation entry no longer states that both directions of a connection were seen
-  refusing. It says what was seen: the listener door, in both of its populations, refused a
-  revoked peer on a running deployment; the core's own dial-out has never been observed
-  refusing one, and the entry names that half as unobserved instead of implying it.
-- **The executor enrollment-token revoked state is documented as unreachable (`#672`).**
-  No shipped command can put an executor enrollment token into that state on this plane, so
-  those tokens expire on their time limit and nothing else. The code now says so where the
-  branch sits, and a test fails if anyone later adds a writer for it, so the branch cannot
-  quietly become load-bearing.
-- **Operator pages read to the beta program.** The firewall page's status line,
-  the upgrade guide and the installer's own readme now say beta where they said alpha. The
-  upgrade guide stops understating a restore drill: the restore path is validated by the
-  drill recorded in the backup page, and what stays unverified is named as the CA-key
-  custody round-trip rather than the whole procedure. The passphrase row for a re-run now
-  states the rule the installer actually enforces — the length floor applies to the stored
-  value too, so a short passphrase already on disk refuses at the pre-mutation gate, and
-  the way forward is a deliberate reinstall or a deliberate rotation, never a silent one.
-- **Three documented guarantees became tests (`#597`, `#684`, `#634`).** The relay-credential
-  adoption case — an on-disk credential with no registry row, ingested at a real boot, with
-  four paired negatives — the citation check against the beta terms page, and the executor
-  token store each now have a cell that fails if the behavior drifts; the token store's cell
-  also turns on the foreign-key enforcement its sqlite engine used to declare without
-  applying. Four of the five adoption cells were shown failing against an ingest deliberately
-  made to do nothing, so the guard is proven to bite. Nothing an operator types changed in
-  these three.
-
-## [0.1.0beta1] - 2026-10-22
+## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
 
@@ -594,8 +447,6 @@ Notable changes to Venya will be documented in this file.
   `c58bec54c`, `815a882ee`, `2728796d9`, `549179373`, `c4ef6afc0`, `b9e9e622f`, `d59a06803`. Tickets named by those merges: (`#17`) (`#506`) (`#508`).
 - **CLI setup and register follow the server's answer instead of asserting one.** Setup and exec-register resolve the identity, token and URL the server returned instead of the values the client
   guessed. Merges `2ccc0142a`, `28a2fe075`, `92e87af89`, `d7cb70624`, `b0ee5134a`. Tickets named by those merges: (`#3`) (`#4`) (`#5`) (`#366`).
-- **A revoke now says which revocation happened.** Revoking a certificate and revoking an identity are reported as the distinct actions they are, and the headlines follow the core's answer rather than
-  asserting one. Merges `685e3cca9`, `fcd1b34c6`, `daf745e2b`. Tickets named by those merges: (`#481`) (`#666`).
 - **Authorization is scoped to the caller, and unauthenticated paths that could claim an identity are closed.** Secret writes and session reads are checked against the calling principal, the
   registration route refuses an unauthenticated takeover, the reset wipe is no longer reachable as a race, and role removal or admin disable refuse the state that leaves no way back in. Merges
   `50364584a`, `03097624f`, `0dd03ae0f`, `f159fcc13`, `bdf6e073b`, `08bf24df5`, `d3245c739`. Tickets named by those merges: (`#3`) (`#15`) (`#16`) (`#450`).
@@ -632,6 +483,158 @@ Notable changes to Venya will be documented in this file.
   left `SessionMiddleware.PUBLIC_PATHS`: no route ever matched it, and a dead allowlist entry is how an unmounted path
   stays mounted, so its absence is now pinned by a cell in `test_session_middleware.py`. The rest of this pair is unused
   code and sweep residue. Merges `d9ec2ccd7`, `4b487edfe`.
+
+
+
+- **The shipped tree carries no development-site names (`#689`).** Test fixtures, two
+  docs and one database column comment named real development hosts, an operator
+  identity and a workspace path. They now use the documentation forms the tree already
+  uses (`admin@example.com`, RFC 5737 ranges, a `<core-host>`-shaped example). The
+  interlock that was written to stop this only matched IP literals and only walked
+  `packages/` and `docs/`, so it could not see a hostname, an email or a path, and it
+  never opened the root `CHANGELOG.md` at all; it now matches hostnames, operator
+  identities and workspace paths too, and walks every top level the release bundle
+  actually ships. No product behavior change — one column COMMENT changes, through a
+  migration (`042`).
+- **A revoke command now accepts the whole serial it can be shown (`#682`, `#676`).**
+  Certificate serials on this product are wider than the sixteen characters the revoke
+  inputs used to allow, so a serial copied from a listing or a journal line could be
+  refused as malformed. The input bound now matches the width the store holds, at every
+  gate that reads one, and the help text names the new length. Nothing about how a serial
+  is stored or matched changed — the same value is accepted where part of it used to be
+  cut off.
+- **`venya exec list` prints a certificate's full serial (`#682`, `#481`).** The listing
+  showed a sixteen-character prefix, which is the value an operator then typed back into
+  a revoke command. It now prints the whole canonical serial, and the cell that guards
+  the row asserts it against the same helper the write path uses, so the listing and the
+  store cannot drift apart again.
+- **An administrator certificate with a protected key now works for admin calls
+  (`#565` Part B).** The TLS layer supplies a passphrase callback, so a key written
+  encrypted at rest by `venya admin cert renew` or `venya admin generate-admin-cert` can
+  authenticate an admin request. A key that is already plaintext is untouched; an
+  encrypted key with no passphrase in the environment is refused by name before anything
+  is sent, and a wrong passphrase gets its own sentence. The passphrase is read through
+  the same rule the writers use, so the length and blank checks answer once on both sides.
+- **The install summary names the variable an admin command needs (`#673`).** Where the
+  banner formerly said that loading a protected admin key was still open work, it now
+  names `VENYA_ADMIN_CA_KEY_PASSPHRASE`, says it must be in the environment of any admin
+  command presenting a renewed pair, and states that the machine-plane pair needs no
+  passphrase and stays the headless pattern. The banner no longer prints a command that
+  reads a stored secret back; it points at the runbook section that describes where it
+  lives and how it is recovered.
+- **The installer no longer advertises a way to turn admin mTLS off (`#673`).** The
+  variable stays documented where documentation lives; it is left out of the text an
+  operator reads at the moment a connection is refusing, where the pressure to disable a
+  check is highest. The heartbeat route's role comment now describes what it does, and a
+  new suite names that contract as a test — a revoked executor still receives the
+  cooperative-stop answer that lets it wind down on its own.
+- **`venya admin revoke-token` reads the core's answer before it reports success (`#666`).**
+  The route returns a per-token result, so an identity it did not touch used to arrive
+  with the request accepted. The command now requires the answer to say the token was
+  revoked, names the user plane in its confirmation, and otherwise exits non-zero saying
+  nothing was revoked.
+- **CA key custody keeps its unwrapped material under management (`#674`).** The split path
+  and both restore arms now run the decrypted key through the same holder the file
+  already uses elsewhere, so plaintext CA material is not held past the act that needed
+  it. No format change, no encryption change, no migration; the share files an operator
+  already holds restore exactly as before.
+- **`/ready` answers on capacity reserved for it (`#603` AC2).** The readiness probe reads
+  on the liveness pool, so it keeps answering while ordinary traffic holds every shared
+  slot, and it no longer reports itself healthy after winning a slot on a contended path.
+  A capacity event stays a capacity event: the probe answers degraded rather than raising
+  out of a health endpoint. The refusal counter, its threshold and its cadence are
+  unchanged.
+- **A passphrase prompt says where its rule bites (`#675`).** The read door that unlocks an
+  existing CA key states the length rule and names the gate that enforces it, rather than
+  implying a check that is not there — the floor governs writing a new passphrase, and a
+  read that refused one would lock an operator out of their own key.
+- **The beta terms page names only a variable that exists (`#678`, `#675`).** The entry for
+  the administrator key passphrase carried a name the shipped installer never wrote; the
+  page now names the one it does, so following the documented recovery step cannot point
+  an operator at an unset variable.
+- **The revocation registry is described where an operator would look (`#597` AC5, `#597`).**
+  `BACKUPS.md`, `cert-rotation-runbook.md` and `FIREWALL.md` now state that the core's own
+  relay credential holds a registry row, how to list it, and that revoking it is a step
+  with its own command. The firewall page's loopback rows name the certificate that hop
+  actually presents, and its relay row says a revoked credential is refused when the
+  connection is admitted — before any request is served, not at the handshake.
+- **The backup page states the one artifact it excluded (`#221`).** The machine-plane
+  administrator pair under `/etc/venya/admin/` is named as deliberately not backed up,
+  with the reason: the installer re-mints that pair on every run that turns admin mTLS on,
+  so an off-site copy of it buys nothing. The delivered-mode table already carried the
+  modes; the exclusion is now written down beside them.
+- **Documentation reads to the beta program.** The installation guide, the FAQ, the
+  README, `FIREWALL.md`, `architecture.md`, `BACKUPS.md`, `secret-shapes.md`,
+  `beta-known-limitations.md` and `installation.md`'s air-gap section now describe the
+  program as it is priced and admitted, and the trusted-path rule as the gate actually
+  computes it — a command is refused when it does not resolve into a trusted directory,
+  which is not the same claim as "shell builtins are rejected". A command that has a real
+  binary behind it is accepted; the refusal reason is printed for the ones that do not.
+- **Three install-time writes are atomic, and the surface scan that checks them is
+  installed (`#447`, `#675`).** The beta-terms generator, the citation helper beside it and
+  the install-time fix application now write through a temporary file and a rename, so an
+  interrupted run leaves the previous file in place rather than a half-written one. A
+  pre-commit census keeps every bound on the HTTP client named in one place.
+
+- **`admin revoke-admin-cert` refuses a serial no admin credential ever held (`#684`).**
+  That verb used to check the shape of the string, find nothing in the revocation table,
+  and write a revocation anyway: exit 0, while the live administrator credential kept
+  transacting. The core now keeps a registry of the admin credentials it has seen — at
+  boot for the machine-plane pair, at every issuance, at every connection the admin check
+  admits, and by an explicit register command — so there is something to be a member of.
+  A serial that registry does not name is refused before anything is written, and the
+  refusal says so by name. A serial already revoked keeps its repeat answer. The registry
+  is a new table, so an existing install picks it up on the normal migration step.
+- **The executor revoke verb binds a serial to the certificate holding it (`#685`).**
+  The same gap on the executor plane: a serial no certificate carries, or a serial that
+  belongs to a different executor than the command names, is now refused instead of stored
+  as a revocation attributed to nothing. A predecessor serial that a rotation already
+  retired keeps its repeat answer, so revoking the same value twice does not become a
+  refusal.
+- **A revoked executor is no longer aged out on a timer (`#685`).** The maintenance pass
+  that deleted executor revocation rows older than the retention window is gone, together
+  with the method it called, so no shipped path can drop a revocation while the credential
+  it names may still be valid. A dropped row stopped answering the lookup and stopped being
+  listed, and the revoked executor kept connecting. The counter that tracked those deletes
+  stays published at zero on purpose: an operator who ever sees it above zero is watching a
+  purge run again, which is the behavior this change removed. And the retention setting is
+  now checked when a core loads its config — a
+  window shorter than the longest lifetime among the credentials these tables name is
+  refused at startup rather than quietly honored, which is why that setting's usable range
+  no longer reaches down to 1.
+- **A revoke command says whether this call did it (`#666` class).** Revoking a credential
+  that was already revoked reported the reason typed into this call, which is not the
+  reason on record. The command now prints that nothing changed. The executor removal
+  headline names the serial it revoked, or says there was no certificate record to revoke,
+  and an already-revoked certificate or identity is reported as such. Exit status is
+  unchanged: the report follows the core's answer rather than asserting the action.
+  Merges `685e3cca9`, `fcd1b34c6`, `daf745e2b`. Tickets named by those merges: (`#481`) (`#666`).
+- **A revocation limit claims only the door it was measured at (`#676`).** The beta
+  limitation entry no longer states that both directions of a connection were seen
+  refusing. It says what was seen: the listener door, in both of its populations, refused a
+  revoked peer on a running deployment; the core's own dial-out has never been observed
+  refusing one, and the entry names that half as unobserved instead of implying it.
+- **The executor enrollment-token revoked state is documented as unreachable (`#672`).**
+  No shipped command can put an executor enrollment token into that state on this plane, so
+  those tokens expire on their time limit and nothing else. The code now says so where the
+  branch sits, and a test fails if anyone later adds a writer for it, so the branch cannot
+  quietly become load-bearing.
+- **Operator pages read to the beta program.** The firewall page's status line,
+  the upgrade guide and the installer's own readme now say beta where they said alpha. The
+  upgrade guide stops understating a restore drill: the restore path is validated by the
+  drill recorded in the backup page, and what stays unverified is named as the CA-key
+  custody round-trip rather than the whole procedure. The passphrase row for a re-run now
+  states the rule the installer actually enforces — the length floor applies to the stored
+  value too, so a short passphrase already on disk refuses at the pre-mutation gate, and
+  the way forward is a deliberate reinstall or a deliberate rotation, never a silent one.
+- **Three documented guarantees became tests (`#597`, `#684`, `#634`).** The relay-credential
+  adoption case — an on-disk credential with no registry row, ingested at a real boot, with
+  four paired negatives — the citation check against the beta terms page, and the executor
+  token store each now have a cell that fails if the behavior drifts; the token store's cell
+  also turns on the foreign-key enforcement its sqlite engine used to declare without
+  applying. Four of the five adoption cells were shown failing against an ingest deliberately
+  made to do nothing, so the guard is proven to bite. Nothing an operator types changed in
+  these three.
 
 ## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
 
