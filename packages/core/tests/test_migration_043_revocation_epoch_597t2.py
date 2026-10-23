@@ -62,6 +62,27 @@ def _load_migration():
     return mod
 
 
+def _sqlite_engine():
+    """An in-memory SQLite engine with FK enforcement switched ON at connect (#634).
+
+    043's own table has no foreign keys, so the pragma changes nothing here — but a file that builds a
+    SQLite engine without it joins the blind set the #634 ratchet counts, and a blind engine is how a
+    cell passes on rows no real database would accept. Cost: four lines. Benefit: this file never
+    becomes the exception somebody has to reason about later.
+    """
+    import sqlalchemy.event as sa_event
+
+    engine = create_engine("sqlite://")
+
+    @sa_event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    return engine
+
+
 def _upgrade_source() -> str:
     return inspect.getsource(_load_migration().upgrade)
 
@@ -265,7 +286,7 @@ def test_model_and_migration_declare_the_same_columns():
     from core.iam.models import RevocationEpoch
 
     mod = _load_migration()
-    engine = create_engine("sqlite://")
+    engine = _sqlite_engine()
     op_obj = None
     with engine.connect() as conn:
         ctx = MigrationContext.configure(conn)
@@ -289,7 +310,7 @@ def test_upgrade_on_sqlite_creates_the_table_and_never_attempts_trigger_ddl():
     import sqlite3
 
     mod = _load_migration()
-    engine = create_engine("sqlite://")
+    engine = _sqlite_engine()
     with engine.begin() as conn:
         ctx = MigrationContext.configure(conn)
         with Operations.context(ctx):
@@ -306,7 +327,7 @@ def test_upgrade_on_sqlite_creates_the_table_and_never_attempts_trigger_ddl():
 
 def test_sqlite_downgrade_drops_the_table():
     mod = _load_migration()
-    engine = create_engine("sqlite://")
+    engine = _sqlite_engine()
     with engine.begin() as conn:
         ctx = MigrationContext.configure(conn)
         with Operations.context(ctx):

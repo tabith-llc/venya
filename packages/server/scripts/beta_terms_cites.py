@@ -173,7 +173,7 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     "packages/server/src/server/ca.py:1140": (C, "def sign_admin_cert", 1, "pin"),
     ":1244-1247": (C, "encryption_algorithm=serialization.NoEncryption()", 1, "pin"),
     # ---- models, middleware, cli
-    f"{M}:380": (M, "Revoked executor certificate serial numbers", 1, "pin"),
+    "packages/core/src/core/iam/models.py:382": (M, "Revoked executor certificate serial numbers", 1, "pin"),
     f"{M}:379": (M, "class ExecutorCertRevocation", 1, "pin"),
     f"{M}:613": (M, "class AdminCertRevocation", 1, "pin"),
     "packages/server/src/server/middleware/auth.py:860": (A, "async def _validate_executor_mtls", 1, "pin"),
@@ -190,7 +190,7 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     # ---- the two live NoEncryption() writers and the four comments
     "packages/cli/src/venya_cli/commands.py:2157": (CM, "NoEncryption(): an admin private key in the clear", 1, "pin"),
     f"{CM}:3241": (CM, "NoEncryption(), an executor private key in the clear beside the cert", 1, "pin"),
-    "packages/core/src/core/iam/models.py:742": (M, "class CoreRelayCredential", 1, "pin"),
+    "packages/core/src/core/iam/models.py:744": (M, "class CoreRelayCredential", 1, "pin"),
     f"{CM}:3678": (CM, "the renew path wrote NoEncryption(): an executor private key", 1, "pin"),
     # the page prints these two as BARE `commands.py:N` on the continuation line — same file, so
     # keyed here; the guard still demands the page say a full path (see the ambiguity cell)

@@ -119,9 +119,9 @@ leaves (`CAManager.ca_cert_path`, `packages/server/src/server/ca.py:395`, leaf m
 `ExecutorCertRevocation` alone (`CAManager.generate_crl`,
 `packages/server/src/server/ca.py:716`, query at `packages/server/src/server/ca.py:760`; the model
 is titled "Revoked executor certificate serial numbers",
-`packages/core/src/core/iam/models.py:380`). The consequence for a **core relay** credential is that
+`packages/core/src/core/iam/models.py:382`). The consequence for a **core relay** credential is that
 this list can never name it — and that is no longer a hole in the door, because #597 gave that class
-its own registry (`CoreRelayCredential`, `packages/core/src/core/iam/models.py:742`) and the door
+its own registry (`CoreRelayCredential`, `packages/core/src/core/iam/models.py:744`) and the door
 matches against it (`peer_revocation_refusal`). For an **executor-class** peer the list already named
 the serial; what was missing was anyone at `:8443` asking, and #586 Gap A added that ask
 (`peer_executor_revocation_refusal`, fed by `revoked_executor_serials` on the daemon state, carried on
