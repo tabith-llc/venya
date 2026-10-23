@@ -598,7 +598,13 @@ tree full of them.
   bytes **in memory**,
   never as a file — that is the form the CA-key export and restore commands need in order to
   re-encrypt under a passphrase you supply. The exposure to know about is a key sitting
-  readable in a running process, not an extra file on disk.
+  readable in a running process, not an extra file on disk. The CA-key custody commands
+  (`export-ca-key`, `split-ca-key`, `restore-ca-key`) now take those bytes into a scoped
+  holder (`SecretHolder`) that zeroes its own copy on release, on every exit path including
+  an abort part-way through. Read the guarantee for exactly what it is: **erasure of the
+  command's own copy, not residency** — the crypto libraries in the same call allocate
+  copies of their own and no command reaches those, so for the duration of a run the key is
+  readable in memory, which is the sentence this entry exists to tell you.
 
 **Workaround:** treat the core's machine-plane pair as key material wherever you handle it —
 the backup set in [BACKUPS.md](BACKUPS.md) already does, and that pair is not copied off its
