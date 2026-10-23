@@ -28,9 +28,12 @@ the doc that governs it, and you can hold the code to it.
   and only if that exact name is an entry. A target that is not allowlisted fails closed
   rather than quietly routing — [docs/architecture.md](docs/architecture.md) "Sandbox and
   egress", [docs/FIREWALL.md](docs/FIREWALL.md).
-- **Command resolution.** No shell runs an agent's command. Binaries must resolve into
-  trusted directories; anything that does not is refused before it starts
-  ([docs/agents.md](docs/agents.md)).
+- **Command resolution.** Binaries must resolve into trusted directories, and whatever
+  does not is refused before it starts. **No shell runs an agent's command — with one
+  ruled exception:** a standalone `<` token naming a secret injected in the same call is
+  the one form that does go through the guest shell, so the shell can open that file for
+  the command it wraps; every other pipe, `&&`, or redirect is rejected
+  ([docs/agents.md](docs/agents.md) "Hard rules", which carries the exception in full).
 - **Secret handling.** Values are injected inside the sandbox and never enter the
   agent's context; output comes back redacted, and a filter failure returns nothing raw.
   Each kind of secret declares how it may be consumed, including the pairing a
