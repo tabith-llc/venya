@@ -57,6 +57,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from executor.config import ExecutorConfig, MtlsConfig
 from executor.relay_listener import (
+    REFUSE_NO_ANSWER,
     REFUSE_PEER_EXECUTOR_REVOKED,
     REFUSE_PEER_REVOKED,
     REFUSE_REVOKED,
@@ -457,7 +458,16 @@ class TestRealDoorRefusesARevokedExecutorPeer:
 
     def test_the_self_gate_still_answers_before_either_peer_arm(self, peer_pk):
         """Ordering unchanged: a daemon that cannot answer about ITSELF refuses, whatever the
-        executor population says — the AC6 tri-state is not outranked by a peer claim."""
+        executor population says — the AC6 tri-state is not outranked by a peer claim.
+
+        Amended for #697, not weakened. This state is unanswered (``answered=False``), so the class
+        the door reaches is the OPERATIONAL FAULT, which now answers HTTP 503 with its own sentence
+        instead of closing silently. What the cell exists to prove is still asserted on both halves:
+        the self gate fires FIRST (the revoked-peer row in the population is never consulted — the
+        handler would fail the test if anything were served, and the journal names the fault class,
+        not a peer class), and a peer carrying that same revoked serial still gets no HTTP answer on
+        the peer cells above, which are untouched.
+        """
         listener = _start(
             peer_pk.config,
             lambda _sid: pytest.fail("an unanswered daemon served a connection"),
@@ -466,8 +476,9 @@ class TestRealDoorRefusesARevokedExecutorPeer:
         )
         try:
             with _client(peer_pk.ca, peer_pk.dead) as client:
-                with pytest.raises(httpx2.RequestError):
-                    client.post(_url(listener), json=_payload())
+                resp = client.post(_url(listener), json=_payload())
+            assert resp.status_code == 503, resp.text
+            assert resp.json()["detail"] == REFUSE_NO_ANSWER, resp.json()
         finally:
             listener.stop()
 
