@@ -2,7 +2,7 @@
 
 Carrier: `features/RF-6-shortcert-design-dossier.md` (tabith root). Class: REFACTOR, design only — **zero
 product code, zero installer edits** in this document's series.
-Author lane: flash1 (venue `work3/`, branch `feature/rf6-shortcert-dossier`).
+Author lane: a prior worker lane (venue `work3/`, branch `feature/rf6-shortcert-dossier`).
 
 Tip this dossier is re-derived against: **dev `d0d3d0d`** (`Merge branch 'bug/ca-get-ca-key-pem-unreferenced-plaintext-claim' — the unreferenced CA key accessor is retired (refs 539)`).
 Every line number below was produced by grep at that tip on the day of writing. Line numbers rot: **grep the

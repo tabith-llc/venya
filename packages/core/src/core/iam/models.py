@@ -633,7 +633,7 @@ class AdminCredential(Base):
     operator's string and then blind-inserted an ``AdminCertRevocation`` row, so
     ``venya admin revoke-admin-cert --serial <any hex>`` exited 0 and wrote a revocation
     naming a serial no credential ever held, while the live admin credential kept
-    transacting (#684, measured by ``flash6`` at leg 232 against the sibling relay route,
+    transacting (#684, measured by a prior worker lane at leg 232 against the sibling relay route,
     which refuses the same string). A membership check needs something to be a member
     OF, and none existed: this was the only admin-certificate relation in the tree,
     and using ``AdminCertRevocation`` for it is circular — it is what the verb writes.

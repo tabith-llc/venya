@@ -10,7 +10,7 @@ THE DEFECT THIS SUPPLIES THE CURE FOR. ``admin_revoke_admin_cert`` validated the
 the operator's string, found no row in ``AdminCertRevocation``, and blind-inserted one —
 so ``venya admin revoke-admin-cert --serial <any hex>`` exited 0 and wrote a revocation
 naming a serial no credential ever held, while the live admin credential kept transacting
-(#684, measured physically by ``flash6`` at leg 232 against the sibling relay route, which
+(#684, measured physically by a prior worker lane at leg 232 against the sibling relay route, which
 refuses the identical string with ``REFUSE_UNREGISTERED``). A membership check needs
 something to be a member OF, and on this plane nothing existed: ``AdminCertRevocation`` is
 the OUTPUT of that verb, so consulting it would be circular. This module supplies the

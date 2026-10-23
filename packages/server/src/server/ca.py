@@ -165,7 +165,7 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 def _short_passphrase_refusal(passphrase_env: str, *, read_path: bool = False) -> str:
     """Owner-blessed refusal text for a passphrase under the length floor (ticket #573).
 
-    The wording is the blessed block (flash1's §6, ruled in as R5(a) of the s87 owner
+    The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
     ruling set) with only the two authorized corrections applied: the supported maximum
     stated plainly instead of "no maximum below 64 characters", and the floor number
     interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the check uses,
@@ -854,7 +854,7 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # foreign arc is then only a foreign registration kept alive in our source plus
 # a path that resolves bytes we never mint. The earlier per-plane re-mint
 # precondition, the dual-arc HOW it gated, and the owner's sentence are on
-# #601; clerk holds the ticket pen. The paired negative that pins the closure
+# #601; the ticket seat holds the pen. The paired negative that pins the closure
 # lives at tests/test_plane_marker_pen_arc_601.py, class
 # TestAnyOtherArcIsNoLongerRead, and that class name IS the claim: a marker on
 # ANY arc not ours collapses into the same missing-marker refusal. It drives the

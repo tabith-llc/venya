@@ -4754,7 +4754,7 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
     """Owner-blessed refusal text for a passphrase under the length floor (#573).
 
-    The wording is the blessed block (flash1's §6, ruled in as R5(a) of the s87 owner
+    The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
     ruling set) with only the two authorized corrections applied: the supported maximum
     stated plainly instead of "there is no maximum below 64 characters", and the floor
     number interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the door
@@ -5085,7 +5085,7 @@ def _admin_ca_plaintext_key_refusal() -> str:
 
 
 #: #572 — the owner-approved refusal for a wrong passphrase on the admin CA key, recorded verbatim
-#: in the ruling (room wren-37 / the dispatch's §2, single-quoted there for exactness). This is the
+#: in the ruling (room dispatch 37 / the dispatch's §2, single-quoted there for exactness). This is the
 #: ONE hand-written home of those bytes in the product tree — the refusal below and the test cells
 #: read this constant, so a future edit changes the voice in a single place instead of chasing
 #: copies (#568's single-home shape; the sibling cell pins that exactly one line types it).
@@ -5273,7 +5273,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
 
         # #572 — a wrong passphrase used to fall through to the backstop below and answer in
         # cryptography's own sentence. Scope, per the lead's
-        # ruling (room wren-37): the approved sentence fires ONLY when a passphrase was supplied,
+        # ruling (room dispatch 37): the approved sentence fires ONLY when a passphrase was supplied,
         # the file carries the encrypted marker, AND the probe says the file is a structurally
         # parseable encrypted key. The probe is the load-bearing part: the marker alone is True for
         # a TRUNCATED key and for armor kept over a body that no longer decodes, and telling an

@@ -7,7 +7,7 @@
 """Revoke verb for the core's own relay client credentials (#597).
 
 Mounted as its own router rather than into ``routes/admin.py``, which is another
-lane's live file at this seat (s134 batch: flash4 owns it for #662). Same auth
+lane's live file at this seat (s134 batch: a prior worker lane owns it for #662). Same auth
 dependency, same audit shape, same serial vocabulary as the sibling
 ``POST /admin/certs/revoke`` there — copied in form, not imported, so neither leg
 has to edit the other's module.

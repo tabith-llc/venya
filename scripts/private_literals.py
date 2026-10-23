@@ -76,9 +76,17 @@ RFC1918 = re.compile(
 #: Development / estate host names. See BOUNDARY LAW in the module docstring.
 DEV_HOSTNAME = re.compile(r"(?<![\w-])(?:montana|idaho|wyoming|colorado|utah|texas|venya-test-workstation)(?![\w])")
 
+#: The operator's local parts, in ONE place. The owner's rule (2026-10-23) is that a test file
+#: carries no operator identity, and this module is the guard's own vocabulary bearer — it must
+#: keep the words in order to refuse them. So the names live HERE, once, and both the detection
+#: pattern and the self-test fixture are BUILT from this tuple. That is composition in one place
+#: with a reason, not a hand-mangled string split across the file: a reader who sees `"dus" + "ty"`
+#: somewhere is looking at obfuscation, and this is not that.
+OPERATOR_LOCAL_PARTS: tuple[str, ...] = ("dust", "dusty", "dustin")
+
 #: A personal local part before ``@``. Domain-agnostic on purpose: the local part IS
 #: the identity, and re-homing it to another domain does not un-name it.
-OPERATOR_IDENTITY = re.compile(r"(?<![\w.-])(?:dust|dusty|dustin)@")
+OPERATOR_IDENTITY = re.compile(rf"(?<![\w.-])(?:{'|'.join(OPERATOR_LOCAL_PARTS)})@")
 
 #: A developer workspace mount. Three mounts + the volume label, not "any absolute
 #: path" — see the module docstring.
@@ -102,7 +110,7 @@ PRIVATE_CLASSES: dict[str, re.Pattern[str]] = {
 DETECTION_FIXTURES: dict[str, str] = {
     "rfc1918-address": "seeded 10.27.28.0/24 in the allowlist",
     "dev-hostname": "read over SSH as win on montana (rc=0)",
-    "operator-identity": "identity: dust@montana",
+    "operator-identity": f"identity: {OPERATOR_LOCAL_PARTS[0]}@montana",
     "workspace-path": "copies live in /media/dust/dust-ext1/tabith/reference-docs/",
 }
 

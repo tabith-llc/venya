@@ -688,7 +688,7 @@ class Executor:
         # Validate command structure (rejects shell metacharacters).
         # REDUNDANT with execute() step 1a's gate — kept deliberately:
         # the refactor-5 guardrail that locked the two paths apart is OVERTURNED
-        # (owner ruling 2026-10-10 via courier ultra-9-0b3405, #471: the dead
+        # (owner ruling 2026-10-10 via dispatch 9-0b3405, #471: the dead
         # inject_via_* set was deleted under that grant), and this path is not
         # the product path — so the guard stays because divergence is still the
         # thing #374 ruled out, not because a lock is left standing. ALIGNED to the
