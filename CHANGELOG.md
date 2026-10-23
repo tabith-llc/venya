@@ -579,6 +579,35 @@ Notable changes to Venya will be documented in this file.
 - **Addressed: already-revoked-serial-echoes-the-path-executor-id — the duplicate branch answers before the pairing check** (`#687`; 2 operative files; merge `f07066c9a`).
 - **Addressed: legal-command-redirect-starves-remote-sudo-when-sshpass-is-present — the blessed < allowance is legal by validation and un-executable by construction** (`#695`; 2 operative files; merge `41874131f`, also `fa77a48d9`).
 - **batch after the owner read** (`#698`; 2 operative files; merge `dcf25968f`).
+
+- **Backfilled from the merge audit in the recipe's tiered form (`RELEASES.md` §1):** each entry
+  was reconstructed from merge deltas, names the merges it stands for, and minor families are combined.
+- **CA and admin key material is written encrypted and rotation is all-or-nothing.** An unencrypted CA key is refused when a passphrase is set, the root CA key is encrypted at rest, and a rotation
+  that is interrupted cannot leave a mismatched pair or overwrite its own trust anchor. Merges `04c1c28ca`, `0c44386fe`, `919298256`, `2cb92a425`, `e52e9589c`. Tickets named by those merges: (`#316`)
+  (`#361`) (`#500`).
+- **Admin certificates are short-lived, and status tells you which one you are holding.** A renewed admin certificate is issued short-lived, an expired one is refused rather than presented, and the
+  fingerprint context it was issued into is named. Merges `41d49426c`, `f6a1120c2`, `e07b5ada1`, `a28e6355d`, `e606be446`, `7309444bd`. Tickets named by those merges: (`#504`).
+- **Every trust decision goes to the configured CA anchor, and plaintext is refused.** Setup, config-set, register and the MCP dial refuse a non-TLS origin; the executor's dials trust only the CA
+  installed on this host, not the host store added to it; admin mTLS is gated on both of its values being set; CSR signing accepts the curves the register route advertises. Merges `896e0dca4`,
+  `c58bec54c`, `815a882ee`, `2728796d9`, `549179373`, `c4ef6afc0`, `b9e9e622f`, `d59a06803`. Tickets named by those merges: (`#17`) (`#506`) (`#508`).
+- **CLI setup and register follow the server's answer instead of asserting one.** Setup and exec-register resolve the identity, token and URL the server returned instead of the values the client
+  guessed. Merges `2ccc0142a`, `28a2fe075`, `92e87af89`, `d7cb70624`, `b0ee5134a`. Tickets named by those merges: (`#3`) (`#4`) (`#5`) (`#366`).
+- **A revoke now says which revocation happened.** Revoking a certificate and revoking an identity are reported as the distinct actions they are, and the headlines follow the core's answer rather than
+  asserting one. Merges `685e3cca9`, `fcd1b34c6`, `daf745e2b`. Tickets named by those merges: (`#481`) (`#666`).
+- **Authorization is scoped to the caller, and unauthenticated paths that could claim an identity are closed.** Secret writes and session reads are checked against the calling principal, the
+  registration route refuses an unauthenticated takeover, the reset wipe is no longer reachable as a race, and role removal or admin disable refuse the state that leaves no way back in. Merges
+  `50364584a`, `03097624f`, `0dd03ae0f`, `f159fcc13`, `851f7e6db`, `bdf6e073b`, `985acc698`, `08bf24df5`, `d3245c739`. Tickets named by those merges: (`#3`) (`#15`) (`#16`) (`#450`).
+- **Elevation is bound to the session that asked for it.** An elevation token is bound to the session and challenge state it was minted with, and refresh refuses when no active user backs it. Merges
+  `d3b264a48`, `53352d089`, `ce81db155`, `efa7660ef`, `d8ec78f18`. Tickets named by those merges: (`#341`) (`#345`).
+- **Failures that were swallowed, or read clean without having run, are reported — and a configured ceiling is obeyed.** The concurrency ceiling is read from configuration, a capture honours its
+  timeout, a relay stop runs its cleanup under systemd, credential load and removal stop swallowing failures, a file-descriptor scan with an empty set no longer reads clean, and debug logging stopped
+  carrying session cookies. Merges `dca43dd43`, `ea9414175`, `02823ab7f`, `2d51ed9f2`, `3527ce4fd`, `7525d072c`, `8078a4a33`, `19aabdada`, `876286ab2`, `8f7647a3e`, `ad8e5f59e`. Tickets named by those
+  merges: (`#453`) (`#477`).
+- **Installer and uninstaller hygiene — prompts, guards and copy, with no change to what gets installed.** Merges `fc63faa4f`, `ffd66e458`, `a1e6e146d`, `a26af9bb7`, `47dd345c0`, `6f500035c`,
+  `357e0561b`, `84842b261`, `f81ff9cf2`, `4de076954`, `a1f9926f7`, `302aa657d`.
+- **Host inspection, sandbox residue and enrolment-surface wording.** Merges `0a9e660e8`, `413062573`, `e8dfdb831`, `fc943083f`, `064cda32f`, `dbd5eaa7b`.
+- **Low-information sweeps and version-surface backfill.** Merges `d9ec2ccd7`, `4b487edfe`, `aac1a8656`.
+
 ## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
 
 > This version was **belayed as a release name** by the owner on 2026-10-15 (`decisions.md` s119: "alpha17 belayed as a release name"), and **no `v0.1.0alpha17` tag exists on any face** — the entry body below is kept as the dated record of work that shipped later under `v0.1.0beta1`. Deliberately not written as `## [0.1.0alpha17]`: the bracket form is what a release claim is matched on, and this is not one.
