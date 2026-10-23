@@ -92,6 +92,25 @@ OPERATOR_IDENTITY = re.compile(rf"(?<![\w.-])(?:{'|'.join(OPERATOR_LOCAL_PARTS)}
 #: path" — see the module docstring.
 WORKSPACE_PATH = re.compile(r"/(?:media/dust|home/dust|home/opencode)\b|dust-ext1")
 
+#: The operator local part WITHOUT the ``@``. This is the hole the owner named: the
+#: ``operator-identity`` class needs an ``@`` right after the name, so a test that writes
+#: ``user_id="dusty"`` — no domain anywhere — was invisible to it. Same path discipline as
+#: LANE_IDENTITY below: ``dust/venya-installer.git`` and ``/media/dust`` are a repo remote and a
+#: mount, and ``workspace-path`` already owns the mount, so neither reddens here.
+BARE_OPERATOR_NAME = re.compile(rf"(?<![\w./-])(?:{'|'.join(OPERATOR_LOCAL_PARTS)})(?![\w./-])")
+
+#: The lane roster. Whole-surface, like the other classes, because the owner's scope word
+#: (2026-10-23) is that agent names are out of venya-dev and not merely out of test files.
+#: ``checker`` is DELIBERATELY ABSENT. It is a lane nick AND an ordinary word in this tree: the
+#: shipped source binds ``checker = require_role("auditor")`` as a variable
+#: (``packages/server/tests/test_dependencies.py:277``, asserted on ``:278``) and two files say
+#: "the SAME approved element checker #537 ships" meaning a validator, not a seat. A word-boundary
+#: pattern cannot tell those apart, so including it reddens real code — and a guard that reddens
+#: correct code gets switched off, which is the failure this file keeps re-learning. The sweep
+#: still rewrote the three places where ``checker`` meant the seat; only the class is narrower.
+#: ``lead`` is absent for the same reason: it is an ordinary noun in English prose.
+LANE_IDENTITY = re.compile(r"(?<![\w./-])(?:flash[1-7]|ultra|wren|clerk|courier|steward|librarian)(?![\w./-])")
+
 #: Every class shipped text must be free of, NAMED so a failure says WHICH hole
 #: reopened rather than just printing a line. This table is the single vocabulary.
 PRIVATE_CLASSES: dict[str, re.Pattern[str]] = {
@@ -99,6 +118,8 @@ PRIVATE_CLASSES: dict[str, re.Pattern[str]] = {
     "dev-hostname": DEV_HOSTNAME,
     "operator-identity": OPERATOR_IDENTITY,
     "workspace-path": WORKSPACE_PATH,
+    "bare-operator-name": BARE_OPERATOR_NAME,
+    "lane-identity": LANE_IDENTITY,
 }
 
 # --------------------------------------------------------------------------
@@ -112,6 +133,10 @@ DETECTION_FIXTURES: dict[str, str] = {
     "dev-hostname": "read over SSH as win on montana (rc=0)",
     "operator-identity": f"identity: {OPERATOR_LOCAL_PARTS[0]}@montana",
     "workspace-path": "copies live in /media/dust/dust-ext1/tabith/reference-docs/",
+    # The two new classes each get a fixture that MUST redden, keyed by class name — a class
+    # without one is a KeyError in the test, by design, not a silent green.
+    "bare-operator-name": 'user_id="' + OPERATOR_LOCAL_PARTS[1] + '", auth_mode="security-key"',
+    "lane-identity": "the failure `flash5` explicitly guarded against on the sibling class",
 }
 
 #: The shipped relay CN shape, and the historical defect string the IP-only guard
@@ -126,9 +151,15 @@ HISTORICAL_ADDRESS_FIXTURE = "hardcoded resolver IP (`10.27.28.1` — a developm
 #: letting the proof go quietly.
 IP_BLIND_FIXTURE = DETECTION_FIXTURES["dev-hostname"]
 
-#: Forms the owner's ruling SANCTIONS as replacements. Each must stay green, or the
-#: guard is refusing its own fix and the scrub is unshippable.
+#: Forms the owner's ruling SANCTIONS as replacements — plus the shapes that must NOT redden a
+#: new class, which is where the paired negatives for `bare-operator-name` and `lane-identity`
+#: live. A repo remote named ``dust/venya-installer.git``, a mount named ``/media/dust``, a
+#: bound variable named ``checker`` and a prose ``lead`` all stay green, and the test says so.
 SANCTIONED_EXAMPLES: tuple[str, ...] = (
+    "#: git remote, dust/venya-installer.git master). NOT a bare hash",
+    'checker = require_role("auditor")',
+    "the SAME approved element tuple and the SAME element checker the #537 suite",
+    "the lead's ruling in room dispatch 37",
     "192.0.2.0/24",
     "192.0.2.1",
     "198.51.100.7",
@@ -166,7 +197,7 @@ BUNDLE_SCAN_ROOTS: tuple[str, ...] = ("packages", "docs", "tests", "scripts", "s
 
 #: Root-level shipped documents, GLOBBED (not enumerated) so a new root page is
 #: covered the day it lands rather than needing someone to remember a list.
-BUNDLE_SCAN_ROOT_GLOBS: tuple[str, ...] = ("*.md",)
+BUNDLE_SCAN_ROOT_GLOBS: tuple[str, ...] = ("*.md", "*.sh", "*.ps1")
 
 #: Generated build output: gitignored, absent from every bundle
 #: (``tar tzf <bundle> | grep -c '/target/|/build/'`` -> 0 across all three), and a
