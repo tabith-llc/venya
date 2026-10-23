@@ -256,7 +256,10 @@ class TestGetpassSitesLeaveNothingBehind:
             cmd_store(client, args)
         assert client._http.request.call_count == 0, "a failed prompt must not POST"
 
-    def test_site2_export_first_prompt_writes_nothing(self, tmp_path):
+    def test_site2_export_first_prompt_writes_nothing(self, tmp_path, monkeypatch):
+        # #593 note: the export door now refuses BEFORE prompting when stdin is not a TTY, so
+        # this EOF-at-the-prompt cell must stand at a terminal to reach the prompt at all.
+        monkeypatch.setattr(sys, "stdin", self._tty_stdin())
         ca_dir = _plaintext_ca(tmp_path)
         out = tmp_path / "export" / "ca.key.enc"
         args = SimpleNamespace(output=str(out), ca_dir=str(ca_dir))
@@ -265,7 +268,9 @@ class TestGetpassSitesLeaveNothingBehind:
         assert not out.exists()
         assert not out.parent.exists(), "the staged directory is created only after both prompts"
 
-    def test_site3_export_confirm_prompt_writes_nothing_and_leaves_no_temp(self, tmp_path):
+    def test_site3_export_confirm_prompt_writes_nothing_and_leaves_no_temp(self, tmp_path, monkeypatch):
+        # #593 note: same as site2 — a TTY is faked so the prompt sequence is reached.
+        monkeypatch.setattr(sys, "stdin", self._tty_stdin())
         ca_dir = _plaintext_ca(tmp_path)
         out = tmp_path / "o.enc"
         args = SimpleNamespace(output=str(out), ca_dir=str(ca_dir))
@@ -274,7 +279,9 @@ class TestGetpassSitesLeaveNothingBehind:
         assert not out.exists()
         assert not list(Path(tmp_path).glob(".venya-cabackup-*")), "no orphaned staged temp"
 
-    def test_site4_restore_prompt_leaves_the_incumbent_key_untouched(self, tmp_path):
+    def test_site4_restore_prompt_leaves_the_incumbent_key_untouched(self, tmp_path, monkeypatch):
+        # #593 note: same as site2 — the backup-arm prompt is only reachable at a terminal.
+        monkeypatch.setattr(sys, "stdin", self._tty_stdin())
         ca_dir, _ = _encrypted_ca(tmp_path)
         key_path = resolve_ca_key_path(ca_dir)
         before = key_path.read_bytes()
