@@ -579,6 +579,54 @@ Notable changes to Venya will be documented in this file.
 - **Addressed: already-revoked-serial-echoes-the-path-executor-id — the duplicate branch answers before the pairing check** (`#687`; 2 operative files; merge `f07066c9a`).
 - **Addressed: legal-command-redirect-starves-remote-sudo-when-sshpass-is-present — the blessed < allowance is legal by validation and un-executable by construction** (`#695`; 2 operative files; merge `41874131f`, also `fa77a48d9`).
 - **batch after the owner read** (`#698`; 2 operative files; merge `dcf25968f`).
+
+- **Backfilled from the merge audit in the recipe's tiered form (`RELEASES.md` §1):** each entry
+  was reconstructed from merge deltas, names the merges it stands for, and minor families are combined.
+- **CA and admin key material is written encrypted and rotation is all-or-nothing.** An unencrypted CA key is refused when a passphrase is set, the root CA key is encrypted at rest, and a rotation
+  that is interrupted cannot leave a mismatched pair or overwrite its own trust anchor. Merges `04c1c28ca`, `0c44386fe`, `919298256`, `2cb92a425`, `e52e9589c`. Tickets named by those merges: (`#316`)
+  (`#361`) (`#500`).
+- **Admin certificates are short-lived, and status tells you which one you are holding.** A renewed admin certificate is issued short-lived, an expired one is refused rather than presented, and the
+  fingerprint context it was issued into is named. Merges `41d49426c`, `f6a1120c2`, `e07b5ada1`, `a28e6355d`, `e606be446`. Tickets named by those merges: (`#504`).
+- **A loose admin key is now reported instead of silently accepted.** The CLI checks the mode bits on the admin mTLS key file on POSIX and prints a `warning:` naming the path, the mode it found and the `0600` it wants when group or other can read it; the trigger is the group/other read bits, correct modes stay silent, and it **warns and never blocks** — the exit code, stdout and every request the CLI makes are unchanged. Merges `7309444bd`.
+- **Every trust decision goes to the configured CA anchor, and plaintext is refused.** Setup, config-set, register and the MCP dial refuse a non-TLS origin; the executor's dials trust only the CA
+  installed on this host, not the host store added to it; admin mTLS is gated on both of its values being set; CSR signing accepts the curves the register route advertises. Merges `896e0dca4`,
+  `c58bec54c`, `815a882ee`, `2728796d9`, `549179373`, `c4ef6afc0`, `b9e9e622f`, `d59a06803`. Tickets named by those merges: (`#17`) (`#506`) (`#508`).
+- **CLI setup and register follow the server's answer instead of asserting one.** Setup and exec-register resolve the identity, token and URL the server returned instead of the values the client
+  guessed. Merges `2ccc0142a`, `28a2fe075`, `92e87af89`, `d7cb70624`, `b0ee5134a`. Tickets named by those merges: (`#3`) (`#4`) (`#5`) (`#366`).
+- **A revoke now says which revocation happened.** Revoking a certificate and revoking an identity are reported as the distinct actions they are, and the headlines follow the core's answer rather than
+  asserting one. Merges `685e3cca9`, `fcd1b34c6`, `daf745e2b`. Tickets named by those merges: (`#481`) (`#666`).
+- **Authorization is scoped to the caller, and unauthenticated paths that could claim an identity are closed.** Secret writes and session reads are checked against the calling principal, the
+  registration route refuses an unauthenticated takeover, the reset wipe is no longer reachable as a race, and role removal or admin disable refuse the state that leaves no way back in. Merges
+  `50364584a`, `03097624f`, `0dd03ae0f`, `f159fcc13`, `bdf6e073b`, `08bf24df5`, `d3245c739`. Tickets named by those merges: (`#3`) (`#15`) (`#16`) (`#450`).
+- **Admin mTLS callers are checked against an allowlist, and a revoked certificate stops working.** The admin middleware reads the client certificate serial and tests it against the known admin set and the in-process revocation record; an empty allowlist fails closed, as does a missing serial or a lookup error, so no caller is admitted by an absent answer. Merges `851f7e6db`.
+
+- **Re-running init over a database that was wiped but still seeded converges instead of failing.** Role creation is now get-or-create on `roles.name`, so the stale-roles path no longer raises; the full detail, including any SQL, is logged server-side and the client receives a generic `Reset failed` rather than the internals. Merges `985acc698`.
+- **Elevation is bound to the session that asked for it.** An elevation token is bound to the session and challenge state it was minted with, and refresh refuses when no active user backs it. Merges
+  `d3b264a48`, `53352d089`, `ce81db155`, `efa7660ef`, `d8ec78f18`. Tickets named by those merges: (`#341`) (`#345`).
+- **Runtime settings are obeyed where they were ignored, and failures no longer read as clean.** The concurrency ceiling is read from configuration, a capture honours its
+  timeout, a relay stop runs its cleanup under systemd, credential load and removal stop swallowing failures, a file-descriptor scan with an empty set no longer reads clean, and debug logging stopped
+  carrying session cookies. Merges `dca43dd43`, `ea9414175`, `02823ab7f`, `2d51ed9f2`, `3527ce4fd`, `7525d072c`, `19aabdada`, `876286ab2`. Tickets named by those
+  merges: (`#453`) (`#477`).
+- **One canonical certificate serial everywhere, so a revocation actually takes effect.** The same serial was written zero-padded and presented unpadded, and revocation lookups compared the two by exact string equality — a leading zero nibble (roughly one certificate in sixteen) left a revoked credential matching as live. Serial handling now lives in one shared module used by the CLI, the executor daemon, the server CA, its admin middleware and the revocation paths. Merges `8f7647a3e` (`#481`).
+
+- **Error responses stopped carrying internals to the client.** Registration and authentication failures return a generic detail while the full text, including any SQL or library message, is logged server-side; the WebAuthn manager forwards only what an operator needs, and the core installer's nginx config now sets `server_tokens off`. Merges `ad8e5f59e`.
+
+- **The broken browser-enrolment FIDO2 helper is removed, and with it the `venya-fido2` command.** The server no longer ships `server.fido2.cli_enroll` (228 lines) or its tests (121 lines), the `venya-fido2` console entry point is gone from the server package, and the generated suppression register moved down with it — the page and the dependency list are already in step, so nothing else rides on the removal. Merges `8078a4a33`.
+- **Requirements are now generated from the lock, so an install gets the versions that were tested.** The core and executor
+  requirement files went from five hand-written lines to a frozen `uv export` pin set (125 and 92 lines added), so a fresh
+  install resolves the same third-party versions the project tested against instead of whatever the index offers that day;
+  the generator and the hook that keeps the files derived rather than typed ship with it. Merges `fc63faa4f`.
+- **Executor build is now reported and stored, via a new column.** Migration `029` adds `executors.version` — nullable, with
+  deliberately no backfill, so a `NULL` honestly means "this daemon predates version reporting" — and the heartbeat, the CLI,
+  the server and the admin surfaces carry the value. Merges `aac1a8656`.
+- **The consumed bootstrap enrolment token moved where the daemon can actually write it.** `/etc/venya` is `ReadOnlyPaths` for
+  the service, so clearing the old section failed and could crash-loop the boot; the token now lives under
+  `/var/lib/venya/executor/`, which is writable, and the legacy hand-placed section is still honoured. Merges `064cda32f`.
+- **Installer and uninstaller prompts, guards and copy.** Merges `ffd66e458`, `a1e6e146d`, `a26af9bb7`, `47dd345c0`, `6f500035c`,
+  `357e0561b`, `84842b261`, `f81ff9cf2`, `4de076954`, `a1f9926f7`, `302aa657d`.
+- **Enrolment-surface fixes.** Merges `e8dfdb831`, `fc943083f`, `dbd5eaa7b`.
+- **Low-information sweeps.** Merges `d9ec2ccd7`, `4b487edfe`.
+
 ## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
 
 > This version was **belayed as a release name** by the owner on 2026-10-15 (`decisions.md` s119: "alpha17 belayed as a release name"), and **no `v0.1.0alpha17` tag exists on any face** — the entry body below is kept as the dated record of work that shipped later under `v0.1.0beta1`. Deliberately not written as `## [0.1.0alpha17]`: the bracket form is what a release claim is matched on, and this is not one.
