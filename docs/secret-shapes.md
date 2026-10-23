@@ -47,18 +47,50 @@ The blessed taxonomy is `BUILTIN_SHAPES` in
 | Shape | Consumption | Example command (path canon only — `{secret_path}` = the injected file `/run/secrets/venya/<secret_id>`) |
 |---|---|---|
 | `ssh-password` | sshpass reads the password file. Available in **balanced** and **permissive** policy; refused under **strict**, and by the empty allowlist (`STRICT_DEFAULT_COMMANDS`), not by a named pattern. Not supported in the same command as a remote `sudo -S` — see [beta-known-limitations.md](beta-known-limitations.md) | `sshpass -f {secret_path} ssh -o StrictHostKeyChecking=accept-new bot@web-server-3 uptime` |
-| `ssh-key` | key material presented to ssh from the file | `ssh -i {secret_path} -o StrictHostKeyChecking=accept-new bot@web-server-3 uptime` (see the operator note in architecture.md: ssh-carried commands must avoid space-bearing argument traps) |
+| `ssh-key` | key material presented to ssh from the file. **If the key is passphrase-protected, the `askpass` secret holding that passphrase must be bound in the SAME call** — the pairing is by what you bind, not by any name convention, and a passphrase-protected key bound alone does not work; see note 1 below the table | `ssh -i {secret_path} -o StrictHostKeyChecking=accept-new bot@web-server-3 uptime` (see the operator note in architecture.md: ssh-carried commands must avoid space-bearing argument traps) |
 | `http-netrc` | curl/netrc credential file | `curl -n --netrc-file {secret_path} https://api.example.com/data` |
 | `http-header-file` | header lives INSIDE the file; curl reads the config | `curl -K {secret_path} https://api.example.com/data` — the file carries the `header = …` line |
 | `mysql-defaults` | client option file | `mysql --defaults-file={secret_path} -e "status"` |
 | `ipmi-passfile` | password from file | `ipmitool -H 192.0.2.10 -U admin -f {secret_path} chassis power status` |
-| `askpass` | sudo/git/ssh passphrase prompts answered via the static helper | stored value = the passphrase; at execute time the relay wires `GIT_ASKPASS`/`SSH_ASKPASS` to the helper (`routes/executors.py` askpass branch, `venya_contract.relay.ASKPASS_HELPER_PATH`). The command itself needs no shape-specific syntax. |
+| `askpass` | sudo/git/ssh passphrase prompts answered via the static helper. **Usable alone, and REQUIRED alongside any passphrase-protected `ssh-key` — both secrets in one call**, note 1 below the table | stored value = the passphrase; at execute time the relay wires `GIT_ASKPASS`/`SSH_ASKPASS` to the helper (`routes/executors.py` askpass branch, `venya_contract.relay.ASKPASS_HELPER_PATH`). The command itself needs no shape-specific syntax. Example with a protected key (two secrets, one call): `venya run --secret deploy_key --secret deploy_key_passphrase --executor-id <executor-id> -- ssh -i /run/secrets/venya/deploy_key bot@web-server-3 uptime` |
 | `sudo-stdin` | sudo's `-S` reads the password from stdin; the session-bound `<` redirect pair is the ruled delivery. Aimed at a **local** `sudo -S` it delivers. Carried through `sshpass`, the same pair feeds `sshpass`'s own stdin instead of `ssh`'s, so a remote `sudo -S` is answered by nothing and waits. Without `sshpass` (key authentication) the redirect does reach the remote `sudo -S`, and that is the ruled delivery for an unattended remote `sudo` | `sudo -S < {secret_path} systemctl restart httpd` (the `<` must be its own argument followed exactly by the bound secret path — `executor.py:_redirect_pair`; do NOT add `-p ''` to remote ssh commands, see architecture.md) |
 | `env:NAME` | value is written into the sandbox env file as `NAME=<value>` before the run (`routes/executors.py` env-shape branch; `RelayEnvVar` contract) | store the key as `env:KUBECONFIG`; then plain `kubectl get pods` works — see the `$` constraint in §5 |
 
 Every shape is mediated through the same per-session tmpfs staging file;
 `venya list` / MCP `list_secrets` surface the stored `shape` so humans and
 agents can discover it.
+
+**Note 1 — a passphrase-protected `ssh-key` only works when an `askpass` secret holding its passphrase
+is bound in the same call.** Nothing links the two by name: the server wires the helper for any secret
+whose stored `shape` is `askpass`, so the key and the passphrase are paired only by both appearing in
+one `--secret` list. This is written as a note rather than inside the table because it is a rule about
+pairing two secrets, not about a shape's syntax, and the failure it prevents reads like a target-side
+fault.
+
+1. **The rule.** The askpass wiring happens once per execution session, in the `elif shape ==
+   "askpass":` branch of `routes/executors.py`, and it is the only place `GIT_ASKPASS` /
+   `SSH_ASKPASS` / `VENYA_ASKPASS_SECRET` (plus `VENYA_ASKPASS_USER` when the secret metadata carries
+   a username) get set — the helper itself is the static `/usr/local/bin/venya-askpass` named by
+   `venya_contract.relay.ASKPASS_HELPER_PATH`. Bind the key alone and none of that is wired: ssh then
+   falls back to the askpass path it was compiled with (`/usr/bin/ssh-askpass`), which the executor
+   sandbox image does not ship, so the private key is never decrypted and the command runs with no
+   credential at all.
+2. **The symptom lies.** The target answers `Permission denied (publickey)` and the run logs
+   `ssh_askpass: exec(/usr/bin/ssh-askpass): No such file or directory`. That looks exactly like a
+   broken `authorized_keys` on the remote host, and it is not — the target is irrelevant. Check the
+   binding before you touch the target.
+3. **Diagnostic, in the sandbox, with the passphrase secret bound:**
+   `printenv SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY SSH_AUTH_SOCK`. `SSH_ASKPASS` unset *is* the
+   whole bug. Venya provides `SSH_ASKPASS`, `GIT_ASKPASS` and `VENYA_ASKPASS_SECRET` and nothing else
+   — no agent, no agent socket — so treat `SSH_AUTH_SOCK` in that output as ambient, never as
+   something the product handed you.
+4. **Is the key actually encrypted:** `ssh-keygen -yf {secret_path} -P ""`. It prints the public key
+   for an unencrypted key (exit 0) and refuses with `incorrect passphrase supplied to decrypt private
+   key` (exit 255) for a protected one, which is the answer you wanted. **Do not use
+   `ssh-keygen -lf {secret_path}` for this.** OpenSSH's new private-key format stores the public blob
+   in the clear, so `-l` prints a fingerprint that is byte-identical to the one the `.pub` file gives —
+   and therefore matches the target's `authorized_keys` perfectly — while the key remains impossible to
+   sign with. A fingerprint match proves the key is the right key, never that it is usable.
 
 ## 3. Custom shape recipe (works today)
 
