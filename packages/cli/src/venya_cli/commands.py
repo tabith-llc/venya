@@ -1150,8 +1150,26 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             (output_path / "token").unlink(missing_ok=True)
 
         result = client.post(f"/api/v1/admin/executors/{args.executor_id}/enroll")
-        token = result.get("enrollment_token", "")
-        expires_in = result.get("expires_in_seconds", 900)
+        # #698 AC3: a 2xx that carries no token is NOT a success. `_request` already raises on every
+        # 4xx/5xx, so the only way to land here with nothing usable is an empty body (`_request`
+        # returns {} when `response.content` is falsy), a missing/empty/whitespace/null field, or a
+        # non-dict body. Before this check the code wrote a ZERO-BYTE token, printed the bundle block
+        # and a SHA256 of nothing, and returned 0 — a directory that looks complete and nothing to
+        # copy to the executor. Refuse before any write and before any success print.
+        # The mkdir above and the stale-token unlink above it stay exactly where they are, on purpose
+        # (#616): a failed round trip must not hold a documented directory hostage, and removal after
+        # the POST would resurrect the stale-token bug. This branch therefore creates nothing.
+        raw_token = result.get("enrollment_token") if isinstance(result, dict) else None
+        token = raw_token.strip() if isinstance(raw_token, str) else ""
+        if not token:
+            target = f" --output-dir {output_dir}" if output_path is not None else " (token to stdout)"
+            print(
+                f"Enrollment failed: the server returned no enrollment token for '{args.executor_id}'{target}. "
+                "Nothing was minted.",
+                file=sys.stderr,
+            )
+            return 1
+        expires_in = result.get("expires_in_seconds", 900) if isinstance(result, dict) else 900
 
         if output_path is not None:
             import hashlib as hashlib_mod
