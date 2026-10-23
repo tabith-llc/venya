@@ -973,6 +973,51 @@ plus unattended remote `sudo` is ever built, this entry is deleted rather than s
 
 ---
 
+### A revoked or unreachable executor can be refused with a reason the operator never sees
+
+Status: known limitation in beta · Target: `#697` (its server-side half merged; the emitting half does
+not exist yet) · Tracked as: `#697`
+
+**Who is affected:** anyone relaying a command to an executor whose relay listener will not take the
+connection — a credential the core has revoked, or a daemon that has not been able to ask the core
+whether its credential is revoked.
+
+**What the limitation is:** the listener on `:8443` refuses those two classes with two named sentences
+(`REFUSE_NO_ANSWER` and `REFUSE_NOT_WIRED`, in `relay_listener.py`; the sibling `REFUSE_REVOKED` is the
+revocation-asserting class and is deliberately a different one). **What the core forwards, and what it
+substitutes, is now declared:** when the executor answers the relay call with an HTTP status and a JSON
+`detail`, the core relays that `detail` onward ONLY if it opens with one of two accepted prefixes —
+`"Command rejected:"` (a policy refusal, `#410`) and `"503 OPERATIONAL FAULT — "` (the operational-fault
+class above, added for this row). Every other body is replaced with the fixed sentence
+`"Executor returned an error"`, and the substituted case is journalled as a byte count and a digest
+prefix, never as text. The prefixes are the whole contract: the core does not summarise, re-flow or
+approve any other words.
+
+**And the honest half, which is why this entry stays:** as shipped, the listener does not put either
+operational-fault sentence into an HTTP response at all. It closes the connection after the handshake
+and before reading a request byte, so the refusal reaches the core as a transport failure, is named in
+the core's own arm for that class (`"Executor unreachable (connection refused)"`), and is written to the
+executor's journal and the `relay_refused` audit record. **So the door that forwards the honest sentence
+is now correct, and nothing on the shipping path walks through it yet.** A reader who has been refused by
+a daemon that cannot answer still gets a transport sentence, not the daemon's own. The runbook's accept-
+gate table says the same thing in its Outcome column: “connection closed, no HTTP response”.
+
+**What is NOT claimed here:** that an operator reading a refusal in the MCP output or the CLI has been
+shown the executor's own words — above the line where the client lifts the core's JSON `detail` into its
+error and prints it, the **MCP tool-level wrap is UNREAD**: which words each MCP tool prints from that
+error was not traced, and only `run_command` has been driven through it. Do not read this entry as a
+statement that the whole client surface shows the reason; it is a statement about the core's forwarding
+rule, tested at the route and at the `run_command` render. Also not claimed: that the operational-fault
+sentence is ever a revocation assertion — the two classes are kept apart on purpose, and the prefix that
+opens this door cannot carry `403 REVOKED` through it.
+
+**What changes at beta+:** the emitting half — the listener answering a refusal with its own sentence
+instead of closing the socket — is what makes this disclosure stop being true, and it is a separate act
+from this row. When it lands, the entry is deleted; until then the forwarding rule above is the shipped
+behavior and the transport sentence is what a refused operator reads.
+
+---
+
 ## How to read an entry, and how this list is maintained
 
 Each entry gives: what you will hit, whether it is fixed-targeted or open, the issue that
