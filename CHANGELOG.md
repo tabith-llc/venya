@@ -433,7 +433,7 @@ Notable changes to Venya will be documented in this file.
 - **Addressed: legal-command-redirect-starves-remote-sudo-when-sshpass-is-present — the blessed < allowance is legal by validation and un-executable by construction** (`#695`; 2 operative files; merge `41874131f`, also `fa77a48d9`).
 - **batch after the owner read** (`#698`; 2 operative files; merge `dcf25968f`).
 
-- **Backfilled from the merge audit in the recipe's tiered form (`RELEASES.md` §1):** each entry
+- **Backfilled from the merge audit in tiered form:** each entry
   was reconstructed from merge deltas, names the merges it stands for, and minor families are combined.
 - **CA and admin key material is written encrypted and rotation is all-or-nothing.** An unencrypted CA key is refused when a passphrase is set, the root CA key is encrypted at rest, and a rotation
   that is interrupted cannot leave a mismatched pair or overwrite its own trust anchor; the core installer's own key-handling half
@@ -638,7 +638,7 @@ Notable changes to Venya will be documented in this file.
 
 ## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
 
-> This version was **belayed as a release name** by the owner on 2026-10-15 (`decisions.md` s119: "alpha17 belayed as a release name"), and **no `v0.1.0alpha17` tag exists on any face** — the entry body below is kept as the dated record of work that shipped later under `v0.1.0beta1`. Deliberately not written as `## [0.1.0alpha17]`: the bracket form is what a release claim is matched on, and this is not one.
+> This version was **belayed as a release name** by the owner on 2026-10-15 ("alpha17 belayed as a release name"), and **no `v0.1.0alpha17` tag exists on any face** — the entry body below is kept as the dated record of work that shipped later under `v0.1.0beta1`. Deliberately not written as `## [0.1.0alpha17]`: the bracket form is what a release claim is matched on, and this is not one.
 
 There is no backwards compatibility during alpha. Three changes in this window are
 things an operator has to act on, so they are named at the top rather than buried in
