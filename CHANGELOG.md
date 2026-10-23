@@ -583,7 +583,8 @@ Notable changes to Venya will be documented in this file.
 - **Backfilled from the merge audit in the recipe's tiered form (`RELEASES.md` §1):** each entry
   was reconstructed from merge deltas, names the merges it stands for, and minor families are combined.
 - **CA and admin key material is written encrypted and rotation is all-or-nothing.** An unencrypted CA key is refused when a passphrase is set, the root CA key is encrypted at rest, and a rotation
-  that is interrupted cannot leave a mismatched pair or overwrite its own trust anchor. Merges `04c1c28ca`, `0c44386fe`, `919298256`, `2cb92a425`, `e52e9589c`. Tickets named by those merges: (`#316`)
+  that is interrupted cannot leave a mismatched pair or overwrite its own trust anchor; the core installer's own key-handling half
+  changed with it (`install-venya-core.sh`, +67/-22). Merges `04c1c28ca`, `0c44386fe`, `919298256`, `2cb92a425`, `e52e9589c`. Tickets named by those merges: (`#316`)
   (`#361`) (`#500`).
 - **Admin certificates are short-lived, and status tells you which one you are holding.** A renewed admin certificate is issued short-lived, an expired one is refused rather than presented, and the
   fingerprint context it was issued into is named. Merges `41d49426c`, `f6a1120c2`, `e07b5ada1`, `a28e6355d`, `e606be446`. Tickets named by those merges: (`#504`).
@@ -601,7 +602,9 @@ Notable changes to Venya will be documented in this file.
 - **Admin mTLS callers are checked against an allowlist, and a revoked certificate stops working.** The admin middleware reads the client certificate serial and tests it against the known admin set and the in-process revocation record; an empty allowlist fails closed, as does a missing serial or a lookup error, so no caller is admitted by an absent answer. Merges `851f7e6db`.
 
 - **Re-running init over a database that was wiped but still seeded converges instead of failing.** Role creation is now get-or-create on `roles.name`, so the stale-roles path no longer raises; the full detail, including any SQL, is logged server-side and the client receives a generic `Reset failed` rather than the internals. Merges `985acc698`.
-- **Elevation is bound to the session that asked for it.** An elevation token is bound to the session and challenge state it was minted with, and refresh refuses when no active user backs it. Merges
+- **Elevation is bound to the session that asked for it.** An elevation token is bound to the session and challenge state it was minted with, and refresh refuses when no active user backs it, and two schema additions carry that
+  binding — migration `035` adds the elevation token's session column and migration `036` adds the elevation-challenges
+  table, so a fresh install gets both. Merges
   `d3b264a48`, `53352d089`, `ce81db155`, `efa7660ef`, `d8ec78f18`. Tickets named by those merges: (`#341`) (`#345`).
 - **Runtime settings are obeyed where they were ignored, and failures no longer read as clean.** The concurrency ceiling is read from configuration, a capture honours its
   timeout, a relay stop runs its cleanup under systemd, credential load and removal stop swallowing failures, a file-descriptor scan with an empty set no longer reads clean, and debug logging stopped
@@ -621,11 +624,14 @@ Notable changes to Venya will be documented in this file.
   the server and the admin surfaces carry the value. Merges `aac1a8656`.
 - **The consumed bootstrap enrolment token moved where the daemon can actually write it.** `/etc/venya` is `ReadOnlyPaths` for
   the service, so clearing the old section failed and could crash-loop the boot; the token now lives under
-  `/var/lib/venya/executor/`, which is writable, and the legacy hand-placed section is still honoured. Merges `064cda32f`.
+  `/var/lib/venya/executor/`, which is writable, and the legacy hand-placed section is still honoured; the executor installer moved with it (+22/-20). Merges `064cda32f`.
 - **Installer and uninstaller prompts, guards and copy.** Merges `ffd66e458`, `a1e6e146d`, `a26af9bb7`, `47dd345c0`, `6f500035c`,
   `357e0561b`, `84842b261`, `f81ff9cf2`, `4de076954`, `a1f9926f7`, `302aa657d`.
 - **Enrolment-surface fixes.** Merges `e8dfdb831`, `fc943083f`, `dbd5eaa7b`.
-- **Low-information sweeps.** Merges `d9ec2ccd7`, `4b487edfe`.
+- **A dead public-path entry is retired, and two low-information sweeps.** `/api/v1/enrollment/confirm`
+  left `SessionMiddleware.PUBLIC_PATHS`: no route ever matched it, and a dead allowlist entry is how an unmounted path
+  stays mounted, so its absence is now pinned by a cell in `test_session_middleware.py`. The rest of this pair is unused
+  code and sweep residue. Merges `d9ec2ccd7`, `4b487edfe`.
 
 ## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
 
