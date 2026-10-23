@@ -934,10 +934,13 @@ leaves with it.
 ### `sshpass` with a redirect aimed at a remote `sudo -S` does not deliver the password
 
 Status: known limitation in beta · Target: `#696` (a per-command ceiling plus cancel), which does not
-gate this release · Tracked as: `#695` (open — **this entry is the disclosure that answers its AC2**, and
-the owner ruled it in this form: document the collision, keep the capability, and land `#696` as the real
-protection. The `#695` AC1 **code** is on the line; whether AC1 **holds** is unmeasured — see the stdin
-note below.)
+gate this release · Tracked as: `#695` (**closed** 2026-10-22 — read back from the tracker API at
+`state=closed`, `labels=component/executor,severity/medium,status/closed`, having been re-graded from
+HIGH to medium on the owner's word with this entry as the disclosure. **The row closed on
+documentation and a corrected severity, not on a measured fix** — which is why the stdin paragraph below
+keeps its unmeasured caveat rather than claiming closure), and the owner ruled it in this form: document
+the collision, keep the capability, and land `#696` as the real protection. The `#695` AC1 **code** is on
+the line; whether AC1 **holds** is unmeasured — see the stdin note below.)
 
 **Who is affected:** anyone storing an `ssh-password` secret and trying to escalate on the far side of
 an `ssh` hop in the same command — the shape that reads naturally, and the shape that does not work.
