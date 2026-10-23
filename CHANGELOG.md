@@ -603,10 +603,20 @@ Notable changes to Venya will be documented in this file.
   timeout, a relay stop runs its cleanup under systemd, credential load and removal stop swallowing failures, a file-descriptor scan with an empty set no longer reads clean, and debug logging stopped
   carrying session cookies. Merges `dca43dd43`, `ea9414175`, `02823ab7f`, `2d51ed9f2`, `3527ce4fd`, `7525d072c`, `8078a4a33`, `19aabdada`, `876286ab2`, `8f7647a3e`, `ad8e5f59e`. Tickets named by those
   merges: (`#453`) (`#477`).
-- **Installer and uninstaller hygiene — prompts, guards and copy, with no change to what gets installed.** Merges `fc63faa4f`, `ffd66e458`, `a1e6e146d`, `a26af9bb7`, `47dd345c0`, `6f500035c`,
+- **Requirements are now generated from the lock, so an install gets the versions that were tested.** The core and executor
+  requirement files went from five hand-written lines to a frozen `uv export` pin set (125 and 92 lines added), so a fresh
+  install resolves the same third-party versions the project tested against instead of whatever the index offers that day;
+  the generator and the hook that keeps the files derived rather than typed ship with it. Merges `fc63faa4f`.
+- **Executor build is now reported and stored, via a new column.** Migration `029` adds `executors.version` — nullable, with
+  deliberately no backfill, so a `NULL` honestly means "this daemon predates version reporting" — and the heartbeat, the CLI,
+  the server and the admin surfaces carry the value. Merges `aac1a8656`.
+- **The consumed bootstrap enrolment token moved where the daemon can actually write it.** `/etc/venya` is `ReadOnlyPaths` for
+  the service, so clearing the old section failed and could crash-loop the boot; the token now lives under
+  `/var/lib/venya/executor/`, which is writable, and the legacy hand-placed section is still honoured. Merges `064cda32f`.
+- **Installer and uninstaller prompts, guards and copy.** Merges `ffd66e458`, `a1e6e146d`, `a26af9bb7`, `47dd345c0`, `6f500035c`,
   `357e0561b`, `84842b261`, `f81ff9cf2`, `4de076954`, `a1f9926f7`, `302aa657d`.
-- **Host inspection, sandbox residue and enrolment-surface wording.** Merges `0a9e660e8`, `413062573`, `e8dfdb831`, `fc943083f`, `064cda32f`, `dbd5eaa7b`.
-- **Low-information sweeps and version-surface backfill.** Merges `d9ec2ccd7`, `4b487edfe`, `aac1a8656`.
+- **Enrolment-surface fixes.** Merges `e8dfdb831`, `fc943083f`, `dbd5eaa7b`.
+- **Low-information sweeps.** Merges `d9ec2ccd7`, `4b487edfe`.
 
 ## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
 
