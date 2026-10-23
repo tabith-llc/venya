@@ -237,6 +237,15 @@ For off-site / escrow custody of the CA key, the CLI has purpose-built break-gla
 - `venya admin restore-ca-key` — restores the CA key from shares or an encrypted export
   (both blob formats above).
 
+On key custody while these commands run, and its honest limit: unwrapping the CA key — or
+rebuilding it from shares — puts the plaintext in a scoped holder (`SecretHolder`) that the
+command owns, and the holder zeroes that copy when it releases, on every way out of the
+command, including one that aborts part-way. The precise word is **erasure**, not residency:
+the crypto libraries these commands call allocate their own copies of key material, and the
+holder neither owns nor reaches them. What the command commits to is that its own copy does
+not outlive the run; a key is readable inside the process for the duration of the run, and
+that is the same limit recorded in [beta-known-limitations.md](beta-known-limitations.md).
+
 These cover the **CA key only**. The database and `.env` (KEK passphrase, pepper) still need
 the file/DB backup above. See [cli-reference.md](cli-reference.md) for exact flags.
 
