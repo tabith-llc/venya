@@ -978,8 +978,8 @@ plus unattended remote `sudo` is ever built, this entry is deleted rather than s
 
 ### A revoked or unreachable executor is refused, and only one of the two reasons reaches the operator
 
-Status: known limitation in beta · Target: `#697` (both halves ride the same unmerged branch — nothing
-has merged to `dev`; what remains is a physical observation, not code) · Tracked as: `#697`
+Status: known limitation in beta · Target: `#697` (both halves landed on `dev` at `6e3e6585` — the
+mechanism is shipped; what remains is a physical observation, not code, and that keeps this row open) · Tracked as: `#697`
 
 **Who is affected:** anyone relaying a command to an executor whose relay listener will not take the
 connection — a credential the core has revoked, or a daemon that has not been able to ask the core
