@@ -62,6 +62,14 @@ _LEGAL = [_AT_FLOOR, _AT_CEILING, _OVER_CEILING, _SPACED, _ACCENTED_15]
 _LEGAL_IDS = ["at-15", "at-64", "over-65", "meaningful-spaces", "15-accented"]
 
 
+@pytest.fixture(autouse=True)
+def _operator_terminal(monkeypatch):
+    """#593: both CA-key custody doors now refuse before prompting when stdin is not a TTY.
+    The prompt-door cells here (#573's floor pair) are the operator-at-a-terminal path;
+    the non-tty half of the truth table is test_ca_key_nontty_refusal_593_flash3.py."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+
 def _real_key_pem() -> bytes:
     return ec.generate_private_key(ec.SECP256R1()).private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -319,7 +327,9 @@ class TestRestorePromptReadDoor:
 
         ca, blob, key = self._blob(tmp_path, _AT_FLOOR)
         (ca / "ca.key").unlink()
-        with patch("venya_cli.commands.getpass.getpass", side_effect=[_AT_FLOOR]):
+        # #593: the door guard now requires a tty, so the absent-target server-passphrase
+        # prompt is reachable — the trailing "" declines it (Enter = leave unencrypted).
+        with patch("venya_cli.commands.getpass.getpass", side_effect=[_AT_FLOOR, ""]):
             rc = cmd_admin_restore_ca_key(
                 SimpleNamespace(mode="backup", backup_file=str(blob), shares=None, ca_dir=str(ca))
             )

@@ -45,6 +45,15 @@ from venya_cli import commands as commands_mod
 from venya_cli import secret_holder as holder_mod
 from venya_cli.secret_holder import SecretHolder, SecretHolderReleasedError
 
+
+@pytest.fixture(autouse=True)
+def _operator_terminal(monkeypatch):
+    """#593: both CA-key custody doors now refuse before prompting when stdin is not a TTY.
+    The prompt-path cells here are the operator-at-a-terminal shape; the non-tty half of the
+    truth table is test_ca_key_nontty_refusal_593_flash3.py."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+
 _TESTS_DIR = Path(__file__).resolve().parent
 _CLI_SRC_DIR = _TESTS_DIR.parent / "src" / "venya_cli"
 _REPO_ROOT = _TESTS_DIR.parents[2]  # packages/cli/tests -> repo root
@@ -409,9 +418,12 @@ class TestP5RealPath:
         rc, backup = self._run_export(tmp_path, key)
         assert rc == 0
         (tmp_path / "ca" / "ca.key").unlink()
+        # #593: with the door guard requiring a tty (faked by the file-level _operator_terminal
+        # fixture), the absent-target server-passphrase prompt is reachable — the trailing ""
+        # declines it (Enter = leave unencrypted), the same plaintext end state as before.
         with (
             patch("builtins.input", lambda *a, **k: pytest.fail("echoed input() in a secret prompt")),
-            patch("venya_cli.commands.getpass.getpass", side_effect=["holder-path-pw-538"]),
+            patch("venya_cli.commands.getpass.getpass", side_effect=["holder-path-pw-538", ""]),
         ):
             rc2 = commands_mod.cmd_admin_restore_ca_key(
                 SimpleNamespace(mode="backup", backup_file=str(backup), shares=None, ca_dir=str(tmp_path / "ca"))
@@ -607,8 +619,15 @@ class TestN4BehaviourUnchanged:
         leftovers = [p.name for p in out.parent.glob(".venya-cabackup-*")] if out.parent.exists() else []
         assert leftovers == [], f"temp-file residue left behind: {leftovers}"
 
-    def test_n4_garbage_ca_key_fails_closed_before_any_holder(self, tmp_path):
-        """Rejecting half: an unrecognised file produces no output and no holder."""
+    def test_n4_garbage_ca_key_fails_closed_before_any_holder(self, tmp_path, monkeypatch):
+        """Rejecting half: an unrecognised file produces no output and no holder.
+
+        #593 note: this cell passed at base only because the headless server-passphrase
+        refusal died incidentally BEFORE any custody prompt — with the door guard making
+        prompt-shape explicit, the cell now pins the mechanism it names: the env door is
+        ANSWERED (so unwrap is attempted), the garbage bytes are refused by unwrap_at_rest
+        with zero holder built. Same assertions, honest mechanism."""
+        monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "n4-cell-server-passphrase")  # pragma: allowlist secret
         ca_dir = tmp_path / "ca"
         ca_dir.mkdir()
         (ca_dir / "ca.key").write_bytes(b"this is not a key and not an envelope\n")

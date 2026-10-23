@@ -26,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from venya_cli.at_rest_key import ensure_secret_dir, rewrap_at_rest, unwrap_at_rest
 from venya_cli.commands import (
     _decrypt_ca_backup,
@@ -37,6 +38,17 @@ from venya_cli.commands import (
 SERVER_PW = "srv-pw-297"  # pragma: allowlist secret — TEST passphrase, never real
 ADMIN_PW = "adm-pw-297"  # pragma: allowlist secret
 OP_PW = "op-pw-297-operator"  # pragma: allowlist secret
+
+
+@pytest.fixture(autouse=True)
+def _operator_terminal(monkeypatch):
+    """#593: both CA-key custody doors now refuse before prompting when stdin is not a TTY.
+    The cells that drive a prompt here are the operator-at-a-terminal path, so the tty is
+    faked for the whole file; the two cells that INTENTIONALLY assert the headless server-
+    passphrase refusal replace sys.stdin inside their own with-block, which overrides this.
+    The non-tty half of the custody-door truth table is
+    test_ca_key_nontty_refusal_593_flash3.py."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
 
 
 def _boom(*_a, **_k):
@@ -77,7 +89,10 @@ def _export(ca_dir, out, op_pw=OP_PW):
 
 
 def _restore_backup(ca_dir, blob, op_pw=OP_PW):
-    with patch("venya_cli.commands.getpass.getpass", side_effect=[op_pw]):
+    # #593: tty faked for the door guard (file-level _operator_terminal fixture); the trailing
+    # "" answers the absent-target server-passphrase prompt — Enter leaves it unencrypted, the
+    # same plaintext end state the pre-#593 headless skip produced. Unused when the target exists.
+    with patch("venya_cli.commands.getpass.getpass", side_effect=[op_pw, ""]):
         return cmd_admin_restore_ca_key(
             SimpleNamespace(mode="backup", backup_file=str(blob), shares=None, ca_dir=str(ca_dir))
         )

@@ -131,14 +131,23 @@ def _ca_dir(tmp_path, key: bytes = KEY):
 def _export(tmp_path, pw="pw1-format-roundtrip", key: bytes = KEY):
     ca = _ca_dir(tmp_path, key)
     out = tmp_path / "b.enc"
-    with patch("venya_cli.commands.getpass.getpass", side_effect=[pw, pw]):
+    # #593: the custody doors refuse before prompting off a TTY; this helper drives the
+    # operator-at-a-terminal path, so the tty is faked and the prompt answers are given here.
+    with patch("venya_cli.commands.getpass.getpass", side_effect=[pw, pw]), patch(
+        "sys.stdin.isatty", return_value=True
+    ):
         rc = cmd_admin_export_ca_key(SimpleNamespace(output=str(out), ca_dir=str(ca)))
     assert rc == 0
     return ca, out
 
 
 def _restore(ca, blob_path, pw):
-    with patch("venya_cli.commands.getpass.getpass", side_effect=[pw]):
+    # #593: tty faked for the door guard; the trailing "" answers the server-passphrase
+    # prompt that restore_at_rest_bytes asks when the target is ABSENT — Enter means
+    # "leave unencrypted", the same plaintext end state the pre-#593 headless skip produced.
+    with patch("venya_cli.commands.getpass.getpass", side_effect=[pw, ""]), patch(
+        "sys.stdin.isatty", return_value=True
+    ):
         return cmd_admin_restore_ca_key(
             SimpleNamespace(mode="backup", backup_file=str(blob_path), shares=None, ca_dir=str(ca))
         )
