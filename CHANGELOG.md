@@ -154,7 +154,7 @@ Notable changes to Venya will be documented in this file.
   made to do nothing, so the guard is proven to bite. Nothing an operator types changed in
   these three.
 
-## [0.1.0beta1] - 2026-10-21
+## [0.1.0beta1] - 2026-10-22
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
 
@@ -490,6 +490,95 @@ Notable changes to Venya will be documented in this file.
   nothing called and the shared-memory prose that outlived them were removed (#471); the deploy
   record refuses a dirty source tree (#16); and the browser-auth router's module docstring now
   states what is mounted instead of what was disabled in August (#312, documentation).
+
+
+- **Backfilled from the release completeness audit (leg 389, applied here).** Every row below is one merged change that had no entry in this file. The wording is the merge's own subject where the merge wrote one; where a merge landed with only a branch name, the row is the ticket's title, marked "Addressed:" so it cannot be read as shipped behaviour. Each row names the ticket ids it carries, the count of operative files, and the merge sha. One row per merge: several tickets rode a single merge, and those ids are listed together rather than repeated as separate changes.
+- **touch cue prints once per operation, re-shown on PIN retry** (`#10`; 2 operative files; merge `587801e5a`).
+- **Stage-1 filter contract tightening** (`#20`; 5 operative files; merge `8890b7f80`).
+- **register retries back off, permanent rejections stop loud** (`#24`; 4 operative files; merge `6729ec12c`).
+- **clean startup exit for missing-CA TLS refusal** (`#41`; 2 operative files; merge `9742a4494`).
+- **dns_resolver wording made honest about egress-allow semantics across surfaces** (`#50`; 5 operative files; merge `a4fa16a66`).
+- **auditor help copy — full-visibility + exclusive-tier wording; regen cli-reference; lifecycle-test SoD notes; +1 help-pin test; wording owner-approved; expected cli 1022** (`#290`; 4 operative files; merge `7d490e91c`).
+- **middleware stashes the admission verdict + presented serial so the audit-ingest sender flag shares one derivation by construction** (`#311`; 4 operative files; merge `80ad7ca15`).
+- **tree-wide baseline resync + core tripwire interlock — the UPGRADE.md prose finding baselined, one-time delta +1 entry; detect-secrets==1.5.0 pinned dev-side** (`#313`, `#321`; 4 operative files; merge `69e9e60eb`).
+- **daemon umask 077 + atomic private-mode writes — world-writable key window closed on boot and rotation** (`#316`; 5 operative files; merge `f46900619`).
+- **per-end boundary anchoring + component-aware trusted-path compare — 2 vacuous default patterns and the custom-config surface now match as written** (`#318`; 2 operative files; merge `76f3e5c67`).
+- **stop the core install when the PostgreSQL config dir is missing, and purge the macOS config dir in the CLI uninstaller** (`#319`; 2 operative files; merge `f1f3d12f7`, also `2a5ec5e04`).
+- **boundary validation of server-issued secret_id before both path sinks, reject-before-write** (`#320`; 2 operative files; merge `58ab3d89f`).
+- **Addressed: lone-surrogate argv executes then crashes the completion audit write — side effects kept** (`#334`; 7 operative files; merge `7e21a5990`).
+- **retire the server-side CA export/restore pair in favor of the CLI custody format, and make the CRL conditional-GET ETag cover the served capped population with loud truncation signal** (`#336`, `#337`; 7 operative files; merge `ec367999e`).
+- **retire the unread require_in_production knob, elevation challenge lifecycle, rotation-model forbid with dead CLI flag retired, admin-plane enumerated constraints, and the PostgreSQL-dialect guard on the enrollment advisory lock** (`#338`, `#345`, `#355`, `#356`, `#366`; 16 operative files; merge `f270d29ca`).
+- **enrollment-cap advisory locking, browser cookie session-plane alignment, persisted bearer-token expiry with fail-closed validation, and direct 48-char recovery-code generation** (`#339`, `#341`, `#342`, `#344`; 16 operative files; merge `ea615e40e`).
+- **Addressed: legacy /enrollment/tokens mint/revoke bypasses the lifecycle audit events its admin twins emit** (`#343`; 3 operative files; merge `e602a2142`).
+- **Addressed: revoke-cert reason field unguarded against String(64) column — 65+ chars 500s the admin action** (`#346`, `#347`; 6 operative files; merge `27c8505ad`).
+- **Addressed: MCP get_audit hours accepts negatives — future cutoff returns silently empty audit** (`#348`, `#349`, `#350`; 4 operative files; merge `42f58dc12`).
+- **redact secret argv in the support-log header, stage renew writes to random-name temps, refuse structural characters in admin identities before minting, and encode secret keys and user IDs in URL paths with ruled charset validation** (`#351`, `#352`, `#353`, `#354`; 10 operative files; merge `be6bd736f`).
+- **repo-wide extra=forbid on request-body models with interlock pin and ruled exemptions** (`#357`; 13 operative files; merge `51cddf46b`).
+- **recovery requests carry only declared wire fields, local flags stay client-side** (`#367`; 2 operative files; merge `199aee866`).
+- **the serve-time hash embed lands only at the assignment default with the guard comparison made embed-invisible, and executor credentials are hardened right after registration so a Docker-gate abort leaves a bootable install** (`#368`, `#370`; 5 operative files; merge `85e6e2741`).
+- **RecoveryRequest carries the same declared-fields-only rule as the rest of the request models now that its exemption condition is gone** (`#371`; 4 operative files; merge `791045c57`).
+- **exec-register certificate writes are atomic and mode-pinned, and the setup CA directory takes the standard secret-dir idiom** (`#376`; 3 operative files; merge `40441375e`).
+- **the recovery --force/--confirm no-ops are retired with paired reject cells and the regenerated reference carrying the leaner surface** (`#377`; 6 operative files; merge `312cd832b`).
+- **executor state-dir mode pin now applies on both install paths** (`#380`; 2 operative files; merge `200874b0b`).
+- **ignored-knob notice for VENYA_EGRESS_ALLOW on core installs** (`#382`; 2 operative files; merge `49467962f`).
+- **kvm group re-assert now runs on every executor install** (`#384`; 2 operative files; merge `535f8510d`).
+- **drop the inert --allow-host/--no-network daemon flags** (`#386`; 2 operative files; merge `663569dec`).
+- **chokepoint honors --core-url alias** (`#387`; 2 operative files; merge `aa615fc69`).
+- **renew public-material posture** (`#388`; 2 operative files; merge `5b6a74dd7`).
+- **admin executor row removal — DELETE /admin/executors/{id} + 'venya admin remove-executor** (`#391`; 8 operative files; merge `72dfb7141`).
+- **drop seven inert server config fields** (`#392`; 1 operative file; merge `625d12091`).
+- **remove /var/backups/venya in core uninstaller** (`#394`; 2 operative files; merge `8ca35fb48`).
+- **core/executor uninstallers verify removals before claiming success** (`#396`; 3 operative files; merge `370f2296f`).
+- **one-shot register URL stays in memory, CLI config no longer written** (`#398`; 2 operative files; merge `5467ad8e3`).
+- **uninstallers fail loud, not silent, on non-interactive confirm** (`#399`; 4 operative files; merge `01640220d`).
+- **ps1 ACL check reports coverage honestly** (`#400`; 2 operative files; merge `e4f490042`).
+- **ps1 mcp install claim gates on verification, temp sweep discloses** (`#401`; 2 operative files; merge `14cf05c63`).
+- **ps1 uninstaller verifies removal sites before claiming success** (`#402`; 2 operative files; merge `f822e0aec`).
+- **cli installer discloses a skipped venya-mcp import check instead of claiming install** (`#403`; 2 operative files; merge `5712d022a`).
+- **sandbox setup runs inside the remove guard — a setup raise no longer leaves an orphan VM** (`#406`; 2 operative files; merge `6f381dca2`).
+- **best-effort honest audit row written when the execution relay times out** (`#407`; 2 operative files; merge `deb4d8de0`).
+- **session-secret revoke deletes the session's rows so revoked means non-resolvable** (`#411`; 3 operative files; merge `63318fab8`).
+- **enrollment complete validates token state like the completer, before side effects** (`#412`; 2 operative files; merge `3214d645b`).
+- **server-side user-verification knob wired; enforcement branch reachable** (`#413`; 5 operative files; merge `50bff3b7d`).
+- **get_audit tool text now matches the auditor-tier gate** (`#414`; 2 operative files; merge `e6b6d99a7`).
+- **argv parsed before session creation — malformed commands issue no POST** (`#415`; 2 operative files; merge `fe307908a`).
+- **credential id crosschecked against the attested id before any store/DB write** (`#416`; 7 operative files; merge `df97de63d`).
+- **relayed pre-sandbox rejections now land a command_rejected row on the core ledger** (`#424`; 2 operative files; merge `866af5c50`).
+- **Addressed: installer-reuses-dead-dns-resolver-silently — executor.toml carry-forward skips reachability check** (`#428`; 1 operative file; merge `b120dd3fb`).
+- **Addressed: sbx-exec-env-file-noop — deployed sbx 0.38.0 accepts 'exec --env-file' and injects nothing** (`#430`; 7 operative files; merge `659ba9881`).
+- **Addressed: audit-forwarder-httpx-cert-verify-conflict — forwarder TypeErrors every cycle on httpx2 2.12** (`#432`; 2 operative files; merge `ed73b888b`).
+- **Addressed: audit-spool-forwarder-session-lifetime — forwarder exists only during command sessions** (`#436`; 2 operative files; merge `0f05fa8ac`).
+- **Addressed: cli-windows-posix-geteuid-crash — POSIX-only os.geteuid() calls crash the Windows CLI on setup/exec-register/cert-renew paths** (`#438`; 4 operative files; merge `3eb1db9f9`).
+- **Addressed: auth-me-ignores-bearer-token — a bearer-authenticated client is told it is unauthenticated** (`#445`; 2 operative files; merge `dd32442e2`).
+- **Addressed: shm-session-dir-leak-on-secret-write-failure — staged secret directory survives a mid-stage failure** (`#446`; 2 operative files; merge `ea58056dc`).
+- **Addressed: require-role-blanket-executor-pass — an early return passes every role gate for an executor identity** (`#449`; 8 operative files; merge `658fcd45a`).
+- **Addressed: stage2-decode-swallow-empty-masked-count — an undecodable filter body answers 200 with zero knowledge and no log** (`#452`; 5 operative files; merge `9224c5ddf`).
+- **Addressed: health-probe-cannot-distinguish-uninitialized-from-broken — the readiness surface answers fine for a component it never checked** (`#455`; 3 operative files; merge `48a802bcd`).
+- **Addressed: secret-destroy-failure-warns-and-reports-success — a failed secret destroy leaves material resident and the run green** (`#456`; 2 operative files; merge `07ead2550`, also `68aa9595d`).
+- **Addressed: enrollment-token-used-at-backdated-by-tolerance — one bind value serves the expiry check and the record column** (`#462`; 2 operative files; merge `64a88e691`).
+- **Addressed: zstd-ingest-expands-before-size-brake — the decompression brake is paid for in RAM before it applies** (`#473`; 2 operative files; merge `87b04cd1c`).
+- **Addressed: installer-temps-survive-abort-outside-fetch-trap — CSRs and a large tarball outlive an aborted install** (`#475`; 4 operative files; merge `99302cfef`).
+- **Addressed: cli-cert-save-cleanup-guard-too-narrow — the one staged-temp site guarded by OSError instead of BaseException** (`#476`; 2 operative files; merge `f9833d5ce`).
+- **Addressed: core IP written to /etc/hosts unvalidated — executor installer permits host poisoning** (`#490`; 3 operative files; merge `43b000dcd`).
+- **Addressed: IPv4 validator word-splits unquoted input — wildcard octets expand against the working directory** (`#491`; 2 operative files; merge `3f1bd77b0`).
+- **the relay dial trusts only the configured Venya anchor** (`#501`; 3 operative files; merge `81583b12a`).
+- **the revocation read and the FIDO2 ceremony transport now require an https core URL** (`#521`; 4 operative files; merge `d354917d9`).
+- **the workstation bearer dial now requires its own CA anchor instead of the host store** (`#530`; 4 operative files; merge `89daa44e3`).
+- **the ceremony dial anchors to the Venya CA or refuses** (`#533`; 6 operative files; merge `e3fcc93ba`).
+- **Addressed: cli-register-executor-dial-falls-back-to-host-store — the executor registration dial still accepts the workstation OS trust store** (`#536`; 10 operative files; merge `98ed0493c`).
+- **Addressed: ca-key-load-plaintext-with-passphrase-typeerror — a legacy unencrypted CA key plus a configured passphrase raises TypeError instead of a helpful refusal** (`#541`; 5 operative files; merge `bc75ddc9a`).
+- **Addressed: detect-secrets-hook-rewrites-shared-baseline-mid-commit** (`#546`; 4 operative files; merge `facea4898`).
+- **Addressed: cli init-admin-ca — no-passphrase branch writes plaintext CA key while the server path refuses** (`#547`; 6 operative files; merge `8cfe15104`, also `f9d3dc195`).
+- **Addressed: baseline self-reference makes naive filename greps over-count the detect-secrets baseline** (`#550`; 4 operative files; merge `4cd8a9908`).
+- **Addressed: revocation-list HTTP status error escapes both handlers and stops the executor daemon** (`#551`; 2 operative files; merge `d420b8e5e`).
+- **Addressed: revocation-list-malformed-payload-stops-daemon — a 200 with an unparseable revocation body takes the executor daemon down** (`#552`; 2 operative files; merge `b2fe78e17`).
+- **the sbx store-over-HTTP path is gone: it had no production caller, its two cells passed even with the transport removed so they asserted nothing, and the sentence describing third-party behaviour behind it had never been observed by anyone in this workspace; the generated bandit register moves 64 to 63 in the same commit and the interlock holds, verified by checker with all five veto questions answered by command and output, and independently audited pre-veto by a second seat that confirmed the deletion is complete and no coverage was lost** (`#556`, `#558`; 3 operative files; merge `232e56278`).
+- **the engine comments now name the SET statements they actually guard instead of calling them PRAGMAs, which PostgreSQL has no such statement of; comment prose only, proven by a parse-tree check, and the baseline pointer it moved is a separate commit with its own reason** (`#636`; 2 operative files; merge `e4d3c9688`).
+- **the PostgreSQL test door now says what is wrong with it: a pre-flight at the door's own setup reads the socket or address the URL names, reads the free space on the volume that holds it, and when a leg asked for the door and this host cannot give it, the gated cells are aborted with the cause, the number, the consequence and the fix instead of dying as psycopg2 product reds. Four causes are kept apart on purpose — never started, died mid-run, refused, space low — because a lane told the disk is short when 4.8 GiB is free goes and frees a disk that was never the problem, and a healthy door plus every non-gated cell pass straight through. One shared rule in scripts/pg_door_preflight.py with two thin conftest wirings; the new core conftest is proved inert for the other 542 collected cells and server's hook shadows no fixture, and 29 cells cover the causes, the paired negatives, the redaction, and a contract that walks the tree to assert every gated class actually names the door in its skip reason** (`#650`; 4 operative files; merge `492fe4e3b`).
+- **Addressed: cli-admin-cert-bootstrap-init-gate-self-blocks-first-mint — APIClient constructor requires the pair that admin cert renew exists to create** (`#667`; 3 operative files; merge `413194b1c`).
+- **Addressed: already-revoked-serial-echoes-the-path-executor-id — the duplicate branch answers before the pairing check** (`#687`; 2 operative files; merge `f07066c9a`).
+- **Addressed: legal-command-redirect-starves-remote-sudo-when-sshpass-is-present — the blessed < allowance is legal by validation and un-executable by construction** (`#695`; 2 operative files; merge `41874131f`, also `fa77a48d9`).
+- **batch after the owner read** (`#698`; 2 operative files; merge `dcf25968f`).
 ## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
 
 > This version was **belayed as a release name** by the owner on 2026-10-15 (`decisions.md` s119: "alpha17 belayed as a release name"), and **no `v0.1.0alpha17` tag exists on any face** — the entry body below is kept as the dated record of work that shipped later under `v0.1.0beta1`. Deliberately not written as `## [0.1.0alpha17]`: the bracket form is what a release claim is matched on, and this is not one.
