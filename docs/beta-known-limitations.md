@@ -62,9 +62,9 @@ built) rather than being relabelled as a revocation event.
 **What is NOT enforced.** The other door — the LISTENER, the executor's `:8443` side that
 ACCEPTS a connection — does no **list** consultation at all. Its TLS context is built by
 `RelayListener._build_ssl_context`
-(`packages/executor/src/executor/relay_listener.py:611`) and sets the TLS floor, the
+(`packages/executor/src/executor/relay_listener.py:697`) and sets the TLS floor, the
 executor's own leaf, the CA anchor and `verify_mode = ssl.CERT_REQUIRED`
-(`packages/executor/src/executor/relay_listener.py:626-637`). There is **no CRL load and no
+(`packages/executor/src/executor/relay_listener.py:712-723`). There is **no CRL load and no
 `VERIFY_CRL` flag anywhere in the executor's shipped source** — re-derivable with
 `git grep -i crl -- packages/executor/src`, which returns nothing at this tip, and
 `git grep VERIFY_CRL -- packages/`, whose only hits in the product are the dial line above and
@@ -83,8 +83,8 @@ both after the handshake and before any request byte: `peer_revocation_refusal` 
 `peer_executor_revocation_refusal`, `packages/executor/src/executor/relay_listener.py`.**
 
 What the listener DOES have is a post-handshake accept gate
-(`revocation_accept_reason`, `packages/executor/src/executor/relay_listener.py:326`, fired at
-`packages/executor/src/executor/relay_listener.py:471`). Read it precisely, because it is not
+(`revocation_accept_reason`, `packages/executor/src/executor/relay_listener.py:405`, fired at
+`packages/executor/src/executor/relay_listener.py:550`). Read it precisely, because it is not
 a peer check: it consults the ONE answer this daemon holds about **itself** —
 `DaemonState.revoked` and `revocation_answered`
 (`DaemonState.__init__`, `packages/executor/src/executor/daemon.py:249`,
@@ -96,7 +96,7 @@ executor has been revoked or has received no revocation answer since boot; it ho
 any list and does no serial or identity matching of the peer in front of it **at this gate** — and its own
 contract comment says why — at `:8443` the peer is the core's relay-client credential, which
 the executor-serial list never describes
-(`packages/executor/src/executor/relay_listener.py:335`). **TWO further gates now sit beside this one
+(`packages/executor/src/executor/relay_listener.py:414`). **TWO further gates now sit beside this one
 and do match the peer** — `peer_revocation_refusal` (the #597 registry population) and
 `peer_executor_revocation_refusal` (#586 Gap A, the executor-serial population),
 `packages/executor/src/executor/relay_listener.py` — both reading the ONE serial already taken off the
@@ -150,7 +150,7 @@ dialed. This entry names that half as unobserved and does not claim the dial was
 **Who is affected in the shipped posture.** Reachability, not theory. The listener binds
 `:8443` (`RELAY_PORT`, `packages/executor/src/executor/relay_listener.py:46`) on the executor
 and takes connections from the core network (default `host="0.0.0.0"` in `RelayListener.__init__`,
-`packages/executor/src/executor/relay_listener.py:568`, and the inbound `8443/tcp` rule for an
+`packages/executor/src/executor/relay_listener.py:654`, and the inbound `8443/tcp` rule for an
 executor in [FIREWALL.md](FIREWALL.md):50). The peer that presents at that door is the
 core's relay-client credential, signed by the core installer with a **365-day** validity
 (`-days 365`, `install-venya-core.sh:1026`), CN `${CORE_HOSTNAME}-relay`
@@ -170,7 +170,7 @@ revocation.** That is the owner's ruling, recorded in the shipped source
 `packages/server/src/server/routes/executors.py:2023-2025`); fail-closed on a stale list applies
 at the dial, and killing live sessions is ruled AGAINST, not deferred. The accept point already
 matches that boundary: a refusal happens after the handshake and before any request byte
-(`packages/executor/src/executor/relay_listener.py:515-537`), and the RF-3 admission permit is
+(`packages/executor/src/executor/relay_listener.py:364-386`), and the RF-3 admission permit is
 taken later, inside the handler — so a refusal at accept can only ever deny new work.
 
 **The proof that is half-run.** The physical revoke-then-refuse has now been executed on a served
@@ -209,7 +209,7 @@ the listener refuse new connections. The clock is an hour, not an abstraction: t
 carries `next_update = now + 1 hour` (`packages/server/src/server/ca.py:769`, and the same stamp
 on the admin sibling at `packages/server/src/server/ca.py:1475`), while the listener's published
 context is rebuilt only by `RelayListener.reload_ssl_context`
-(`packages/executor/src/executor/relay_listener.py:688`) whose one production caller is the
+(`packages/executor/src/executor/relay_listener.py:774`) whose one production caller is the
 daemon's rotation arm (`packages/executor/src/executor/daemon.py:2149`) — a 30-day cadence
 (`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:47`). A list baked in at boot is
 therefore certain to lapse inside an hour, and under the ruled fail-closed posture a lapsed list
@@ -240,7 +240,7 @@ assumption is not:
   and `ExecuteHandler.do_POST` refuses it with 403
   (`packages/executor/src/executor/relay_listener.py:116`). It fails closed when the
   list is empty — the listener does not bind at all
-  (`packages/executor/src/executor/relay_listener.py:632-637`, and the same guard in
+  (`packages/executor/src/executor/relay_listener.py:718-723`, and the same guard in
   `ExecutorDaemon.start` at `packages/executor/src/executor/daemon.py:1947`). Caveat that
   matters: the executor installer
   **rewrites** this key on every run (`relay_client_ids = ["${CORE_HOSTNAME}-relay"]`,
@@ -934,10 +934,13 @@ leaves with it.
 ### `sshpass` with a redirect aimed at a remote `sudo -S` does not deliver the password
 
 Status: known limitation in beta · Target: `#696` (a per-command ceiling plus cancel), which does not
-gate this release · Tracked as: `#695` (open — **this entry is the disclosure that answers its AC2**, and
-the owner ruled it in this form: document the collision, keep the capability, and land `#696` as the real
-protection. The `#695` AC1 **code** is on the line; whether AC1 **holds** is unmeasured — see the stdin
-note below.)
+gate this release · Tracked as: `#695` (**closed** 2026-10-22 — read back from the tracker API at
+`state=closed`, `labels=component/executor,severity/medium,status/closed`, having been re-graded from
+HIGH to medium on the owner's word with this entry as the disclosure. **The row closed on
+documentation and a corrected severity, not on a measured fix** — which is why the stdin paragraph below
+keeps its unmeasured caveat rather than claiming closure), and the owner ruled it in this form: document
+the collision, keep the capability, and land `#696` as the real protection. The `#695` AC1 **code** is on
+the line; whether AC1 **holds** is unmeasured — see the stdin note below.)
 
 **Who is affected:** anyone storing an `ssh-password` secret and trying to escalate on the far side of
 an `ssh` hop in the same command — the shape that reads naturally, and the shape that does not work.
@@ -970,6 +973,60 @@ alternative is offered beyond the two above.
 per-command ceiling plus a client-side cancel). It is a separate code leg, it does not gate this release,
 and this entry claims nothing about its behavior before it lands; if a supported shape for password auth
 plus unattended remote `sudo` is ever built, this entry is deleted rather than softened.
+
+---
+
+### A revoked or unreachable executor is refused, and only one of the two reasons reaches the operator
+
+Status: known limitation in beta · Target: `#697` (both halves landed on `dev` at `6e3e6585` — the
+mechanism is shipped; what remains is a physical observation, not code, and that keeps this row open) · Tracked as: `#697`
+
+**Who is affected:** anyone relaying a command to an executor whose relay listener will not take the
+connection — a credential the core has revoked, or a daemon that has not been able to ask the core
+whether its credential is revoked.
+
+**What the limitation is:** the listener on `:8443` consults the one revocation answer this side holds
+(`revocation_accept_reason`) and refuses with one of two named classes, and **the two reach the operator
+differently.**
+
+- **An operational fault** — `REFUSE_NO_ANSWER` (the core has neither confirmed nor revoked this
+  credential this boot) or `REFUSE_NOT_WIRED` (the listener holds no daemon state) — is answered with a
+  real HTTP 503 whose JSON `detail` is that sentence (`send_refusal_notice`). The core forwards it
+  because it opens with one of exactly two accepted prefixes — `"Command rejected:"` (a policy refusal,
+  `#410`) and `"503 OPERATIONAL FAULT — "` (`#697`) — so what the operator reads is the daemon's own
+  words, and the remedy they can act on is inside them: check core reachability, not re-enroll.
+- **A revocation** — `REFUSE_REVOKED`, and the two peer classes `REFUSE_PEER_REVOKED` /
+  `REFUSE_PEER_EXECUTOR_REVOKED` — **still closes the connection with no HTTP response at all.** That
+  asymmetry is deliberate, and it is the limitation that remains: a revocation is a security ASSERTION
+  about a credential, and answering it over the wire would let any peer probe which credentials a
+  registry has killed. Those cases surface as a transport failure named by the core's own arm for that
+  class (`"Executor unreachable (connection refused)"`, or the same family's mid-response variant), and
+  the exact sentence is found in the executor's journal and its `relay_refused` audit record — not on
+  the screen.
+
+Two properties of the fault notice are load-bearing, and they are stated because they are what makes it
+safe to emit at the door at all: it is written **before a single request byte is read** (a peer that
+transmits no request at all still receives it — that is the measured form of "this door never hands an
+unauthenticated peer a parser"), and it is written **and then the connection is closed and the refusal is
+still raised** — a notice is not an admission, so nothing that was refused can execute, and the accept
+path's write is bounded so a peer that never reads cannot stall the next connection.
+
+**What is NOT claimed here:** that an operator reading a refusal has been shown the executor's own words
+for **every** class — see the asymmetry above. And above the line where the client lifts the core's JSON
+`detail` into its error and prints it, the **MCP tool-level wrap is UNREAD**: which words each MCP tool
+prints from that error was not traced, and only `run_command` has been driven through it. Do not read
+this entry as a statement that the whole client surface shows the reason; it is a statement about the
+core's forwarding rule and the listener's notice, tested at the door, at the route, and at the
+`run_command` render. Also not claimed: that a fault ever reads as a revocation — the two classes carry
+different openings by design (`#603`), and the prefix that opens the forwarding door cannot pass
+`403 REVOKED` through it. And **no physical fleet observation of the whole path has been made**: the
+notice is verified over real TLS on loopback, which is not a guest on a network.
+
+**What changes at beta+:** the remaining half is observation, not mechanism — a real unanswered-or-unwired
+daemon on a real network, its sentence read at the operator's screen, and the same driven for the revoked
+class so the asymmetry above is confirmed rather than assumed. If the owner ever rules that a revocation
+may also be spoken on the wire, that is a separate decision with the probe cost this entry names; if the
+asymmetry is kept, this entry stays and is never softened.
 
 ---
 
