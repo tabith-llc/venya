@@ -98,27 +98,27 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     ),
     f"{E}:775": (E, "def _dial_crl_verdict_for", 1, "pin"),
     # ---- #586 entry: the listener door
-    "packages/executor/src/executor/relay_listener.py:611": (R, "def _build_ssl_context", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:626-637": (
+    "packages/executor/src/executor/relay_listener.py:697": (R, "def _build_ssl_context", 1, "pin"),
+    "packages/executor/src/executor/relay_listener.py:712-723": (
         R,
         "context.verify_mode = ssl.CERT_REQUIRED",
         1,
         "pin",
     ),
-    "packages/executor/src/executor/relay_listener.py:326": (R, "def revocation_accept_reason", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:471": (
+    "packages/executor/src/executor/relay_listener.py:405": (R, "def revocation_accept_reason", 1, "pin"),
+    "packages/executor/src/executor/relay_listener.py:550": (
         R,
         "reason = revocation_accept_reason(self.revocation_state)",
         1,
         "pin",
     ),
-    "packages/executor/src/executor/relay_listener.py:335": (R, "the EXECUTOR-serial list never describes", 1, "pin"),
+    "packages/executor/src/executor/relay_listener.py:414": (R, "the EXECUTOR-serial list never describes", 1, "pin"),
     f"{R}:116": (R, "peer_cn not in self.server.allowed_client_ids", 1, "pin"),
     f"{R}:46": (R, "RELAY_PORT = 8443", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:568": (R, 'host: str = "0.0.0.0"', 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:515-537": (R, "ConnectionRefusedError(reason)", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:632-637": (R, "relay_client_ids is empty", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:688": (R, "def reload_ssl_context", 1, "pin"),
+    "packages/executor/src/executor/relay_listener.py:654": (R, 'host: str = "0.0.0.0"', 1, "pin"),
+    "packages/executor/src/executor/relay_listener.py:364-386": (R, "ConnectionRefusedError(reason)", 1, "pin"),
+    "packages/executor/src/executor/relay_listener.py:718-723": (R, "relay_client_ids is empty", 1, "pin"),
+    "packages/executor/src/executor/relay_listener.py:774": (R, "def reload_ssl_context", 1, "pin"),
     # ---- #586 entry: the daemon state machine
     f"{D}:249": (D, "self.revoked = False", 1, "pin"),
     f"{D}:255": (D, "self.revocation_answered = False", 1, "pin"),
