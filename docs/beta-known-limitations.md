@@ -576,8 +576,8 @@ key-custody paths, not day-to-day use. The stored files are `0600` and root- or
 different reasons. The count is live call sites, not grep hits —
 `git grep -n 'NoEncryption()' <ref> -- 'packages/*/src/*'` returns **six lines** at this anchor,
 and four of them are comments, not calls: three sit inside writers that now encrypt
-(`cmd_admin_cert_renew`, `packages/cli/src/venya_cli/commands.py:2139`; `executor_register`,
-`packages/cli/src/venya_cli/commands.py:3316`; `executor_cert_renew`, `packages/cli/src/venya_cli/commands.py:3753`, each describing the shape the
+(`cmd_admin_cert_renew`, `packages/cli/src/venya_cli/commands.py:2157`; `executor_register`,
+`packages/cli/src/venya_cli/commands.py:3334`; `executor_cert_renew`, `packages/cli/src/venya_cli/commands.py:3771`, each describing the shape the
 writer replaced) and one is the `key_passphrase` module docstring
 (`packages/executor/src/executor/key_passphrase.py:10`), which says outright that the executor leaf
 key *used to* be serialized that way. The two that remain are the pair below. Re-derive it that
