@@ -586,7 +586,8 @@ Notable changes to Venya will be documented in this file.
   that is interrupted cannot leave a mismatched pair or overwrite its own trust anchor. Merges `04c1c28ca`, `0c44386fe`, `919298256`, `2cb92a425`, `e52e9589c`. Tickets named by those merges: (`#316`)
   (`#361`) (`#500`).
 - **Admin certificates are short-lived, and status tells you which one you are holding.** A renewed admin certificate is issued short-lived, an expired one is refused rather than presented, and the
-  fingerprint context it was issued into is named. Merges `41d49426c`, `f6a1120c2`, `e07b5ada1`, `a28e6355d`, `e606be446`, `7309444bd`. Tickets named by those merges: (`#504`).
+  fingerprint context it was issued into is named. Merges `41d49426c`, `f6a1120c2`, `e07b5ada1`, `a28e6355d`, `e606be446`. Tickets named by those merges: (`#504`).
+- **A loose admin key is now reported instead of silently accepted.** The CLI checks the mode bits on the admin mTLS key file on POSIX and prints a `warning:` naming the path, the mode it found and the `0600` it wants when group or other can read it; the trigger is the group/other read bits, correct modes stay silent, and it **warns and never blocks** — the exit code, stdout and every request the CLI makes are unchanged. Merges `7309444bd`.
 - **Every trust decision goes to the configured CA anchor, and plaintext is refused.** Setup, config-set, register and the MCP dial refuse a non-TLS origin; the executor's dials trust only the CA
   installed on this host, not the host store added to it; admin mTLS is gated on both of its values being set; CSR signing accepts the curves the register route advertises. Merges `896e0dca4`,
   `c58bec54c`, `815a882ee`, `2728796d9`, `549179373`, `c4ef6afc0`, `b9e9e622f`, `d59a06803`. Tickets named by those merges: (`#17`) (`#506`) (`#508`).
@@ -596,13 +597,15 @@ Notable changes to Venya will be documented in this file.
   asserting one. Merges `685e3cca9`, `fcd1b34c6`, `daf745e2b`. Tickets named by those merges: (`#481`) (`#666`).
 - **Authorization is scoped to the caller, and unauthenticated paths that could claim an identity are closed.** Secret writes and session reads are checked against the calling principal, the
   registration route refuses an unauthenticated takeover, the reset wipe is no longer reachable as a race, and role removal or admin disable refuse the state that leaves no way back in. Merges
-  `50364584a`, `03097624f`, `0dd03ae0f`, `f159fcc13`, `851f7e6db`, `bdf6e073b`, `985acc698`, `08bf24df5`, `d3245c739`. Tickets named by those merges: (`#3`) (`#15`) (`#16`) (`#450`).
+  `50364584a`, `03097624f`, `0dd03ae0f`, `f159fcc13`, `851f7e6db`, `bdf6e073b`, `08bf24df5`, `d3245c739`. Tickets named by those merges: (`#3`) (`#15`) (`#16`) (`#450`).
+- **Re-running init over a database that was wiped but still seeded converges instead of failing.** Role creation is now get-or-create on `roles.name`, so the stale-roles path no longer raises; the full detail, including any SQL, is logged server-side and the client receives a generic `Reset failed` rather than the internals. Merges `985acc698`.
 - **Elevation is bound to the session that asked for it.** An elevation token is bound to the session and challenge state it was minted with, and refresh refuses when no active user backs it. Merges
   `d3b264a48`, `53352d089`, `ce81db155`, `efa7660ef`, `d8ec78f18`. Tickets named by those merges: (`#341`) (`#345`).
 - **Failures that were swallowed, or read clean without having run, are reported — and a configured ceiling is obeyed.** The concurrency ceiling is read from configuration, a capture honours its
   timeout, a relay stop runs its cleanup under systemd, credential load and removal stop swallowing failures, a file-descriptor scan with an empty set no longer reads clean, and debug logging stopped
-  carrying session cookies. Merges `dca43dd43`, `ea9414175`, `02823ab7f`, `2d51ed9f2`, `3527ce4fd`, `7525d072c`, `8078a4a33`, `19aabdada`, `876286ab2`, `8f7647a3e`, `ad8e5f59e`. Tickets named by those
+  carrying session cookies. Merges `dca43dd43`, `ea9414175`, `02823ab7f`, `2d51ed9f2`, `3527ce4fd`, `7525d072c`, `19aabdada`, `876286ab2`, `8f7647a3e`, `ad8e5f59e`. Tickets named by those
   merges: (`#453`) (`#477`).
+- **The broken browser-enrolment FIDO2 helper is removed, and with it the `venya-fido2` command.** The server no longer ships `server.fido2.cli_enroll` (228 lines) or its tests (121 lines), the `venya-fido2` console entry point is gone from the server package, and the generated suppression register moved down with it — the page and the dependency list are already in step, so nothing else rides on the removal. Merges `8078a4a33`.
 - **Requirements are now generated from the lock, so an install gets the versions that were tested.** The core and executor
   requirement files went from five hand-written lines to a frozen `uv export` pin set (125 and 92 lines added), so a fresh
   install resolves the same third-party versions the project tested against instead of whatever the index offers that day;
