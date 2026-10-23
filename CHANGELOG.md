@@ -4,8 +4,19 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
-- Nothing is unreleased at this cut: the entries that sat here are folded
-  into `0.1.0beta1` below, in this same commit.
+At the `v0.1.0beta1` cut (`e9c7c25`) this section was emptied — the entries that sat there
+were folded into `0.1.0beta1` in that same commit. One row has landed since that cut:
+
+- **`venya admin split-ca-key` no longer leaves the key material in its own buffer
+  (`#674` AC3).** The splitter builds a working copy of what it is handed — a checksum
+  plus the key — and until now that copy stayed as it was when the command finished. It is
+  now cleared on every path out of the splitter, including the one where a failure lands
+  part-way through the work. No format change, no encryption change, no migration: the
+  share files an operator already holds are the same bytes, and they restore the same key.
+  This completes the custody change the `0.1.0beta1` section describes for the split and
+  restore commands, which covered the holder's copy; the splitter's copy is this row.
+  The cleared buffer is the splitter's own: the promise is that copy is erased, not that
+  no other copy exists in the process.
 
 ## [0.1.0beta1] - 2026-10-23
 

@@ -28,6 +28,8 @@ Usage:
 import hashlib
 import os
 
+from .secret_holder import _erase
+
 # AES irreducible polynomial: x^8 + x^4 + x^3 + x + 1
 _MODULUS = 0x11B
 
@@ -94,8 +96,11 @@ def split(secret: bytes | memoryview, threshold: int, shares: int) -> list[bytes
     Args:
         secret: The secret bytes to split. Accepts a read-only ``memoryview`` so a
             caller holding the secret in a :class:`SecretHolder` (#538/#674) can
-            feed this without copying plaintext into a fresh ``bytes``; the payload
-            built below is this function's own copy and is not erased here.
+            feed this without copying plaintext into a fresh ``bytes``. The payload
+            built below is this function's own copy, and #674 AC3 erases THIS copy on
+            every exit path. The promise is erasure of this buffer, not residency: a
+            caller that handed in ``bytes`` keeps its own copy, ``cryptography``
+            allocates copies too, and this function neither owns nor reaches them.
         threshold: Minimum shares needed to reconstruct (K).
         shares: Total number of shares to create (N).
 
@@ -113,34 +118,48 @@ def split(secret: bytes | memoryview, threshold: int, shares: int) -> list[bytes
     if shares > 255:
         raise ValueError("Maximum 255 shares supported")
 
-    payload = _checksum(secret) + secret
+    # #674 AC3. The three refusals above run BEFORE any copy of the secret is made, so
+    # those paths hold nothing to erase. From here down the payload is this call's own
+    # plaintext copy and it is zeroed in a ``finally``, which covers a success return,
+    # an exception raised mid-loop, and an allocation that fails part-way (an empty
+    # buffer costs the erase nothing). A ``bytearray`` is the only workable shape here:
+    # the house eraser refuses a ``memoryview`` and demands the buffer that OWNS the
+    # memory, because a zeroizer that quietly does nothing is worse than none.
+    payload = bytearray()
+    try:
+        payload += _checksum(secret)
+        payload += secret
 
-    result: list[bytes] = []
+        result: list[bytes] = []
 
-    for i in range(len(payload)):
-        # Random polynomial of degree (threshold - 1) with payload[i] as constant term
-        coeffs = [payload[i]]
-        for _ in range(threshold - 1):
-            coeffs.append(ord(os.urandom(1)))
+        for i in range(len(payload)):
+            # Random polynomial of degree (threshold - 1) with payload[i] as constant term
+            coeffs = [payload[i]]
+            for _ in range(threshold - 1):
+                coeffs.append(ord(os.urandom(1)))
 
-        # Evaluate polynomial at points 1, 2, ..., shares
-        share_bytes = []
-        for x in range(1, shares + 1):
-            y = 0
-            for coeff in reversed(coeffs):
-                y = _gf256_add(_gf256_mul(y, x), coeff)
-            share_bytes.append(y)
+            # Evaluate polynomial at points 1, 2, ..., shares
+            share_bytes = []
+            for x in range(1, shares + 1):
+                y = 0
+                for coeff in reversed(coeffs):
+                    y = _gf256_add(_gf256_mul(y, x), coeff)
+                share_bytes.append(y)
 
-        result.append(bytes(share_bytes))
+            result.append(bytes(share_bytes))
 
-    # Transpose: each share gets one byte from each position
-    transposed: list[bytearray] = [bytearray() for _ in range(shares)]
-    for share in result:
-        for i, byte_val in enumerate(share):
-            transposed[i].append(byte_val)
+        # Transpose: each share gets one byte from each position
+        transposed: list[bytearray] = [bytearray() for _ in range(shares)]
+        for share in result:
+            for i, byte_val in enumerate(share):
+                transposed[i].append(byte_val)
 
-    # V2 wire format: id (1-indexed) | magic | K | shard
-    return [bytes([i + 1]) + _V2_MAGIC + bytes([threshold]) + share for i, share in enumerate(transposed)]
+        # V2 wire format: id (1-indexed) | magic | K | shard. The concatenation makes a
+        # fresh ``bytes`` per share, so the returned shares do not alias ``transposed``
+        # and the erase below cannot reach them.
+        return [bytes([i + 1]) + _V2_MAGIC + bytes([threshold]) + share for i, share in enumerate(transposed)]
+    finally:
+        _erase(payload)
 
 
 def combine(shares: list[bytes]) -> bytes:
