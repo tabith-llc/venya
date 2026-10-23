@@ -106,8 +106,8 @@ def test_chain_is_linear_with_one_head():
     # what the cell guards, the identifier is the acknowledgement.
     # head history: 037 -> 038 (attestation store) -> 039 (#591 cascade parity)
     # -> 040 (#597 core relay credential registry) -> 041 (#684 admin credential registry)
-    # -> 042 (#689 relay CN column-comment scrub).
-    assert heads == ["042"], f"expected exactly one head (042), got {heads}"
+    # -> 042 (#689 relay CN column-comment scrub) -> 043 (PB-597T2 revocation epoch counter).
+    assert heads == ["043"], f"expected exactly one head (043), got {heads}"
 
     # walk back from the head: everything reachable, no cycle
     seen = set()
