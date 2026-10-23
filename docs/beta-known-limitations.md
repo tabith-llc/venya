@@ -975,8 +975,8 @@ plus unattended remote `sudo` is ever built, this entry is deleted rather than s
 
 ### A revoked or unreachable executor can be refused with a reason the operator never sees
 
-Status: known limitation in beta · Target: `#697` (its server-side half merged; the emitting half does
-not exist yet) · Tracked as: `#697`
+Status: known limitation in beta · Target: `#697` (its server-side half sits on an unmerged branch —
+nothing has merged to `dev`; the emitting half does not exist yet) · Tracked as: `#697`
 
 **Who is affected:** anyone relaying a command to an executor whose relay listener will not take the
 connection — a credential the core has revoked, or a daemon that has not been able to ask the core
