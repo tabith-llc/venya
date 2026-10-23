@@ -295,6 +295,12 @@ that fails, and it fails for three separate reasons:
   `venya` identity is the recipe.** That mode is deliberate (#610: `install -d`
   re-applies the mode on every run, and a group bit left the machine-plane key
   directory group-writable on every re-run). Do not widen it.
+  Expect the refusal to arrive as a shell error, not a venya one. On the default
+  install directory `/opt/venya` is itself `drwxr-x--- venya:venya`, so an ordinary
+  login cannot even execute `/opt/venya/.venv/bin/venya`: the shell says
+  `Permission denied` and the exit status is **126**, one step ahead of the pair
+  above. That is this control working, not a broken install. The fix is the
+  `venya` identity, never a `chmod` on your own copy.
 - **The assignments go inside `env`, not in front of `sudo`.** `sudo`'s `env_reset`
   does not carry your shell's variables across the privilege change, so an
   `export`-ed `SSL_CERT_FILE` arrives unset. And putting the assignment after
@@ -349,6 +355,13 @@ that swallows the output loses that. Verify the file itself:
 sudo -u venya test -s /secure/enroll/token && echo "token present"
 sudo -u venya ls -l /secure/enroll/    # token 0600, directory 0700, plus core-server-ca.crt / admin-ca.crt
 ```
+
+Pick the output directory so the **`venya`** identity can create it, not so yours
+can — the command runs as `venya` and makes that directory as `venya`. A path
+inside your own home directory is refused outright, with
+`Enrollment failed: cannot create --output-dir <path>: Permission denied. Nothing
+was minted.` and exit status 1. That refusal is the ordering above doing its job:
+nothing was minted, so a failed run leaves no stale token to clean up.
 
 Without `--output-dir` the token is printed to stdout and written nowhere, so capture
 it from the output instead of looking for a file.
