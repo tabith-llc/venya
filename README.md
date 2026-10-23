@@ -15,9 +15,10 @@
 Every mechanism named on this page is in the open: what a control enforces is written in
 the doc that governs it, and you can hold the code to it.
 
-- **Command policy, before execution.** A default blocklist (`scp`, `rsync`, `nc`, `sudo`,
-  `su`, `dd`, `rm -rf`, `mkfs`, `shred`, `mount`, `insmod`, `modprobe`, `chmod 4755`,
-  `setuid`) ships on every executor, and an administrator can replace it wholesale —
+- **Command policy, before execution.** The default blocklist — `scp`, `rsync`, `nc`,
+  `ncat`, `sudo`, `su`, `dd`, `rm -rf`, `mkfs`, `fdisk`, `shred`, `mount`, `insmod`,
+  `modprobe`, `chmod 4755`, `setuid` — ships on every executor, and an administrator can
+  replace it wholesale —
   [docs/agents.md](docs/agents.md) "Hard rules" is the authority for what it covers, and
   it covers the **local (sandbox) half** of an `ssh`/`sshpass` command: tokens past the
   destination are remote-side and are not scanned by it. Name that scope when you depend
