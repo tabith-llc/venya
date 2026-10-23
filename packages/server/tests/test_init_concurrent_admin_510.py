@@ -305,16 +305,16 @@ class TestSupersedeAndHappyPathStayGreen:
         # The abandoned row a device-less init commits before it dies.
         with SessionLocal() as s:
             admin_role = s.query(Role).filter(Role.name == "admin").one()
-            s.add(User(user_id="dusty", auth_mode="security-key", enrolled_at=None))
-            s.add(RoleMember(user_id="dusty", role_id=admin_role.id))
+            s.add(User(user_id="admin-user", auth_mode="security-key", enrolled_at=None))
+            s.add(RoleMember(user_id="admin-user", role_id=admin_role.id))
             s.commit()
 
-        assert client.post("/api/v1/init", json={"user_id": "dusty"}).status_code == 201
-        resp = _complete(client, "dusty")
+        assert client.post("/api/v1/init", json={"user_id": "admin-user"}).status_code == 201
+        resp = _complete(client, "admin-user")
         assert resp.status_code == 201, resp.text
         assert resp.json()["recovery_code"]
         with SessionLocal() as s:
-            assert _enrolled_admins(s) == ["dusty"]
+            assert _enrolled_admins(s) == ["admin-user"]
             assert s.query(WebAuthnCredential).count() == 1
 
     def test_abandoned_pending_under_a_new_user_id_still_completes(self, tmp_path):
