@@ -26,7 +26,7 @@ Truth table (every accept paired with its reject, per the AGENTS truth-table rul
 
 Membership is decided with the shipped `serial_match_clause` (#481), never a raw string compare,
 so a legacy unpadded/uppercase record row is still found; and every teardown here deletes by the
-CANONICAL form the route stores, which is the instrument defect flash1 hit when its first cleanup
+CANONICAL form the route stores, which is the instrument defect a prior worker lane hit when its first cleanup
 filtered the typed spelling and deleted zero rows.
 
 Real SQLite on the shipped `env` fixture (FKs on, `require_admin` overridden) — sibling-module

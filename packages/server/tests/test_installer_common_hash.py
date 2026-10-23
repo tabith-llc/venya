@@ -71,7 +71,7 @@ def _embed(src: str, hash_hex: str) -> str:
 
 def _legacy_guard(name: str, hash_hex: str) -> str:
     """Pre-#368 bytes reproduced from source: contiguous comparison literal
-    plus unanchored global embed — the self-nulling combination flash1 proved."""
+    plus unanchored global embed — the self-nulling combination a prior worker lane proved."""
     src = (REPO_ROOT / name).read_text(encoding="utf-8")
     assert SPLIT_LITERAL in src, "test expects the fixed source to carry the split literal"
     src = src.replace(" = " + SPLIT_LITERAL, ' = "' + PLACEHOLDER + '"')

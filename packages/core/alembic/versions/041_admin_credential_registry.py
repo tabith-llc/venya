@@ -14,7 +14,7 @@ Part of #684 (`admin-revoke-accepts-a-serial-no-credential-holds`). The defectiv
 validated the FORMAT of the operator's string and then blind-inserted an
 `AdminCertRevocation` row, so `venya admin revoke-admin-cert --serial <any hex>` exited 0
 and wrote a revocation naming a serial no credential ever held, while the live admin
-credential kept transacting — measured physically by `flash6` at leg 232, against the
+credential kept transacting — measured physically by a prior worker lane at leg 232, against the
 sibling relay route (`core_relay_certs.py`), which refuses the identical string with
 `REFUSE_UNREGISTERED`. A membership check needs something to be a member OF, and on this
 plane nothing existed: `AdminCertRevocation` (`models.py:613`) was the only

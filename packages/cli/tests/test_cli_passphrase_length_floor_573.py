@@ -208,7 +208,7 @@ class TestLeafKeyWriteDoors:
         ca = _ca_dir(tmp_path)
         out = tmp_path / "leaf"
         monkeypatch.setenv(ADMIN_ENV, _BELOW)
-        args = SimpleNamespace(identity="dusty", output_dir=str(out), ca_dir=str(ca))
+        args = SimpleNamespace(identity="admin-user", output_dir=str(out), ca_dir=str(ca))
         assert cmd_admin_generate_admin_cert(args) == 1
         assert not out.exists()
         err = capsys.readouterr().err

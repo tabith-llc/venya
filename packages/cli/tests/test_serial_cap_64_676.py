@@ -30,7 +30,7 @@ from unittest.mock import MagicMock
 import pytest
 from venya_cli.commands import cmd_admin_core_relay_cert, cmd_admin_revoke_admin_cert, executor_cert_revoke
 
-# The measured shape from the field: ultra's installer-minted leaf began 5803696f and ended f69d0b.
+# The measured shape from the field: a prior lane's installer-minted leaf began 5803696f and ended f69d0b.
 SERIAL_40 = "5803696f1234567890abcdef1234567890f69d0b"  # pragma: allowlist secret
 SERIAL_64 = "f" * 64
 TOO_LONG = "a" * 65

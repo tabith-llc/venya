@@ -234,7 +234,7 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     # and the two later entries were dead code the moment the file loaded. They are removed rather than
     # kept-and-keyed-by-line: the lookup key IS the coordinate as the page prints it, so a line number
     # cannot join it without changing what `parse_cites()` matches, and nothing was gained because the
-    # duplicated meanings were the same. #675 (flash2) added `audit_keys()` in the generator, which
+    # duplicated meanings were the same. #675 (a prior worker lane) added `audit_keys()` in the generator, which
     # counts keys in the SOURCE before the dict collapses them; it is now the thing that keeps a
     # re-pin from clobbering a cite's meaning, so do not re-introduce a duplicate to satisfy it.
 }

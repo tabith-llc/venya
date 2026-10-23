@@ -126,7 +126,7 @@ def is_passphrase_below_floor(passphrase: bytes | str | None) -> bool:
 def short_passphrase_refusal(subject: str = DB_PASSPHRASE_ENV, *, read_path: bool = False) -> str:
     """Owner-blessed refusal text for a passphrase under the floor, on the DB-KEK plane.
 
-    The block is the one ruled in as R5(a) (flash1's §6, with the two authorized
+    The block is the one ruled in as R5(a) (a prior worker lane's §6, with the two authorized
     corrections applied) — the same bytes ``server/ca.py`` and ``venya_cli.commands``
     ship, with only the SUBJECT and the plane's ARTIFACT nouns varied, exactly as
     ``executor/key_passphrase.py`` did for its plane in #565. Both numbers interpolate

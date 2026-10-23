@@ -63,7 +63,7 @@ already there. Non-vacuity of 5 and 6 is
 pinned IN-TREE by ``test_control_c_fixture_is_caught_by_the_helper_walk``,
 ``test_control_c_unbound_helper_fails_closed`` and
 ``test_control_d_fixture_is_caught_by_the_barrier_walk``: controls C and D are the shapes
-``flash5`` measured GREEN at s121, committed here as source text and fed to the same detector
+A prior worker lane measured GREEN at s121, committed here as source text and fed to the same detector
 functions the shipped claims run. Revert the helper walk or the barrier claim and those cells
 fail loudly instead of quietly agreeing with the tree.
 
@@ -682,7 +682,7 @@ def test_every_barrier_a_gated_cell_reaches_is_bounded(path: Path) -> None:
 
 
 # -------------------------------------------------------------------------------------
-# The paired negatives AC1 asks for. Controls C and D are the shapes flash5 measured GREEN
+# The paired negatives AC1 asks for. Controls C and D are the shapes a prior worker lane measured GREEN
 # at s121 (28/28) — they are reproduced here as committed source, fed to the same detector
 # functions the two claims above run, and required to be caught. Revert the helper walk or
 # the barrier claim and these cells fail loudly rather than quietly agreeing with the tree.

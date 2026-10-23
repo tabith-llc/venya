@@ -465,19 +465,19 @@ class TestInitCoreRealDB:
         # device-less failed ceremony leaves behind.
         with SessionLocal() as s:
             admin_role = s.query(Role).filter(Role.name == "admin").first()
-            s.add(User(user_id="dusty", auth_mode="security-key", enrolled_at=None))
-            s.add(RoleMember(user_id="dusty", role_id=admin_role.id))
+            s.add(User(user_id="admin-user", auth_mode="security-key", enrolled_at=None))
+            s.add(RoleMember(user_id="admin-user", role_id=admin_role.id))
             s.commit()
 
-        resp = client.post("/api/v1/init", json={"user_id": "dusty"})
+        resp = client.post("/api/v1/init", json={"user_id": "admin-user"})
         assert resp.status_code == 201, resp.text  # pre-fix: 409 "pending enrollment exists"
         assert "challenge_id" in resp.json()
 
         with SessionLocal() as s:
-            # superseded, not duplicated: exactly one pending 'dusty' admin remains
-            assert s.query(User).filter(User.user_id == "dusty").count() == 1
-            assert s.query(RoleMember).filter(RoleMember.user_id == "dusty").count() == 1
-            assert s.query(User).filter(User.user_id == "dusty").first().enrolled_at is None
+            # superseded, not duplicated: exactly one pending 'admin-user' admin remains
+            assert s.query(User).filter(User.user_id == "admin-user").count() == 1
+            assert s.query(RoleMember).filter(RoleMember.user_id == "admin-user").count() == 1
+            assert s.query(User).filter(User.user_id == "admin-user").first().enrolled_at is None
 
     def test_completed_admin_still_409(self, tmp_path):
         """PAIRED NEGATIVE for Fix 3: supersede only touches UNENROLLED pending
@@ -490,8 +490,8 @@ class TestInitCoreRealDB:
         client, SessionLocal = _build_real_init_app(tmp_path, seed_roles=True)
         with SessionLocal() as s:
             admin_role = s.query(Role).filter(Role.name == "admin").first()
-            s.add(User(user_id="dusty", auth_mode="security-key", enrolled_at=datetime.now(UTC)))
-            s.add(RoleMember(user_id="dusty", role_id=admin_role.id))
+            s.add(User(user_id="admin-user", auth_mode="security-key", enrolled_at=datetime.now(UTC)))
+            s.add(RoleMember(user_id="admin-user", role_id=admin_role.id))
             s.commit()
 
         resp = client.post("/api/v1/init", json={"user_id": "mallory"})
@@ -499,4 +499,4 @@ class TestInitCoreRealDB:
         assert "already initialized" in resp.json()["detail"]
         with SessionLocal() as s:
             # the real (enrolled) admin was NOT superseded
-            assert s.query(User).filter(User.user_id == "dusty").count() == 1
+            assert s.query(User).filter(User.user_id == "admin-user").count() == 1

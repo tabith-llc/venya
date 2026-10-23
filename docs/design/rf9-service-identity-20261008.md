@@ -1,6 +1,6 @@
 # RF-9 — Service identity inside the `split` model: design confirmation
 
-**Confirmation leg (flash2, 2026-10-08).** RF-6 (`docs/design/rf6-shortcert-dossier-20261007.md`) §9 was approved
+**Confirmation leg (a prior worker lane, 2026-10-08).** RF-6 (`docs/design/rf6-shortcert-dossier-20261007.md`) §9 was approved
 by the owner 2026-10-08 and already answers the RF-9 question. This file is the confirmation artifact: §9's claims
 re-verified against the live tree, the four headless cases walked against it, the acceptance list restated for the
 implementers, and the three open choices proposed — not decided — with a recommendation each. Zero product code.

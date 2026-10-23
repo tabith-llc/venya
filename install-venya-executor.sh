@@ -741,7 +741,7 @@ fi
 # The 0750 dir pin was born inside the deferred-token guard below, so the
 # immediate-register path (CA_INSTALLED=true) skipped it and a pre-existing
 # world-writable /var/lib/venya/executor survived a fully green install
-# (physical: flash4 LEG-3 sweep X7, venya-exec-2, 2026-10-02; re-confirmed
+# (physical: a prior worker lane's LEG-3 sweep X7, venya-exec-2, 2026-10-02; re-confirmed
 # clean re-run + lead live stat). Readers: the daemon (User=venya = owner)
 # and root only. Runs EVERY install; `install -d` resets mode AND owner on
 # existing dirs. Placed after the common venya_create_directories chown-R

@@ -9,7 +9,7 @@
 This file used to pin a DUAL-ARC READ: the registered arc, plus a bounded
 transition window that also resolved an older arc belonging to a different
 enterprise, so alpha-era leaves kept working. That window is CLOSED. The owner
-ruled (2026-10-16, relayed via courier, recorded on #601) that nothing
+ruled (2026-10-16, relayed via the dispatch seat, recorded on #601) that nothing
 alpha-era is supported — no backwards compatibility with alpha — so there is no
 old-arc credential to protect and the read branch came out with it. What this
 file now pins is the paired negative the shipped source always demanded at the

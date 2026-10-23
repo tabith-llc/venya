@@ -26,7 +26,8 @@ scrub BEFORE tagging.").** The extension left two structural holes, both found
 by reading this file rather than by trusting its name:
 
 1. **IP-literal-only.** An RFC1918 regex cannot see a hostname (`montana`,
-   `idaho`), an operator email (`dust@…`) or a workspace path (`/media/dust`).
+   `idaho`), an operator email (the local-part-at-host form the guard names) or a workspace path
+   (`/media/dust`).
    The 2026-10 tree sweep therefore cleaned the addresses and shipped the site
    names. `DEV_HOSTNAME`, `OPERATOR_IDENTITY` and `WORKSPACE_PATH` close that.
 2. **Scan-root blind spot.** `BUNDLE_SCAN_ROOTS` used to be `("packages",
