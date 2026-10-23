@@ -4395,6 +4395,18 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     with SecretHolder(plaintext_key) as holder:
         del plaintext_key, raw_at_rest
 
+        # #593: the tty gate, in the shipped shape of the sibling doors
+        # (at_rest_key.acquire_server_passphrase :126-127, executor_key.acquire_write_passphrase
+        # :146-147): NAMED refusal BEFORE any getpass call. This door has no env-var or argument
+        # source by design (#593 AC4 — a value in argv or the environment is visible to other
+        # processes and shell history), so off a terminal the honest answer is refusal, not the
+        # getpass fallback that only WARNS "Password input may be echoed" before reading a CA-key
+        # passphrase from a stream this code does not control. Nothing is written on this path;
+        # the holder erases its buffer on this exit too (#538).
+        if not sys.stdin.isatty():
+            print(_ca_key_tty_refusal(), file=sys.stderr)
+            return 1
+
         # Prompt for passphrase (twice for confirmation). The window spans both
         # prompts: the operator's typing time is part of how long the key sits
         # here, and it has no upper bound in the code.
@@ -4629,6 +4641,14 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
             print(f"Error: backup file not found: {backup_path}", file=sys.stderr)
             return 1
 
+        # #593: the same tty gate as the export door, same shipped exemplar shape. It belongs to
+        # the BACKUP arm only — shares mode prompts nothing and must keep running headless. The
+        # guard sits before the blob is read and before any getpass call: the incumbent at-rest
+        # key keeps its bytes and nothing is decrypted on this path.
+        if not sys.stdin.isatty():
+            print(_ca_key_tty_refusal(read_path=True), file=sys.stderr)
+            return 1
+
         encrypted_data = backup_path.read_bytes()
         passphrase = getpass.getpass(
             f"Enter passphrase to decrypt backup (a backup passphrase shorter than "
@@ -4779,6 +4799,35 @@ def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
         f"{MAX_PASSPHRASE_CODE_POINTS} is the length Venya guarantees to support, not a maximum it enforces.\n"
         "  3. Provide the passphrase through the environment, never as a command-line argument\n"
         "     (command-line values are visible to other processes on the machine).\n"
+        "Your existing CA was not modified by this refusal.\n"
+        "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
+    )
+
+
+def _ca_key_tty_refusal(*, read_path: bool = False) -> str:
+    """#593: named refusal for the CA-key custody doors when stdin is not a TTY.
+
+    Same blessed block as ``_short_passphrase_refusal`` above (REFUSED / why it matters /
+    numbered fix / nothing-modified clause / doc reference), and the same one-builder-
+    both-doors shape: the read door drops the write clause and takes its own in its place.
+    The text carries no value — there is nothing to redact, because the refusal reads no
+    input at all; that is the point of gating before ``getpass``.
+    """
+    head = (
+        "REFUSED: the CA-key backup passphrase must be typed at a terminal and stdin is not a TTY."
+        if read_path
+        else "REFUSED: the CA-key export passphrase must be typed at a terminal and stdin is not a TTY."
+    )
+    state = "Nothing was decrypted." if read_path else "Nothing was written."
+    return (
+        f"{head} {state}\n"
+        "Why it matters: off a terminal the hidden prompt cannot control echo — the passphrase\n"
+        "sealing this CA key would be read from a stream this command does not control, and the\n"
+        "fallback only warns about echo rather than preventing it.\n"
+        "To fix it:\n"
+        "  1. Run this command from an interactive terminal (at the keyboard, or over ssh with a tty).\n"
+        "  2. There is deliberately no passphrase argument or environment variable on this door: a\n"
+        "     value in argv or the environment is visible to other processes, shell history and logs.\n"
         "Your existing CA was not modified by this refusal.\n"
         "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
     )

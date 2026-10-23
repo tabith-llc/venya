@@ -64,6 +64,15 @@ OP_PW = "op-pw-674-operator"  # pragma: allowlist secret
 UNDER_PW = "0123456789abcd"  # pragma: allowlist secret — 14 code points: below the #573 floor
 
 
+@pytest.fixture(autouse=True)
+def _operator_terminal(monkeypatch):
+    """#593: both CA-key custody doors now refuse before prompting when stdin is not a TTY.
+    The backup-arm prompt cells here are the operator-at-a-terminal path; the non-tty half
+    of the truth table is test_ca_key_nontty_refusal_593_flash3.py. Shares-mode cells prompt
+    nothing and are unaffected by this fixture either way."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+
 def _real_key_pem() -> bytes:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
