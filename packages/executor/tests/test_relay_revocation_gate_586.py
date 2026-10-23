@@ -375,15 +375,19 @@ class TestGateAtTheListener:
     def test_bootstrap_refusal_is_named_apart_from_revocation(self, gate_pk, caplog):
         """DoD point 3: a reader must be able to tell 'revoked' from 'broken'.
 
-        Same listener, same peer, same closed connection — the journal line is the
-        only thing that differs, so the two classes must not share a string.
+        Same listener, same peer, same REFUSAL — and since #697 the two classes now differ on more
+        than the journal line: the fault class answers HTTP 503 carrying its own sentence, the revoked
+        class still closes silently. Amended, not weakened: the pairing this cell exists for is that
+        the two classes never share a string, and both halves of that are asserted below.
         """
         listener, _fake, _sessions = _start_with(gate_pk, _state(revoked=False, answered=False))
         caplog.set_level(logging.WARNING, logger=RELAY_LOGGER)
         try:
             with _client(gate_pk.ca, gate_pk.client) as client:
-                with pytest.raises(httpx2.RequestError):
-                    client.post(_url(listener), json=_payload())
+                resp = client.post(_url(listener), json=_payload())
+            # #697: the fault class is now OBSERVABLE ON THE WIRE, not only in the journal.
+            assert resp.status_code == 503, resp.text
+            assert resp.json()["detail"] == REFUSE_NO_ANSWER, resp.json()
         finally:
             listener.stop()
         lines = _relay_lines(caplog)
@@ -393,14 +397,20 @@ class TestGateAtTheListener:
     def test_unwired_state_refuses_every_connection(self, gate_pk):
         """Fail-closed by construction: forgetting to wire the state must never be a
         way to serve. The listener binds (so the boot is observable), and every
-        dial is refused."""
+        dial is refused — refused WITH the #697 notice now, which is a refusal carrying
+        its reason, never an admission: no engine factory exists on this listener
+        (``lambda _sid: None``), so reaching ``/execute`` at all would raise, not serve.
+        """
         bare = RelayListener(gate_pk.config, lambda _sid: None, [ALLOWED], host="127.0.0.1", port=0)
         bare.start()
         try:
             assert bare.active is True, "an unwired listener must still bind, so the refusal is observable"
             with _client(gate_pk.ca, gate_pk.client) as client:
-                with pytest.raises(httpx2.RequestError):
-                    client.post(_url(bare), json=_payload())
+                for _ in range(3):
+                    resp = client.post(_url(bare), json=_payload())
+                    assert resp.status_code == 503, resp.text
+                    assert resp.json()["detail"] == REFUSE_NOT_WIRED, "a refusal must name the fault class"
+                    assert "200" != str(resp.status_code), "an unwired listener served a command"
         finally:
             bare.stop()
 
@@ -427,13 +437,16 @@ class TestGateAtTheListener:
         listener, _fake, sessions = _start_with(gate_pk, state)
         try:
             with _client(gate_pk.ca, gate_pk.client) as client:
-                with pytest.raises(httpx2.RequestError):
-                    client.post(_url(listener), json=_payload())
+                # #697: the unanswered dial is refused WITH the 503 notice (was: a silent close).
+                refused = client.post(_url(listener), json=_payload())
+                assert refused.status_code == 503, refused.text
+                assert refused.json()["detail"] == REFUSE_NO_ANSWER
                 # The core answers: same listener object, same accepted port.
                 state.revocation_answered = True
                 resp = client.post(_url(listener), json=_payload())
                 assert resp.status_code == 200, resp.text
-                # And a revocation mid-life closes it again, no restart involved.
+                # And a revocation mid-life closes it again, no restart involved — the 403 class keeps
+                # its silent close, which is why THIS dial still raises instead of answering.
                 state.revoked = True
                 with pytest.raises(httpx2.RequestError):
                     client.post(_url(listener), json={"session_id": "s2", "command": ["echo"], "secrets": []})

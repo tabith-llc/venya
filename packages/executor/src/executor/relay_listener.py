@@ -298,6 +298,10 @@ class ExecuteHandler(BaseHTTPRequestHandler):
 # a single request byte is read), so the owner's ruled status split lives in these
 # STRINGS: 403 = revoked, 503 = operational fault. A 3 a.m. reader must be able to
 # tell "this credential was killed" from "this daemon cannot tell either way".
+#
+# #697 EMITTER HALF amends the first sentence for ONE class: an operational-fault refusal now
+# answers HTTP 503 with this same string as its ``detail``, still written before a single request
+# byte is read. A revoked credential still gets the silent close — see ``_send_refusal_notice``.
 REFUSE_REVOKED = "403 REVOKED — this executor's credential is revoked server-side"
 REFUSE_NO_ANSWER = (
     "503 OPERATIONAL FAULT — no revocation answer received this boot "
@@ -321,6 +325,81 @@ REFUSE_PEER_REVOKED = "403 REVOKED — the peer's core relay credential is revok
 REFUSE_PEER_EXECUTOR_REVOKED = (
     "403 REVOKED — the peer's executor credential is revoked (executor-serial population, #586)"
 )
+
+
+#: How long the accept path is willing to wait for ONE refusal notice to leave the socket. The accept
+#: loop is single-threaded (`get_request` runs it), so an unbounded write here would let a peer that
+#: never reads pin every later connection — a fault disclosure must not become a denial of service.
+#: Bounded and short; the notice is ~150 bytes, so the cost in the normal case is one write syscall.
+REFUSAL_NOTICE_TIMEOUT_SECONDS = 2.0
+
+
+def is_operational_fault_refusal(reason: Any) -> bool:
+    """True for the two refusal strings that name a FAULT, not a revocation — by object identity.
+
+    Identity, not a prefix match and not a status code: the shipped truth table already compares these
+    constants with ``is``, and a prefix test here would let any string that merely starts like the
+    class through. One predicate, used by the notice writer and by the accept path's journal line, so
+    the two can never disagree about which class speaks.
+    """
+    return reason is REFUSE_NO_ANSWER or reason is REFUSE_NOT_WIRED
+
+
+def send_refusal_notice(tls_conn: Any, reason: str) -> bool:
+    """Answer an operational-fault refusal with the honest sentence, as bytes on the wire (#697).
+
+    WHY THIS EXISTS: `revocation_accept_reason` names two 503 refusals (`REFUSE_NO_ANSWER`,
+    `REFUSE_NOT_WIRED`) that were true but silent — the connection was closed before any request byte,
+    so the core saw only a hung-up socket, and the operator never heard the one component that knew
+    what happened. The core's side of this (the `HTTPStatusError` allowlist that forwards
+    `"503 OPERATIONAL FAULT — "` verbatim) is #697's receiving half; a door with nothing to forward is
+    not a fix, which is why this leg exists.
+
+    WHAT IS NOT WEAKENED, and why each clause is load-bearing:
+      * **No request byte is read.** The refusal still happens before parsing — the peer gets a fixed
+        sentence chosen by THIS daemon, never a response derived from what it sent. Nothing here hands
+        an unauthenticated peer a parser.
+      * **The handshake still authenticates.** `CERT_REQUIRED` and the CA anchor are untouched; this
+        writes on a connection that already completed them, and then closes it exactly as before.
+      * **The fail-closed shape is unchanged.** The caller still raises `ConnectionRefusedError(reason)`
+        after this returns, so no handler thread starts and nothing is admitted. A notice is not an
+        accept.
+      * **Only the operational-fault class speaks.** Selected by OBJECT IDENTITY on the two 503
+        constants — never by a prefix or a status code. `REFUSE_REVOKED` and both peer classes stay
+        silent: a revocation is a security ASSERTION about a credential, and broadcasting which
+        credentials a registry has killed is not this row's subject (#697 is about a fault the operator
+        can act on — reachability — not about naming a dead credential to a stranger).
+      * **Never raises.** A peer that will not read, a dead socket, a full send buffer — the refusal
+        must stand on its own, so every failure path here returns False and the journal stays the
+        record. Mirrors the ruled discipline of `refusal_recorder` just below.
+      * **The sentence is written as itself.** ``ensure_ascii=False``: the default escapes the em dash
+        to ``\u2014``, which a JSON parser survives and a human grepping a packet capture does not —
+        measured, and pinned by a cell. This literal is the product's vocabulary; the wire must not
+        re-encode it into something the #697 receiving door's own prefix test would not recognise.
+
+    Returns True only when every byte was written.
+    """
+    if not is_operational_fault_refusal(reason):
+        return False
+    try:
+        body = json.dumps({"detail": reason}, ensure_ascii=False).encode("utf-8")
+        head = (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+        )
+        # Order is measured, not stylistic: the notice goes out BEFORE the caller's existing
+        # shutdown(SHUT_RDWR)+close pair. Closing with unread data in the receive queue makes Linux
+        # send RST, and RST discards a response the client has not read yet — measured 0/20 delivery
+        # that way, against 20/20 at 14 B and 8/8 at the 16 MiB relay cap with this order kept.
+        tls_conn.settimeout(REFUSAL_NOTICE_TIMEOUT_SECONDS)
+        tls_conn.sendall(head + body)
+        return True
+    except (OSError, ValueError, TypeError):
+        # OSError covers socket.timeout (a TimeoutError is an OSError) and every transport failure.
+        return False
 
 
 def revocation_accept_reason(state: Any) -> str | None:
@@ -497,13 +576,20 @@ class _RelayHTTPServer(ThreadingHTTPServer):
         # credential was admitted by the handshake and is refused here, before any
         # request bytes. ConnectionRefusedError is an OSError, which is the shape
         # ``socketserver._handle_request_noblock`` already swallows from this hook.
+        # #697: the OPERATIONAL-FAULT class answers with its own sentence first (see
+        # ``send_refusal_notice`` for what is and is not weakened); every other class
+        # keeps the silent close exactly as shipped.
+        noticed = send_refusal_notice(tls_conn, reason)
         try:
             tls_conn.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
         tls_conn.close()
         host, port = (addr, 0) if isinstance(addr, str) else (addr[0], addr[1])
-        logger.warning("Relay :8443 refused a new connection from %s:%s — %s", host, port, reason)
+        # The revoked class's journal line stays byte-identical (cells grep it): the delivery note is
+        # appended only for the class that was supposed to speak.
+        delivery = "" if not is_operational_fault_refusal(reason) else ("" if noticed else " (notice not delivered)")
+        logger.warning("Relay :8443 refused a new connection from %s:%s — %s%s", host, port, reason, delivery)
         recorder = self.refusal_recorder
         if recorder is not None:
             try:
