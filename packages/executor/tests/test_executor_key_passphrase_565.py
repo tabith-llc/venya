@@ -520,3 +520,109 @@ class TestNoPlaintextBranch:
             assert not any(
                 "plaintext" in p or "no_encrypt" in p or "allow_" in p for p in params
             ), f"a plaintext escape hatch appeared on {name}(): {list(params)}"
+
+
+class TestNoStagedTempResidue:
+    """#565 sites 5-6, the third clause of the negative bar: **no temp**.
+
+    The landed cells prove a refusal writes no key and leaves the incumbent pair
+    byte-identical; nothing here asserted the clause the row demands — that a
+    refusal, and a successful write, leave **no staged temp** behind. This plane
+    is the one where that matters most: ``_atomic_write`` publishes with
+    ``mkstemp(dir=parent, prefix=os.path.basename(path)+".", suffix=".tmp")``,
+    so a surviving temp is a ``executor.key.<random>.tmp`` file holding secret
+    material in a directory the executor service can read — and it is exactly the
+    residue #478's boot-time ``sweep_stale_tmp_files`` was written to clean up
+    after a KILLED writer. A refusal is not a killed writer: it must never make
+    residue in the first place, rather than leaning on the next boot to tidy it.
+
+    Every cell globs a directory that EXISTS and carries a sentinel file, because
+    a glob over an absent directory passes for the wrong reason.
+    """
+
+    def _staged(self, directory: Path) -> list[str]:
+        return sorted(p.name for p in directory.glob("*.tmp") if p.is_file())
+
+    def _files(self, directory: Path) -> dict[str, bytes]:
+        """File NAME -> bytes, directories excluded: this package's autouse tmpfs
+        fixture creates ``tmp_path/shm`` beside the identity, and a snapshot that
+        tried to read it died on IsADirectoryError."""
+        return {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+
+    def test_register_refusal_leaves_no_staged_temp_in_an_existing_dir(
+        self, manager, no_executor_key_passphrase
+    ) -> None:
+        """Negative half, site 5: the certificate directory already exists (a
+        re-register on an installed host), so the refusal has somewhere to leak a
+        temp into. It must not."""
+        sentinel = Path(manager.key_path).parent / "incumbent.readme"
+        sentinel.write_text("pre-existing file, must survive untouched\n")
+
+        MockClient, stopper = _register_transport(MagicMock())
+        try:
+            with pytest.raises(RuntimeError, match=EXECUTOR_KEY_PASSPHRASE_ENV):
+                manager.register("test-executor")
+        finally:
+            stopper.stop()
+
+        MockClient.return_value.post.assert_not_called()
+        assert self._staged(Path(manager.key_path).parent) == []
+        # The `manager`/`ca_pair` fixture writes its anchor into this same dir, so
+        # the surviving set is that CA plus my sentinel — the point is that the
+        # refusal added NOTHING (no key, no cert, no temp).
+        assert sorted(p.name for p in Path(manager.key_path).parent.iterdir() if p.is_file()) == [
+            "ca.crt",
+            "incumbent.readme",
+        ]
+        assert not Path(manager.key_path).exists() and not Path(manager.cert_path).exists()
+
+    def test_register_success_consumes_its_own_staged_temps(self, manager, ca_pair) -> None:
+        """Positive half, site 5: three `_atomic_write` publishes (CA, cert, key),
+        so a successful register leaves three final names and zero ``*.tmp``."""
+        ca_key, ca_cert, _ca_file = ca_pair
+        _new_key, new_cert = _make_executor_keypair_and_cert(ca_key, ca_cert, "test-executor")
+        _MockClient, stopper = _register_transport(_make_mock_response(new_cert, ca_cert, new_cert.serial_number))
+        try:
+            manager.register("test-executor")
+        finally:
+            stopper.stop()
+
+        parent = Path(manager.key_path).parent
+        assert self._staged(parent) == [], f"a successful register left residue: {self._staged(parent)}"
+        assert Path(manager.key_path).exists() and b"ENCRYPTED PRIVATE KEY" in Path(manager.key_path).read_bytes()
+
+    def test_rotate_refusal_leaves_no_staged_temp_beside_the_incumbent_identity(
+        self, manager, ca_pair, no_executor_key_passphrase
+    ) -> None:
+        """Negative half, site 6: rotate's key temp lands in the same directory as
+        a live incumbent identity — the worst place to leave a stray temp, because
+        the boot sweep and the pair gate both have to reason about it."""
+        ca_key, ca_cert, _ca_file = ca_pair
+        _seed_paired_identity(manager, ca_key, ca_cert)
+        before = self._files(Path(manager.key_path).parent)
+
+        mock_client = MagicMock()
+        manager.client = mock_client
+        with pytest.raises(RuntimeError, match="must never be stored unencrypted"):
+            manager.rotate()
+
+        mock_client.post.assert_not_called()
+        parent = Path(manager.key_path).parent
+        assert self._staged(parent) == [], f"a refused rotation staged a temp: {self._staged(parent)}"
+        assert self._files(parent) == before, "a refusal changed the directory's files"
+
+    def test_rotate_success_consumes_its_own_staged_temps(self, manager, ca_pair) -> None:
+        """Positive half, site 6: the KEY→CERT→CA order is three replaces; none of
+        them may leave its temp behind."""
+        ca_key, ca_cert, _ca_file = ca_pair
+        _seed_paired_identity(manager, ca_key, ca_cert)
+        _k, new_cert = _make_executor_keypair_and_cert(ca_key, ca_cert, "test-executor")
+        mock_client = MagicMock()
+        mock_client.post.return_value = _make_mock_response(new_cert, ca_cert, new_cert.serial_number)
+        manager.client = mock_client
+
+        manager.rotate()
+
+        parent = Path(manager.key_path).parent
+        assert self._staged(parent) == [], f"a successful rotation left residue: {self._staged(parent)}"
+        assert b"ENCRYPTED PRIVATE KEY" in Path(manager.key_path).read_bytes()

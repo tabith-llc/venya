@@ -609,3 +609,95 @@ def test_environment_variable_name_never_appears_as_a_value(tmp_path) -> None:
         if path.is_file():
             assert GOOD_PW not in path.read_text(errors="ignore"), "a passphrase reached a written file"
     assert os.environ.get(EXECUTOR_KEY_PASSPHRASE_ENV) == GOOD_PW, "the autouse fixture is what this file relies on"
+
+
+class TestNoStagedTempResidue:
+    """#565 sites 3-4, the third clause of the negative bar: **no temp**.
+
+    The landed cells prove a refusal writes no key and no directory; this class
+    proves the clause nobody asserted — a refusal, and a failure during an
+    otherwise-good write, must leave NO staged temp behind. Both writers go
+    through a `NamedTemporaryFile(..., prefix=".venya-key-", delete=False)` +
+    `os.replace`, so a temp that survives is secret material sitting in a
+    guessable-named file, and (the older #478 class) a leftover name can wedge
+    every later write to that target.
+
+    The glob is aimed at a directory that EXISTS and already holds a sentinel:
+    an assertion over an absent directory is a vacuous pass, which is the exact
+    failure mode this repo's truth-table law exists to catch.
+    """
+
+    _STAGED = (".venya-key-*", ".venya-cert-*", ".venya-ca-*", "*.tmp")
+
+    def _staged_names(self, directory: Path) -> list[str]:
+        """Every staged-temp name under `directory` (recursive: renew splits dirs)."""
+        return sorted(p.name for pat in self._STAGED for p in directory.rglob(pat))
+
+    def test_register_refusal_leaves_no_staged_temp_in_an_existing_dir(
+        self, tmp_path, no_executor_key_passphrase
+    ) -> None:
+        """Negative half, sites 3: the dir already exists (a re-register over an
+        installed host's `certs/`), so the refusal has somewhere to leak a temp
+        into — and must not put one there."""
+        out = tmp_path / "certs"
+        out.mkdir(mode=0o700)
+        sentinel = out / "incumbent.readme"
+        sentinel.write_text("pre-existing file, must survive untouched\n")
+
+        result, client, _args = _register_cell(tmp_path, args=_register_args(tmp_path, executor_id="cell-exec"))
+
+        assert result == 1
+        client.register_executor.assert_not_called()
+        assert self._staged_names(out) == [], f"a refusal staged a temp: {self._staged_names(out)}"
+        assert sentinel.exists() and sorted(p.name for p in out.iterdir()) == ["incumbent.readme"]
+
+    def test_register_success_consumes_its_own_staged_temps(self, tmp_path) -> None:
+        """Positive half, site 3: the three temps (key, cert, ca) are published by
+        `os.replace`, so a successful register leaves exactly the three final names
+        and no residue to be mistaken for a leak or to wedge a later write."""
+        result, _client, args = _register_cell(tmp_path)
+        assert result == 0
+
+        out = Path(args.output_dir)
+        assert self._staged_names(out) == [], f"a successful write left residue: {self._staged_names(out)}"
+        assert sorted(p.name for p in out.iterdir()) == ["ca.crt", "executor.crt", "executor.key"]
+
+    def test_renew_refusal_leaves_no_staged_temp_beside_the_incumbent_pair(
+        self, tmp_path, no_executor_key_passphrase
+    ) -> None:
+        """Negative half, site 4: renew's key temp lands in the incumbent key's OWN
+        directory, so this is the refusal with real files next to the leak site."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        before_key, before_cert = key_path.read_bytes(), cert_path.read_bytes()
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()) as HttpClient:
+            result = executor_cert_renew(
+                SimpleNamespace(
+                    cert_path=str(cert_path),
+                    key_path=None,
+                    core_url="https://venya-core",
+                    ca_bundle=None,
+                )
+            )
+
+        assert result == 1
+        HttpClient.assert_not_called()
+        assert key_path.read_bytes() == before_key and cert_path.read_bytes() == before_cert
+        assert self._staged_names(tmp_path) == [], f"a refusal staged a temp: {self._staged_names(tmp_path)}"
+
+    def test_renew_success_consumes_its_own_staged_temps(self, tmp_path) -> None:
+        """Positive half, site 4: same property on the renew write shape."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        with patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()):
+            result = executor_cert_renew(
+                SimpleNamespace(
+                    cert_path=str(cert_path),
+                    key_path=None,
+                    core_url="https://venya-core",
+                    ca_bundle=None,
+                )
+            )
+
+        assert result == 0
+        assert self._staged_names(tmp_path) == [], f"a successful renew left residue: {self._staged_names(tmp_path)}"
+        assert b"ENCRYPTED PRIVATE KEY" in key_path.read_bytes()
