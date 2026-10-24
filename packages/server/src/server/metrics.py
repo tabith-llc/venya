@@ -190,6 +190,20 @@ REVOCATION_READ_DURATION_SECONDS = Histogram(
     buckets=(0.025, 0.05, 0.1, 0.3, 1.0, 2.5, 5.0, 10.0, 30.0, 300.0),
 )
 
+# A revocation read that could not determine its dialect ran with NO bound at all. This is its own
+# family, not a label on the #603 refusals series: "the seam installed nothing" and "the seam refused"
+# are two different facts an operator chases two different ways, and #654's own reasoning binds here —
+# a label added to an existing series silently re-splits every operator query and dashboard built on
+# it. A clean non-PG install never increments it: `sqlite` answers the question honestly, so only the
+# unanswerable state counts. Found on leg 478 (s266) and filed as #704 from the leg-471 enumeration.
+REVOCATION_READ_UNBOUNDED_TOTAL = Counter(
+    "venya_revocation_read_unbounded_total",
+    "Revocation-plane reads that ran with NO deadline installed because the session could not report "
+    "its dialect (the bind raised); 'site' names which path. Not a refusal — nothing was refused "
+    "(found leg 478, s266)",
+    ["site"],
+)
+
 # --- Core metrics ---
 
 CORE_OPERATIONS_TOTAL = Counter(
