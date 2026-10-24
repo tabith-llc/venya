@@ -37,7 +37,7 @@ from unittest.mock import MagicMock
 import pytest
 from server import revocation_read
 from server.revocation_read import bounded_read
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 
@@ -59,8 +59,22 @@ def _counter(site: str = SITE) -> float:
 
 
 def _sqlite_session():
-    """A REAL SQLite bind — the clean negative, not a double pretending to be one."""
-    return sessionmaker(bind=create_engine("sqlite://"))()
+    """A REAL SQLite bind — the clean negative, not a double pretending to be one.
+
+    The engine installs ``PRAGMA foreign_keys=ON`` on connect (#634 interlock, house shape:
+    ``packages/core/tests/test_secret_delete_fk.py``). This file declares no schema, so enforcement
+    cannot fire on anything it asserts — it is here so the blind-spot ratchet stays closed, not to
+    change a result. The exemption table is reserved for files whose subject IS the blindness.
+    """
+    engine = create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    return sessionmaker(bind=engine)()
 
 
 class _FaultingBind:
