@@ -149,6 +149,17 @@ _refusal_warned = False
 _scan_refusal_warned = False
 _scan_unreadable_warned = False
 
+#: The #478 latch, separate again on purpose: an operator who reads the unreadable-GUC line tunes a
+#: session GUC, and neither of those is the fault this one names (a bind that cannot say its dialect).
+#: The counter beside it is never latched — the count survives the latch, which is #651's lesson.
+_unbounded_dialect_warned = False
+
+#: The one dialect name that means "the SET LOCAL deadlines in this module will be honoured".
+#: Spelled once because the two places that ask the question — the seam's own gate and the
+#: unknown-dialect journal — must agree on the answer. Two literals is the drift this file already
+#: has a law about.
+POSTGRESQL_DIALECT = "postgresql"
+
 #: PostgreSQL ``lock_not_available`` — the SQLSTATE a ``lock_timeout`` refusal carries.
 LOCK_TIMEOUT_SQLSTATE = "55P03"
 
@@ -286,10 +297,12 @@ def reset_read_deadline_state() -> None:
     """Clear the latches and restore both default deadlines. A test seam mirroring
     ``revocation_snapshot.reset_snapshot_state``; never called by product code."""
     global _refusal_warned, _scan_refusal_warned, _scan_unreadable_warned
+    global _unbounded_dialect_warned
     global _lock_timeout_ms, _scan_timeout_ms
     _refusal_warned = False
     _scan_refusal_warned = False
     _scan_unreadable_warned = False
+    _unbounded_dialect_warned = False
     _lock_timeout_ms = DEFAULT_LOCK_TIMEOUT_MS
     _scan_timeout_ms = DEFAULT_SCAN_TIMEOUT_MS
 
@@ -297,6 +310,11 @@ def reset_read_deadline_state() -> None:
 def is_scan_unreadable_warned() -> bool:
     """True once the unreadable-session-bound state has been journalled this process."""
     return _scan_unreadable_warned
+
+
+def is_unbounded_dialect_warned() -> bool:
+    """True once the unknown-dialect state has been journalled this process (the #478 latch)."""
+    return _unbounded_dialect_warned
 
 
 def deadline_statement(ms: int | None = None) -> Any:
@@ -347,14 +365,33 @@ def scan_restore_statement(raw: str) -> Any | None:
     return text(_RESTORE_SCAN_DEADLINE_TEMPLATE.format(value=value))
 
 
-def _is_postgresql(db: Any) -> bool:
-    """Dialect test in the shape of ``middleware/rate_limit.py:327``. A session with no
-    resolvable bind (a bare double) counts as non-PG, keeping the seam out of unit paths."""
+def _dialect_name(db: Any) -> str | None:
+    """The bind's dialect name, or None when the session could not say what it is.
+
+    Three answers, not two: a name (``"sqlite"``, ``"postgresql"``, …) is a FACT the seam can act
+    on, and ``None`` is the ABSENCE of one. The seam's own posture is unchanged by this leg — on
+    ``None`` it still yields and lets the read run unbonded, and :func:`note_unbounded_dialect`
+    counts and journals that. Refusing instead is an availability decision the owner has not made.
+
+    NOT the same shape as ``middleware/rate_limit.py:326-327``, whatever an older docstring here
+    claimed. That gate asks the same question and resolves the unknown the OTHER way: it guards
+    with ``hasattr`` so a bind that cannot be had becomes ``bind is None``, and its test is
+    ``if bind is None or bind.dialect.name == "postgresql"`` — an unresolvable bind takes the
+    STRICTER (PostgreSQL) branch, and its own docstring says that is deliberate ("a session that
+    cannot report its dialect is treated as PostgreSQL so the production contract stays pinned").
+    This module treats the same input as non-PG, i.e. the LOOSER branch, and a raising
+    ``get_bind`` there is not an error at all, just a silence. Measured both ways at
+    ``4620432c`` on the identical input — an object with no ``get_bind``: rate_limit takes its PG
+    branch, this seam takes its unbonded branch.
+
+    The divergence is recorded, not repaired: aligning them would move an unknown bind from
+    unbonded to bounded-and-potentially-refusing on the revocation path, which is the availability
+    call above, and #704's row carries it to the owner rather than a leg answering it here."""
     try:
         bind = db.get_bind()
     except Exception:
-        return False
-    return getattr(getattr(bind, "dialect", None), "name", None) == "postgresql"
+        return None
+    return getattr(getattr(bind, "dialect", None), "name", None)
 
 
 def _sqlstate_hit(current: BaseException | None, sqlstate: str, depth: int = 0) -> bool:
@@ -453,6 +490,36 @@ def note_scan_refusal(site: str, exc: BaseException) -> None:
         )
 
 
+def note_unbounded_dialect(site: str, dialect: str | None) -> None:
+    """Journal the state in which a revocation read ran with NO deadline because the dialect was
+    unknown. Counted EVERY time, warned ONCE.
+
+    The behavior is deliberately UNCHANGED — the read still runs, unbonded, exactly as it did
+    before this function existed. Refusing instead is an availability decision on a security
+    surface (a bind that cannot answer would then deny every revocation check on that core), and
+    it is not a lane's or the lead's to make, so this leg makes the fault VISIBLE and leaves the
+    policy where it was. See the leg-478 report §1.
+
+    The clean non-PG case is NOT counted here: ``sqlite`` answers the question, and a shipped
+    test path must not become an operator alarm. Only ``None`` — "I could not tell" — increments,
+    which is the whole distinction this function exists to draw.
+    """
+    metrics.REVOCATION_READ_UNBOUNDED_TOTAL.labels(site=site).inc()
+    global _unbounded_dialect_warned
+    if not _unbounded_dialect_warned:
+        _unbounded_dialect_warned = True
+        logger.warning(
+            "Revocation read at '%s' installed NO deadline: the session could not report its "
+            "dialect (bind answered %r, not a dialect name), so this read ran UNBOUNDED and a held "
+            "lock on the revocation tables would park the core loop here — the #603 AC1 shape. "
+            "The read was NOT refused and this is NOT a revocation verdict. This line fires ONCE "
+            "per process by design; the alerting surface is the cumulative counter "
+            "venya_revocation_read_unbounded_total{site=} (found leg 478, s266).",
+            site,
+            dialect,
+        )
+
+
 def note_bound_unreadable(site: str, raw: object) -> None:
     """One latched line for the state in which the session's scan bound could not be read.
 
@@ -529,7 +596,17 @@ def bounded_read(db: Any, *, site: str | None = None) -> Iterator[None]:
     which also catches the #654 scan subclass — no caller had to be touched to gain the new bound.
     """
     label = site or current_site()
-    if not _is_postgresql(db):
+    dialect = _dialect_name(db)
+    if dialect != POSTGRESQL_DIALECT:
+        # The two non-PG answers are NOT the same fact, and only one of them is normal. A real
+        # dialect name (``sqlite``) is a clean negative: the seam is inert and says nothing, so a
+        # unit suite or a legacy install does not become an alarm. ``None`` means the bind could
+        # not say — the read is about to run with NO bound at all, which is #603's freeze shape at
+        # a door nobody was watching, so it gets counted and journalled. The decision to yield is
+        # UNCHANGED either way: making that a refusal is an availability call on a security
+        # surface, and it is the owner's, not this leg's.
+        if dialect is None:
+            note_unbounded_dialect(label, dialect)
         yield
         return
 

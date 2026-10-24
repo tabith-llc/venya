@@ -319,7 +319,13 @@ def _seam_site_labels_in_root(src_root: Path) -> tuple[set[str], list[str]]:
 #: or written as a literal/constant instead. Removing one silently is not an option either.
 _UNRESOLVED_SITE_BASELINE = (
     "middleware/auth.py for_site(self._revocation_site(path)) [1 site]",
-    "revocation_read.py labels(site=site) [3 sites]",
+    # 3 → 4 sites on leg 478 (#704): `note_unbounded_dialect` is the fourth `labels(site=site)`
+    # emission point in this module, alongside note_refusal / note_scan_refusal / note_read_duration.
+    # Same shape, same reason it was already counted: the parameter is a function argument resolved at
+    # run time, so the collector cannot read a literal and counts it instead of skipping it — which is
+    # this baseline's whole purpose. No new label VALUE is reachable from it: the four are bounded by
+    # the closed vocabulary above, and the cell beside this one is what proves that.
+    "revocation_read.py labels(site=site) [4 sites]",
     "revocation_snapshot.py labels(site=site) [1 site]",
 )
 
