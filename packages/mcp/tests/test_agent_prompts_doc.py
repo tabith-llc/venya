@@ -182,6 +182,13 @@ class TestCommandGateWording:
         "Commands: use absolute binary paths. Shell builtins are rejected (503) by design.",
         "Commands: absolute paths or bare PATH names; builtins and unresolvable tokens are refused.",
         "Commands: a name must resolve into a trusted directory. Shell builtins are refused by design.",
+        # The sharpest form: the resolution half stated TRUE and present, so only the
+        # class detector can catch it — a guard that passed on the missing-resolution
+        # half alone would stay green here and miss the sentence that actually shipped.
+        (
+            "Commands: a command must resolve into a trusted directory or be refused (503). "
+            "Shell builtins are rejected by design."
+        ),
     )
 
     @pytest.mark.parametrize("claim", FALSE_CLAIMS)
