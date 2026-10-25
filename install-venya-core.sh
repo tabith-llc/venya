@@ -1286,7 +1286,7 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     echo "  The venya-core service loads it via EnvironmentFile; it is NOT in .env"
     echo "  or the unit file. On an unattended install it was randomly generated."
     echo "  To recover the passphrase later, see the break-glass procedure in"
-    echo "  docs/cert-rotation-runbook.md §0."
+    echo "  docs/cert-rotation-runbook.md §5 (read-back: §7 step 0; §0 is the index)."
     echo ""
     echo "  Note on the renewed pair: its key is written encrypted at rest, and the CLI"
     echo "  opens it for admin mTLS with the passphrase from"
