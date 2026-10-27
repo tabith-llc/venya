@@ -45,6 +45,10 @@ from .injector import (
 from .strategies.base import InjectionResult, InjectionStrategy
 from .strategies.sbx_strategy import (
     CONTAINER_SECRET_DIR,
+    # Re-exported for the direct-path bound and the existing #470 cells, which
+    # import this name from here; it was a second bare 3600 in this module until
+    # #696 collapsed the two definitions into one.
+    SBX_TIMEOUT,  # noqa: F401
     SbxCreateTimeoutError,
     SbxStrategy,
     reap_orphan_sandboxes,
