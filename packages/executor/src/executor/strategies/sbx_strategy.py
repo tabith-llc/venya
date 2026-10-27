@@ -74,6 +74,71 @@ SBX_TIMEOUT = 3600  # 1 hour
 # template at enrollment) is tracked in `venya-dev/tickets/sbx-cold-start-prepull.md`.
 SBX_CREATE_TIMEOUT = 240
 
+# How long to wait for ONE `sbx policy allow network` child (the egress rule
+# registration in `apply_network_policy`). Until this row that call carried NO
+# `timeout=` at all — the only untimed subprocess child in `packages/*/src` — so a
+# wedged sandboxd daemon held the executor's single admission permit indefinitely
+# instead of failing the command: an unbounded wait there is an outage, not a slow
+# run, because every other client queues behind it.
+#
+# The bound is per RULE, and the loop applies one rule per allowlist entry plus the
+# DNS resolver, so a deployment's worst case is this number times its entry count.
+#
+# Default 30 s, chosen from a physical capture rather than a guess. Measured on
+# `venya-exec-3` as `bot` against the live `venya-sandboxd` unit, with each predicate
+# named because the two shapes below are not one number:
+#   * 19 SUCCESSFUL registrations (`sbx policy allow network <host>`, global scope):
+#     406-1059 ms, median 446 ms.
+#   * 19 calls in the SHIPPED argv shape (`... --sandbox <name>`), which this guest
+#     answered `sandbox "…" not found` (rc=1) because no sandbox could be created here
+#     — the same sbx-absent class the executor suite carries: 293-1465 ms, median 347 ms.
+#     This is the round trip the product makes, refused at the daemon.
+#   * 20 successful registrations applied back to back as one loop (the shape of one
+#     `apply_network_policy` call): 9387 ms total, ~469 ms per rule.
+# 30 s is ~28x the slowest SUCCESSFUL registration and ~20x the slowest single call of
+# any kind observed on that guest, so a healthy registration cannot trip it; a 20-entry
+# allowlist finishes in ~9 s, inside the core's 300 s relay read budget. No cold-daemon
+# figure is claimed: `pgrep`/`pkill` for the daemon read 0 as `bot` while
+# `systemctl is-active venya-sandboxd` said active (the permission wall fleet-vm-ops
+# names), so a "restart" driven that way restarts nothing — the unit reports
+# `NRestarts=0` with a start timestamp predating the whole capture.
+# NOT MEASURED, and stated so it is not mistaken for measured: the latency of a rule
+# registration against a LIVE sandbox. This guest cannot create one — `sbx create` fails
+# at "failed to run sandbox container", and the daemon's own journal shows Docker Hub
+# token refresh timing out on DNS — so the shipped argv was exercised only in its refused
+# face. The two figures above bracket it: a registration against a live sandbox is the
+# same RPC with one more lookup, not a different order of work.
+# Override per-deployment: `VENYA_SBX_POLICY_TIMEOUT` (seconds), read AT CALL TIME by
+# `sbx_policy_timeout()` below, so a unit cell can inject a short bound instead of
+# waiting the default out.
+SBX_POLICY_TIMEOUT = 30
+SBX_POLICY_TIMEOUT_ENV = "VENYA_SBX_POLICY_TIMEOUT"
+
+
+def sbx_policy_timeout() -> float:
+    """Egress-rule registration bound.
+
+    Same env-override idiom as ``VENYA_DIRECT_PATH_TIMEOUT``
+    (``_direct_path_timeout`` in executor.py) and ``VENYA_SBX_CREATE_TIMEOUT``:
+    read at call time so a unit cell injects a short bound instead of waiting out
+    the default. Absent or empty keeps the shipped default; a non-numeric value
+    warns with both the value and the default and falls back; the floor is 0.0.
+    """
+    raw = os.environ.get(SBX_POLICY_TIMEOUT_ENV)
+    if raw is None or raw == "":
+        return float(SBX_POLICY_TIMEOUT)
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a number — using the %d s default for the egress policy path",
+            SBX_POLICY_TIMEOUT_ENV,
+            raw,
+            SBX_POLICY_TIMEOUT,
+        )
+        return float(SBX_POLICY_TIMEOUT)
+
+
 SBX_MIN_VERSION = (0, 39, 0)  # refs ticket sbx-exec-env-file-noop
 
 
@@ -91,6 +156,17 @@ class SbxCreateTimeoutError(subprocess.TimeoutExpired):
     ``VENYA_SBX_CREATE_TIMEOUT``. Naming the class keeps the caller's existing lane
     (this IS a `TimeoutExpired`, so the relay outcome is unchanged — #639 AC4) while
     making the create stage and its real bound sayable.
+    """
+
+
+class SbxPolicyTimeoutError(subprocess.TimeoutExpired):
+    """One `sbx policy allow network` child exceeded its own budget.
+
+    Named for the same reason `SbxCreateTimeoutError` is (#639): this propagates
+    through the caller's existing COMMAND-timeout lane — it IS a `TimeoutExpired`,
+    so the relay outcome is unchanged — but without a class of its own the operator
+    reads "Sandbox command timed out", the wrong stage, for a failure that happened
+    before the command ever ran. The stage and the bound that fired are sayable here.
     """
 
 
@@ -1025,12 +1101,43 @@ class SbxStrategy(InjectionStrategy):
                 "--sandbox",
                 sandbox_name,
             ]
-            result = subprocess.run(  # nosec B603 B607
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            # Bounded per rule — `SBX_POLICY_TIMEOUT` carries the measurement behind the
+            # default. What this bound owns and what it does NOT, both measured at this row
+            # (tests/test_sbx_policy_timeout_598.py):
+            #   * `run(timeout=...)` kills THIS child and re-raises; a grandchild the CLI
+            #     forked can outlive it (a stray process was still alive by pid);
+            #   * a surviving grandchild does NOT make the return late — `communicate()`
+            #     carries its own deadline, so the refusal lands at the bound even when the
+            #     orphan still holds the capture pipes. The permit comes back on time.
+            # So the residue after this raise is (a) a possible stray helper process and
+            # (b) a possible half-registered rule, never a parked executor. (b) is harmless
+            # by mechanism: the rule is keyed to THIS sandbox's name, the caller's `finally`
+            # removes that sandbox now (its own `sbx rm` is bounded at 30 s), and the name is
+            # never reused — `venya-<session>-<uuid12>` — so a stale rule admits no traffic.
+            # What remains open is the vendor's own GC of rules for dead sandbox names, which
+            # is the `shortcut:` note above this loop and is unchanged by this row.
+            try:
+                result = subprocess.run(  # nosec B603 B607
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=sbx_policy_timeout(),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                # Fail closed and say which stage died: the rule for THIS host was
+                # never confirmed, so the sandbox must not proceed to exec with
+                # partial egress. The named class carries the bound that fired.
+                logger.error(
+                    "sbx policy allow network timed out after %s seconds "
+                    "(VENYA_SBX_POLICY_TIMEOUT, SBX_POLICY_TIMEOUT default %s) for "
+                    "sandbox %s host %s — refusing to run the command",
+                    exc.timeout,
+                    SBX_POLICY_TIMEOUT,
+                    sandbox_name,
+                    host,
+                )
+                raise SbxPolicyTimeoutError(cmd, exc.timeout) from exc
             if result.returncode != 0:
                 logger.error(
                     "Failed to allow network %s for sandbox %s: %s",

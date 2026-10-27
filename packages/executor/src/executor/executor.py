@@ -46,6 +46,7 @@ from .strategies.base import InjectionResult, InjectionStrategy
 from .strategies.sbx_strategy import (
     CONTAINER_SECRET_DIR,
     SbxCreateTimeoutError,
+    SbxPolicyTimeoutError,
     SbxStrategy,
     reap_orphan_sandboxes,
 )
@@ -1024,6 +1025,21 @@ class Executor:
             if isinstance(exc, SbxCreateTimeoutError):
                 logger.error("Sandbox CREATE timed out after %s seconds", exc.timeout)
                 timed_out = f"Sandbox create timed out after {exc.timeout} seconds"
+            elif isinstance(exc, SbxPolicyTimeoutError):
+                # The egress-rule site (#696 family; R-2614 Road B). Same lesson as #639:
+                # this is NOT a hung command, it is a policy registration that never
+                # completed, and the number that fired is SBX_POLICY_TIMEOUT (30 s), not
+                # the command budget. Naming it here is also what proves the fail-closed
+                # half: this lane is reached INSTEAD of `execute_command`, so the guest
+                # never ran with half an egress policy.
+                logger.error(
+                    "Sandbox EGRESS POLICY apply timed out after %s seconds — no command was executed",
+                    exc.timeout,
+                )
+                timed_out = (
+                    f"Sandbox egress policy apply timed out after {exc.timeout} seconds; "
+                    "the command was not executed"
+                )
             else:
                 logger.error("Sandbox command timed out after %s seconds", exc.timeout)
                 timed_out = f"Sandbox command timed out after {exc.timeout} seconds"

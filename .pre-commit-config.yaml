@@ -92,6 +92,21 @@ repos:
         pass_filenames: false
         files: "^packages/[^/]+/pyproject\\.toml$"
 
+      # Refs R-2614 (Road B, O373): every subprocess child in packages/*/src must carry a bound.
+      # One untimed `sbx policy allow network` call was enough to park the executor's single
+      # admission permit indefinitely — nothing was broken on its face, so no lint, type check or
+      # suite could see it. Stdlib-only, never invokes `uv`, writes nothing (the #627 class), and
+      # `always_run` because the walk covers the whole src surface, not the staged files: an
+      # exemption added in one file must be judged against every other. Measured cost on this
+      # venue: 0.68 s. The second door for `--no-verify` and fresh clones is packages/executor/
+      # tests/test_sbx_policy_timeout_598.py, which loads the same implementation.
+      - id: subprocess-timeout-census
+        name: subprocess timeout census (packages/*/src, R-2614)
+        entry: python3 scripts/check_subprocess_timeout_census.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
       # Refs leg 369, owner order 2026-10-22: "we need to re-determine every dependency version
       # being used and update documentation properly!". `docker-sbx 0.38.0` sat in the shipped
       # notices page for ten minor versions of drift because nothing compared it to anything. This

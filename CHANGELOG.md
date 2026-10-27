@@ -5,7 +5,7 @@ Notable changes to Venya will be documented in this file.
 ## [Unreleased]
 
 At the `v0.1.0beta1` cut (`e9c7c25`) this section was emptied — the entries that sat there
-were folded into `0.1.0beta1` in that same commit. One row has landed since that cut:
+were folded into `0.1.0beta1` in that same commit. The rows below landed since that cut:
 
 - **`venya admin split-ca-key` no longer leaves the key material in its own buffer
   (`#674` AC3).** The splitter builds a working copy of what it is handed — a checksum
@@ -17,6 +17,19 @@ were folded into `0.1.0beta1` in that same commit. One row has landed since that
   restore commands, which covered the holder's copy; the splitter's copy is this row.
   The cleared buffer is the splitter's own: the promise is that copy is erased, not that
   no other copy exists in the process.
+
+- **Registering a sandbox's egress rules now has a time limit of its own (`R-2614`).**
+  Before this row the call that added each network rule to the sandbox waited without a
+  bound, and it was the only such unbounded call in the shipped source. Because the
+  executor admits one command at a time, a sandbox daemon that stopped answering held that
+  single slot: the command neither finished nor failed, and the next caller queued behind it
+  with no end. Each rule registration is now bounded at 30 seconds
+  (`VENYA_SBX_POLICY_TIMEOUT`, read per call), the command is refused rather than run when a
+  rule cannot be confirmed, the log says which stage timed out and with what budget, and the
+  executor returns to idle. No migration, no wire change, no new status code: the refusal
+  lands on the same channel a setup failure always used. A repository-wide check now keeps
+  every subprocess call in `packages/*/src` bounded, with one named exemption recorded with
+  its reason.
 
 ## [0.1.0beta1] - 2026-10-23
 
