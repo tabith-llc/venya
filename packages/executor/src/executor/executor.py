@@ -48,6 +48,7 @@ from .strategies.sbx_strategy import (
     SbxCreateTimeoutError,
     SbxStrategy,
     reap_orphan_sandboxes,
+    sbx_command_timeout,
 )
 
 logger = logging.getLogger("venya.executor")
@@ -95,8 +96,12 @@ def _cap_with_truncation_marker(data: bytes, total_size: int) -> bytes:
     return data[: MAX_OUTPUT_BYTES - len(marker)] + marker
 
 
-# How long to wait for sandbox commands
-SBX_TIMEOUT = 3600  # 1 hour max
+# How long to wait for sandbox commands. #696 AC1: ONE definition, imported from
+# the sbx strategy, where the per-command ceiling now lives and where the
+# ``VENYA_SBX_TIMEOUT`` override is resolved. It used to be a second bare 3600 in
+# this file, and two constants with the same number is how a deployment sets one
+# door and still gets the other. Kept as a module name because the direct-path
+# bound, the daemon tmp sweep and the existing tests all cite it.
 
 # Cap for the LEGACY direct (subprocess.Popen) path — output capture AND the wait that
 # follows it. Ticket direct-path-capture-timeout-untimed-wait #470: the capture
@@ -186,20 +191,27 @@ def _direct_path_timeout() -> float:
     Same env-override idiom as ``VENYA_SBX_CREATE_TIMEOUT`` in the sbx
     strategy: read at call time so a unit cell can inject a short bound
     instead of waiting out an hour.
+
+    #696 AC1: the fallback is the sbx command ceiling resolver, not the bare
+    constant, so ``VENYA_SBX_TIMEOUT`` sets ONE per-command bound for both
+    execution paths and a deployment cannot shorten the sandbox hold while a
+    legacy-direct command still runs to the hour. ``VENYA_DIRECT_PATH_TIMEOUT``
+    stays the more specific override and wins when both are set. With neither
+    set the value is the shipped 3600 s, byte-for-byte unchanged.
     """
     raw = os.environ.get(DIRECT_PATH_TIMEOUT_ENV)
     if raw is None or raw == "":
-        return float(SBX_TIMEOUT)
+        return sbx_command_timeout()
     try:
         return max(float(raw), 0.0)
     except ValueError:
         logger.warning(
-            "%s=%r is not a number — using the %d s default for the direct path",
+            "%s=%r is not a number — using the %s s default for the direct path",
             DIRECT_PATH_TIMEOUT_ENV,
             raw,
-            SBX_TIMEOUT,
+            sbx_command_timeout(),
         )
-        return float(SBX_TIMEOUT)
+        return sbx_command_timeout()
 
 
 # Shell metacharacters that are not permitted in executor commands.

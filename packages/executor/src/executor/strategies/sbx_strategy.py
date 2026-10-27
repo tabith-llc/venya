@@ -61,8 +61,41 @@ WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec
 # askpass-helper-noexec-mount-conflict).
 CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec
 
-# How long to wait for sandbox commands
+# How long to wait for sandbox commands.
+# Override per-deployment: `VENYA_SBX_TIMEOUT` (seconds), read AT CALL TIME by
+# `sbx_command_timeout()` below — ticket no-per-command-ceiling #696 AC1. The
+# constant was a bare literal with no door: one command could hold the single
+# admission permit for the full hour (#695's durability half). The default is
+# unchanged; the knob is what lets a deployment (and a unit cell) bind the hold
+# shorter than every client fuse upstream (relay read 300 s, nginx 330 s, CLI/MCP
+# 340 s) and shorter than the operator's own budget.
 SBX_TIMEOUT = 3600  # 1 hour
+SBX_TIMEOUT_ENV = "VENYA_SBX_TIMEOUT"
+
+
+def sbx_command_timeout() -> float:
+    """Sandbox command-execution bound (#696 AC1).
+
+    Same env-override idiom as ``VENYA_DIRECT_PATH_TIMEOUT`` (``_direct_path_timeout``
+    in executor.py) and ``VENYA_SBX_CREATE_TIMEOUT``: read at call time so a unit
+    cell can inject a short bound instead of waiting out an hour. Empty-or-absent
+    keeps the shipped default; a non-numeric value warns with both the value and
+    the default and falls back; the floor is 0.0.
+    """
+    raw = os.environ.get(SBX_TIMEOUT_ENV)
+    if raw is None or raw == "":
+        return float(SBX_TIMEOUT)
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a number — using the %d s default for the sbx command path",
+            SBX_TIMEOUT_ENV,
+            raw,
+            SBX_TIMEOUT,
+        )
+        return float(SBX_TIMEOUT)
+
 
 # How long to wait for the agent-template pull + microVM create (`sbx create`).
 # Measured (2026-09-02, fast uplink): cold *first-ever* pull of the multi-GB
@@ -1112,7 +1145,7 @@ class SbxStrategy(InjectionStrategy):
             result = subprocess.run(  # nosec
                 cmd,
                 capture_output=True,
-                timeout=SBX_TIMEOUT,
+                timeout=sbx_command_timeout(),
                 check=False,
                 stdin=subprocess.DEVNULL,
             )
