@@ -98,6 +98,31 @@ def src_files(root: Path) -> list[Path]:
     return found
 
 
+def _bound_names_in_file(tree: ast.Module) -> set[str]:
+    """Local names that mean a subprocess call, covering BOTH import spellings.
+
+    ``import subprocess`` -> the attribute form ``subprocess.run(...)``.
+    ``from subprocess import run`` -> the bare form ``run(...)``.
+    ``import subprocess as sp`` -> ``sp.run(...)``.
+
+    The attribute form alone is evadable by one import line, and a gate that is evaded by the
+    ordinary way to write the call is not a gate. Measured at this row: the shipped tree uses only
+    the attribute form (0 hits for the other two), so this widening costs nothing today and closes
+    the hole for tomorrow.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    names.add(alias.asname or "subprocess")
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            for alias in node.names:
+                if alias.name in SUBPROCESS_CALLS:
+                    names.add(alias.asname or alias.name)
+    return names
+
+
 def call_sites(path: Path) -> list[tuple[int, str, list[str], bool, str]]:
     """``(line, call name, keyword names, treated as bounded, enclosing function)``.
 
@@ -107,6 +132,7 @@ def call_sites(path: Path) -> list[tuple[int, str, list[str], bool, str]]:
     source = path.read_text()
     tree = ast.parse(source)
     lines = source.splitlines()
+    receivers = _bound_names_in_file(tree)
     # Map every node to its nearest enclosing function, so an exemption names the code it excuses.
     parent: dict[ast.AST, ast.AST] = {}
     for node in ast.walk(tree):
@@ -125,10 +151,18 @@ def call_sites(path: Path) -> list[tuple[int, str, list[str], bool, str]]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr not in SUBPROCESS_CALLS:
-            continue
-        base = func.value
-        if not (isinstance(base, ast.Name) and base.id == "subprocess"):
+        call_name: str | None = None
+        if isinstance(func, ast.Attribute) and func.attr in SUBPROCESS_CALLS:
+            # ``subprocess.run(...)`` / ``sp.run(...)`` — the receiver must be the imported module.
+            base = func.value
+            if isinstance(base, ast.Name) and base.id in receivers:
+                call_name = func.attr
+        elif isinstance(func, ast.Name) and func.id in SUBPROCESS_CALLS:
+            # ``run(...)`` — only when `from subprocess import run` is in force in this file,
+            # so a project's own unrelated `run()` function is never flagged.
+            if func.id in receivers:
+                call_name = func.id
+        if call_name is None:
             continue
         keywords = sorted(k.arg for k in node.keywords if k.arg)
         has_timeout = "timeout" in keywords
@@ -137,7 +171,7 @@ def call_sites(path: Path) -> list[tuple[int, str, list[str], bool, str]]:
         if not has_timeout and any(k.arg is None for k in node.keywords):
             window = lines[max(0, node.lineno - 4) : node.lineno + 1]
             has_timeout = any(EXEMPT_COMMENT in line for line in window)
-        sites.append((node.lineno, func.attr, keywords, has_timeout, enclosing_func(node)))
+        sites.append((node.lineno, call_name, keywords, has_timeout, enclosing_func(node)))
     return sites
 
 

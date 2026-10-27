@@ -620,6 +620,38 @@ class TestSubprocessTimeoutCensus:
             census.census(root)
         assert "does not parse" in str(ei.value)
 
+    def test_the_from_subprocess_import_form_is_also_caught(self, tmp_path):
+        """The census must not be evaded by the ordinary way to shorten the call.
+
+        A walk keyed only to the ``subprocess.run`` attribute form reads
+        ``from subprocess import run; run([...])`` as clean — a bound silently absent. This cell
+        plants BOTH spellings and requires BOTH to be flagged, and then requires an unrelated
+        project function named ``run`` to stay invisible, because a gate that flags everything
+        gets switched off.
+        """
+        root = tmp_path / "repo"
+        src = root / "packages" / "widget" / "src" / "widget"
+        src.mkdir(parents=True)
+        for i in range(census.MIN_SCANNED_FILES):
+            (src / f"pad_{i}.py").write_text("x = 1\n")
+        (src / "w.py").write_text(
+            "from subprocess import run\nimport subprocess as sp\n\n"
+            "def bare():\n    run(['true'], check=False)\n\n"
+            "def aliased():\n    sp.run(['true'], check=False)\n\n"
+            "def unrelated():\n    return _own_run(['true'])\n\n"
+            "def _own_run(cmd):\n    return cmd\n"
+        )
+        sites = census.call_sites(src / "w.py")
+        flagged = {(fn, name) for _, name, _, bounded, fn in sites if not bounded}
+        assert ("bare", "run") in flagged, sites
+        assert ("aliased", "run") in flagged, sites
+        assert all(fn != "unrelated" for fn, _ in flagged), sites
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = census.census(root, exemptions={})
+        assert rc == 1, buf.getvalue()
+        out = buf.getvalue()
+        assert "bare" in out and "aliased" in out, out
+
     def test_the_single_shipped_exemption_is_the_legacy_direct_path(self):
         """The named exemption, with its reason, asserted rather than assumed: exactly one entry,
         it names ``_run_command_direct`` in ``executor.py``, and the reason carries the two facts
