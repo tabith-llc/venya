@@ -85,24 +85,29 @@ SBX_CREATE_TIMEOUT = 240
 # DNS resolver, so a deployment's worst case is this number times its entry count.
 #
 # Default 30 s, chosen from a physical capture rather than a guess. Measured on
-# `venya-exec-3` as `bot`, with each predicate named because the two shapes are not
-# one number:
+# `venya-exec-3` as `bot` against the live `venya-sandboxd` unit, with each predicate
+# named because the two shapes below are not one number:
 #   * 19 SUCCESSFUL registrations (`sbx policy allow network <host>`, global scope):
-#     406-1059 ms, median ~446 ms; the first call after a sandboxd restart took 803 ms.
-#   * 18 calls in the SHIPPED argv shape (`... --sandbox <name>`), which this guest
+#     406-1059 ms, median 446 ms.
+#   * 19 calls in the SHIPPED argv shape (`... --sandbox <name>`), which this guest
 #     answered `sandbox "…" not found` (rc=1) because no sandbox could be created here
-#     — the same sbx-absent class the executor suite carries: 293-422 ms, one 1465 ms
-#     outlier. This is the round trip the product makes, refused at the daemon.
+#     — the same sbx-absent class the executor suite carries: 293-1465 ms, median 347 ms.
+#     This is the round trip the product makes, refused at the daemon.
 #   * 20 successful registrations applied back to back as one loop (the shape of one
 #     `apply_network_policy` call): 9387 ms total, ~469 ms per rule.
 # 30 s is ~28x the slowest SUCCESSFUL registration and ~20x the slowest single call of
 # any kind observed on that guest, so a healthy registration cannot trip it; a 20-entry
-# allowlist finishes in ~9 s, inside the core's 300 s relay read budget.
+# allowlist finishes in ~9 s, inside the core's 300 s relay read budget. No cold-daemon
+# figure is claimed: `pgrep`/`pkill` for the daemon read 0 as `bot` while
+# `systemctl is-active venya-sandboxd` said active (the permission wall fleet-vm-ops
+# names), so a "restart" driven that way restarts nothing — the unit reports
+# `NRestarts=0` with a start timestamp predating the whole capture.
 # NOT MEASURED, and stated so it is not mistaken for measured: the latency of a rule
-# registration against a LIVE sandbox. This fleet's guests cannot create one (see the
-# leg report), so the shipped shape was exercised only in its refused face. The two
-# figures above bracket it — a successful registration with the daemon already holding
-# the sandbox is the same RPC with one more lookup, not a different order of work.
+# registration against a LIVE sandbox. This guest cannot create one — `sbx create` fails
+# at "failed to run sandbox container", and the daemon's own journal shows Docker Hub
+# token refresh timing out on DNS — so the shipped argv was exercised only in its refused
+# face. The two figures above bracket it: a registration against a live sandbox is the
+# same RPC with one more lookup, not a different order of work.
 # Override per-deployment: `VENYA_SBX_POLICY_TIMEOUT` (seconds), read AT CALL TIME by
 # `sbx_policy_timeout()` below, so a unit cell can inject a short bound instead of
 # waiting the default out.
