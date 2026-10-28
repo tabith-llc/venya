@@ -1598,6 +1598,45 @@ def cmd_recovery(client: APIClient, args: Any) -> int:
         return 1
 
 
+def _resolve_run_executor_id(args: Any) -> str | None:
+    """The executor a ``run`` targets: the ``--executor-id`` flag if given, else the
+    ``executor_id`` key in ``executor.toml``, else nothing (#712 (a)).
+
+    Nothing here invents a value. The former ``or "default"`` fallback sent a token no
+    executor is registered under, so the command died at the server with an error that
+    named neither the id nor where it came from; an operator mid-incident could not tell
+    a missing flag from a missing executor. Returning None is the caller's cue to refuse
+    at the client, before any network.
+
+    A present-but-unreadable toml is a WARNING on stderr, never a silent "no id": the
+    same posture ``_resolve_executor_ca_bundle`` takes for the bundle in that file.
+    """
+    selected = getattr(args, "executor_id", None)
+    # MagicMock args in the sibling suites answer EVERY attribute; a non-str means
+    # "flag not given", not "an id to send" (register guards the same way, #395).
+    # A stray space around a typed id is a shell artifact, not a second executor, and
+    # an all-whitespace id is an absent one — it must not become an empty URL segment.
+    if isinstance(selected, str):
+        selected = selected.strip()
+        if selected:
+            return selected
+    path = Path(EXECUTOR_TOML_PATH)
+    if not path.exists():
+        return None
+    try:
+        import tomllib
+
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, ValueError) as e:
+        print(f"WARNING: cannot read {path}: {e}", file=sys.stderr)
+        return None
+    value = data.get("executor_id") if isinstance(data, dict) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def cmd_run(client: APIClient, args: Any) -> int:
     """Execute a command via the executor with secret injection and output filtering.
 
@@ -1627,7 +1666,14 @@ def cmd_run(client: APIClient, args: Any) -> int:
         print("Error: command required", file=sys.stderr)
         return 1
 
-    executor_id = getattr(args, "executor_id", None) or "default"
+    # The id is RESOLVED, never assumed (#712 (a)): flag > executor.toml > refuse.
+    executor_id = _resolve_run_executor_id(args)
+    if executor_id is None:
+        print(
+            f"Error: no executor id was configured: pass --executor-id or set executor_id in {EXECUTOR_TOML_PATH}",
+            file=sys.stderr,
+        )
+        return 1
 
     # Step 1: Collect secret keys (server resolves and wraps them)
     secret_keys = getattr(args, "secrets", None) or []
@@ -1646,7 +1692,7 @@ def cmd_run(client: APIClient, args: Any) -> int:
         session_id = session_result["session_id"]
         print(f"Session created: {session_id}")
     except APIClientError as e:
-        print(f"Failed to create session: {e}", file=sys.stderr)
+        print(f"Failed to create session on executor={executor_id}: {e}", file=sys.stderr)
         return 1
 
     # Step 3: Execute command via executor
@@ -1678,13 +1724,16 @@ def cmd_run(client: APIClient, args: Any) -> int:
         if masked_count > 0:
             print(f"\n({masked_count} secret(s) masked in output)", file=sys.stderr)
 
-        print(f"\nCommand exited with code: {exit_code}")
+        # The answer names the executor it ran on, echoed from the caller's own
+        # configured id — never inferred from the command text (#712 AC5), the same
+        # shape the merged MCP face prints at server.py `run_command` (#712).
+        print(f"\nCommand exited with code: {exit_code} (executor={executor_id})")
         return exit_code
     except APIClientError as e:
-        print(f"Execution failed: {e}", file=sys.stderr)
+        print(f"Execution failed on executor={executor_id}: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Execution failed: {e}", file=sys.stderr)
+        print(f"Execution failed on executor={executor_id}: {e}", file=sys.stderr)
         return 1
 
 

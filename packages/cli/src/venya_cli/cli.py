@@ -677,7 +677,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--executor-id",
-        help="Executor ID to target (default: from config or 'default')",
+        help="Executor ID to target (default: executor_id from /etc/venya/executor.toml; the command is refused if neither is set)",
     )
     run_parser.add_argument(
         "--server-url",
