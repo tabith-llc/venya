@@ -18,8 +18,9 @@ import logging
 import sys
 
 from mcp.server import Server
+from mcp.server.session import ServerSession
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import ProgressToken, TextContent, Tool
 
 from .client import SessionExpiredError, VenyaAPIError, VenyaClient, _bootstrap_tls_verify
 from .config import MCPConfig
@@ -28,6 +29,75 @@ logger = logging.getLogger("venya.mcp.server")
 
 app = Server("venya")
 _client: VenyaClient | None = None
+
+# Emission cadence for run_command progress notifications (#710 option (a)). This is a TICK
+# INTERVAL, not a fuse: it bounds nothing. No timeout in this stack moves here — the chain that
+# does bound a run is named in client.py's own comment (relay < nginx proxy_read_timeout <
+# _EXECUTE_TIMEOUT_SECONDS) and is unchanged, as is the MCP host's per-request deadline, which
+# is the only fuse a progress notification can re-arm (leg 637 §1: the client-side one, not the
+# server-to-core httpx one).
+_PROGRESS_TICK_SECONDS = 5.0
+
+# The whole payload is this constant plus a tick counter. Stage and liveness only: no command
+# text, no argv, no output fragment, no secret key, no path, no executor id (#710 AC, owner
+# ruling R-2632). A shape that is identical for every call cannot disclose anything about a call.
+_PROGRESS_STAGE = "running"
+
+
+def _progress_target() -> tuple[ServerSession, ProgressToken] | None:
+    """Return ``(session, progress_token)`` if this request asked for progress, else ``None``.
+
+    Progress is opt-in per request (`_meta.progressToken`), so a caller that did not ask is
+    served exactly as before and nothing is emitted. Outside a request context — the handler
+    called directly, as the unit suite does — ``request_context`` raises LookupError and there
+    is nobody to notify.
+    """
+    try:
+        ctx = app.request_context
+    except LookupError:
+        return None
+    meta = ctx.meta
+    token = meta.progressToken if meta is not None else None
+    if token is None:
+        return None
+    return ctx.session, token
+
+
+async def _await_with_ticks(awaitable, *, stage: str = _PROGRESS_STAGE):
+    """Await ``awaitable``, ticking a liveness notification beside it until it completes.
+
+    ``client.run_command`` awaits one HTTP request that does not return until the command is
+    done, so there is no gap inside which to tick: the emitter has to be concurrent with the
+    await (#710 leg 637 §4). The tick is advisory — a notification that cannot be delivered
+    (a caller already gone) is dropped with a log line and never replaces the answer, which is
+    still whatever the awaited call returned, unchanged.
+    """
+    target = _progress_target()
+    if target is None:
+        return await awaitable
+
+    session, token = target
+    task = asyncio.ensure_future(awaitable)
+    ticks = 0
+    try:
+        while True:
+            # `timeout=` here is asyncio.wait's own kwarg carrying the tick interval. It is not
+            # a deadline on the command: the task is never cancelled by it, only by the caller.
+            done, _ = await asyncio.wait({task}, timeout=_PROGRESS_TICK_SECONDS)
+            if done:
+                break
+            ticks += 1
+            try:
+                await session.send_progress_notification(progress_token=token, progress=float(ticks), message=stage)
+            except Exception:
+                logger.debug("progress tick %d undelivered; serving the answer anyway", ticks)
+    finally:
+        # Reachable only when the caller itself was cancelled (a host that gave up mid-run):
+        # the command task then goes the way its caller already went, exactly as it did when
+        # the handler awaited it directly.
+        if not task.done():
+            task.cancel()
+    return task.result()
 
 
 def get_client() -> VenyaClient:
@@ -276,10 +346,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         elif name == "run_command":
             executor_id = arguments["executor_id"]
-            result = await client.run_command(
-                executor_id=executor_id,
-                command=arguments["command"],
-                secret_keys=arguments["secret_keys"],
+            result = await _await_with_ticks(
+                client.run_command(
+                    executor_id=executor_id,
+                    command=arguments["command"],
+                    secret_keys=arguments["secret_keys"],
+                )
             )
             exit_code = result.get("exit_code", -1)
             stdout = result.get("stdout", "")
