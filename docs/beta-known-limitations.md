@@ -1036,6 +1036,36 @@ asymmetry is kept, this entry stays and is never softened.
 
 ---
 
+### A masked count does not say which masking pass produced it, and on one path that pass is the narrower one
+
+Status: known limitation in beta · Target: `#715` (deferred by the owner; this entry is the price of the defer and stays until the leg lands) · Tracked as: `#715`
+
+**Who is affected:** anyone reading `masked_count` from `run_command` on a deployment where the
+server-side Stage-2 filter is configured — and anyone reading it where it is not.
+
+**What the limitation is:** two passes can produce the number, and the answer carries no record of
+which one ran. **The count is honest about which pass won, and carries no memory that a pass
+happened — and on the fallback arm the mask reflects the local set only, which may be narrower than
+the session's full set.** There are three states, and they are not the same:
+
+- **Stage-2 confirmed** — the server answered, and the mask reflects the full session set.
+- **Stage-2 fell back** — the server did not answer (no route match, a session whose TTL reaped
+  mid-run, or any non-200 from the filter route), and the executor kept the Stage-1 result. The mask
+  reflects the local set only.
+- **No Stage-2 configured** — the local pass is the whole of it, and always was.
+
+**What is NOT at issue:** the masking itself. **The fail-open posture holds at every state in the
+table** — Stage 1 runs before the server is ever asked, the fallback path keeps Stage-1's masked
+output rather than passing anything through, and an unconfigured client still ships Stage-1 seeds.
+What is blind is the *history* of the number, not the masking.
+
+**What changes at beta+:** the deferred leg adds a three-valued provenance signal — confirmed /
+fell back / no server — on the response face, not a boolean. Until then, treat a `masked_count` from
+a run you did not watch complete as the local pass, and if the distinction matters to you, ask the
+executor. This entry is removed when that leg ships; it is never softened before then.
+
+---
+
 ## How to read an entry, and how this list is maintained
 
 Each entry gives: what you will hit, whether it is fixed-targeted or open, the issue that

@@ -190,15 +190,22 @@ The agent calls `get_audit(limit=5)`:
 
 ```
 Recent audit records:
-  [2026-09-23T14:03:41+00:00] command_executed user=jreyes executor=reston-va-storage-01
-  [2026-09-23T14:02:58+00:00] command_executed user=jreyes executor=reston-va-storage-01
-  [2026-09-23T14:01:12+00:00] command_executed user=jreyes executor=reston-va-network-01
+  [2026-09-23T14:03:41+00:00] command_executed user=jreyes executor=reston-va-storage-01 command='sshpass -f /run/secrets/venya/12 ssh nas-admin@192.0.2.40 initiate-failover reston-data-01 --target=192.0.2.41' exit_code=0 duration_ms=4120.75 session_id='9b7c1e40-2c1a-4f3b-9d5e-0192a3b4c5d6'
+  [2026-09-23T14:02:58+00:00] command_executed user=jreyes executor=reston-va-storage-01 command='sshpass -f /run/secrets/venya/12 ssh nas-admin@192.0.2.40 get-volume-status reston-data-01' exit_code=0 duration_ms=2810.4 session_id='9b7c1e40-2c1a-4f3b-9d5e-0192a3b4c5d6'
+  [2026-09-23T14:01:12+00:00] command_executed user=jreyes executor=reston-va-network-01 command='ssh nas-admin@192.0.2.40 get-volume-status reston-data-01' exit_code=255 duration_ms=130412.7 session_id='9b7c1e40-2c1a-4f3b-9d5e-0192a3b4c5d6'
 ```
 
 Every execution is attributed to `jreyes` — the human who authorized the
-session, not the agent. The full audit rows (via `venya audit` or the admin
-API) additionally carry the command string and the secret ids used; they
-never carry secret values.
+session, not the agent — and each line now names the command text, its exit
+code, how long it ran and the session it ran on, so "did my write run?" is
+answerable from the tool's own output without leaving it. Not every row carries
+a duration: a row the core wrote because the relay gave up prints
+`exit_code=None` with `outcome='relay_timeout'`, which says *unknown, the caller
+left* and never reads as a clean run. The full audit rows (via `venya audit` or
+the admin API) additionally carry the secret ids used; no face, this one
+included, ever carries secret values. Command text is printed escaped, so a
+newline stored inside a command stays data inside one line instead of becoming
+a second record.
 
 ---
 

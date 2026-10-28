@@ -251,6 +251,20 @@ async def list_tools() -> list[Tool]:
     ]
 
 
+# #709: audit fields the ledger already holds and the renderer used to drop. Rendered for a row
+# that carries a stored `command` (all three `command_executed` producers and the
+# `command_rejected` write do; login and revocation rows do not, so their lines are untouched),
+# and within such a row each key appears only where that row actually holds it — `duration_ms`
+# exists on the executor forwarder alone, so inventing `duration_ms=N/A` would put a field on
+# the line that the ledger never stored. Values interpolate with `!r`, not `{}`: this block
+# joins its lines with "\n", and the stored text is `shlex.join` output, which wraps a newline
+# in quotes without escaping the character — one stored command would otherwise arrive at the
+# agent as a second forged audit record. `exit_code` keeps three visible states: no clause
+# (never stored), `=None` (stored null — the relay-timeout row's honest "unknown, the caller
+# left", tagged by its own `outcome=` clause), and `=0` (a real zero).
+_AUDIT_DETAIL_KEYS = ("command", "exit_code", "duration_ms", "outcome", "session_id")
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool invocations from the LLM client.
@@ -358,6 +372,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     f"{r.get('event_type', 'N/A')} "
                     f"user={r.get('user_id', 'N/A')} "
                     f"executor={fields.get('executor_id', 'N/A')}"
+                    + (
+                        "".join(f" {key}={fields[key]!r}" for key in _AUDIT_DETAIL_KEYS if key in fields)
+                        if "command" in fields
+                        else ""
+                    )
                 )
             return [TextContent(type="text", text="\n".join(lines))]
 
