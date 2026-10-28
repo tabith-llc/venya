@@ -112,6 +112,28 @@ and how to close it are in [deployment-config.md](deployment-config.md).
 
 `/api/v1/health` is the canonical liveness endpoint (public, unauthenticated, version-only — it must never grow into a config dump). Bare `/health` is served as an alias returning the identical payload, for monitoring tools and load balancers that probe `/health` by convention. Both are unauthenticated and counted under the generic per-IP rate-limit tier (no health-specific exemption); every other unknown path still returns 401, so route existence is not disclosed to unauthenticated callers.
 
+### How the two product roles get created
+
+Every core start re-applies the two roles the product ships with — `admin` and `user` — if
+they are missing. It is a get-or-create run at startup (`server/role_seed.py`), so a normal
+boot writes nothing; it writes only when a row is absent, and each row it creates emits a
+`role_created` audit event beside the operator-facing one the admin API emits. Nothing is
+needed from you and no reinstall is involved: a core whose `roles` table was emptied — by a
+hand-cleared database, or a restore that brought users but not roles — heals its own role
+rows on the next `systemctl restart venya-core`, and the boot journal names them:
+
+```bash
+journalctl -u venya-core -b | grep -m1 "Re-applied missing product roles"
+# Jun 01 09:00:01 core-1 venya-server[1234]: Re-applied missing product roles at startup: admin, user
+```
+
+Two things this does NOT do, so the boundary is on the record: **migrations never seed
+roles** (migration `001` creates the `roles` table and its unique constraint and inserts no
+rows — the installer runs migrations, and they create the table, and that is all), and the
+re-apply **never changes a role that already exists** — it will not re-permission, rename,
+overwrite, or delete `admin`, `user`, or any role you created yourself. It creates the two
+named rows and stops there.
+
 **Re-runs are the idempotency contract.** Re-running an installer on a live
 host reuses stored secrets (`.env` stays byte-identical; an explicitly passed
 passphrase must MATCH the stored one or the install aborts — and if the stored
@@ -800,6 +822,14 @@ same-origin `.sha256` sidecar (https origins only) = corruption guardrail
 only, not a security boundary.
 
 ## Troubleshooting
+
+- **`400 Role '<name>' not found` on a grant, `403 Admin role not found` for a human
+  session, and `503 Admin role not found — admin role must exist before recovery` from the
+  break-glass door all mean the same thing on an older build: the `admin`/`user` rows were
+  missing from the `roles` table.** They no longer stay missing: every core start re-creates
+  any absent seed role — see [How the two product roles get created](#how-the-two-product-roles-get-created).
+  On a core running a build without that re-apply, restart the service on the new build, and
+  do not reach for `venya init` as the repair: that path writes a pending-admin row too.
 
 - `502` from nginx immediately after core install: give the backend a few
   seconds to bind; re-probe `api/v1/health`.
