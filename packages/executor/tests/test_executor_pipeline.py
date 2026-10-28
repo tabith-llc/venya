@@ -621,6 +621,298 @@ class TestValidateCommandStructure:
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure(["|"])
 
+    def test_metachar_membership_is_pinned_by_literal(self):
+        """Ticket #713 AC4: the accepted set is asserted, not merely enumerated.
+
+        WHY THIS CELL EXISTS AND WHY IT IS NOT REDUNDANT. The shipped alphabet cell
+        (`test_metachar_alphabet_rejected_via_production_execute`) is parametrised FROM
+        ``SHELL_METACHARS`` itself — ``@pytest.mark.parametrize("ch", sorted(SHELL_METACHARS))``.
+        So it re-proves the set it reads and cannot see the set change: adding a character
+        silently adds an id and stays green. Measured at this face: that cell collects 17 ids,
+        exactly the member count, and nothing else in the repo names the set
+        (`grep -rln SHELL_METACHARS packages/*/tests docs/` -> this file and
+        `docs/secret-shapes.md` only).
+
+        The report this row corrects told the reader that ``%`` cost it three calls and implied
+        ``%`` was blocked. It is not — the refusal came from the BRACES in `%{http_code}`
+        (measured: `'%' in SHELL_METACHARS` is False, `'{'` is True). That framing invites exactly
+        the edit AC4 forbids: widening a security gate to satisfy a ticket is the prohibited
+        direction, and here it would also break the ruled `curl -w %{http_code}`-shaped
+        placeholder use an operator can otherwise reach with braces escaped.
+
+        So the set is pinned BY VALUE. Adding a member reddens this cell and forces a row with its
+        own justification; removing one reddens it too, because the literal is the whole contract.
+        """
+        from executor.executor import SHELL_METACHARS
+
+        assert SHELL_METACHARS == frozenset(
+            {
+                "\x00",  # NUL — argv-nul-passes-gate #333
+                "|",
+                ";",
+                "&",
+                "$",
+                "`",
+                "(",
+                ")",
+                "{",
+                "}",
+                "<",
+                ">",
+                "!",
+                "?",
+                "\n",
+                "\r",  # newline/CR — a stored refusal line must stay one line
+                "*",
+            }
+        ), "SHELL_METACHARS changed: #713 AC4 forbids widening this set to satisfy a ticket"
+        # The specific character the report named, asserted beside the set so the reason is legible.
+        assert "%" not in SHELL_METACHARS, "'%' was never blocked; %{http_code} dies on the braces"
+
+    def test_non_member_percent_still_accepted_paired_positive(self):
+        """Paired positive for the pin above: a non-member must PASS, so the literal cannot be
+        read as a blanket deny. `%s` is the shape that survives today, and the cell that makes
+        ``test_metachar_membership_is_pinned_by_literal`` mean something."""
+        from executor.executor import _validate_command_structure
+
+        assert _validate_command_structure(["/usr/bin/printf", "%s", "ok"]) == ["/usr/bin/printf", "%s", "ok"]
+
+    def test_braces_are_the_real_refusal_in_the_report_shape(self):
+        """The report's own example, refused for what actually refuses it.
+
+        ``curl -w %{http_code}`` is refused, and the reason matters: it is the brace pair, not the
+        percent. Recorded as a cell because this row's whole correction turns on it and a future
+        reader should not have to re-derive membership by hand.
+        """
+        from executor.executor import SHELL_METACHARS, _validate_command_structure
+
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure(["curl", "-sS", "-w", "%{http_code}", "https://example.com"])
+        assert "%" not in SHELL_METACHARS
+        assert "{" in SHELL_METACHARS and "}" in SHELL_METACHARS
+
+    def test_metachar_refusal_does_not_echo_the_element_value(self):
+        """#713 AC3 — the load-bearing negative for the no-echo constraint.
+
+        The constraint is stated in the loop's own comment (``executor.py``, the strict-UTF-8
+        block: *"The element value is never echoed"*) and the row makes it AC3 because the thin
+        message invites the obvious wrong fix — interpolate ``elem`` so the caller can see the
+        problem. That reopens #333/#334: a bound-secret path would be disclosed into the refusal
+        text, which travels onward as the relay's 422 detail (``relay_listener.py`` →
+        ``self._reply(422, {"detail": str(exc)})``), into the executor journal line
+        (``logger.warning("Relay /execute policy rejection … %s", exc)``), and into the core audit
+        row's ``reason`` field (``_record_rejection_audit``). That is three operator-visible
+        surfaces, not one string.
+
+        Non-vacuity, which is the whole point of the fixture choice: the element carries a
+        distinctive secret-path-shaped value that WOULD appear if redaction were absent. Proven
+        able to fail by mutation at this face — interpolating ``{elem}`` into the metacharacter
+        refusal turns THIS cell red (assertion on the bound path), and restoring the text turns it
+        green. Its sibling below is falsified by a different mutation (a true swap of the two arms),
+        not by this one. Nothing here asserts the message is informative; today the shipped text
+        interpolates nothing at all, so this cell is a GUARD ON THE PENDING #713 EDIT rather than a
+        report of a live defect. That the message is thin is AC1, and its wording is a separate
+        decision.
+        """
+        from executor.executor import _validate_command_structure
+
+        bound_path = "/run/secrets/venya/00000000-0000-4000-8000-000000000713"
+        with pytest.raises(ValueError) as got:
+            _validate_command_structure(["/usr/bin/echo", f"{bound_path}|tail"])
+        reason = str(got.value)
+        assert bound_path not in reason, "the refusal echoed a session-bound secret path"
+        assert "00000000-0000-4000-8000-000000000713" not in reason, "the refusal echoed the secret id"
+
+        # Second fixture, for the line-integrity clause: a NEWLINE is itself a member of the set,
+        # so an echoed element could forge an extra refusal line. Asserting single-line-ness only
+        # against a newline-free element would be a clause that cannot fail, so the element here
+        # carries one. Proven able to bite: echoing {elem} in this arm turns THIS assertion red.
+        with pytest.raises(ValueError) as got2:
+            _validate_command_structure(["/usr/bin/echo", "poison\nand-another-line;"])
+        reason2 = str(got2.value)
+        assert "\n" not in reason2 and "\r" not in reason2, (
+            "the refusal text is not a single line — an echoed element can forge an extra "
+            "journal/audit line (the reason the raw character must never be interpolated)"
+        )
+        assert "poison" not in reason2, "the refusal echoed a whole element"
+
+    def test_surrogate_element_is_refused_by_the_utf8_arm_that_runs_first(self):
+        """#713 AC3's second failure mode, pinned as arm ORDER rather than as a message.
+
+        An element carrying both a lone surrogate and a metacharacter cannot reach the
+        metacharacter arm: the strict-UTF-8 check is the FIRST arm of this loop, so the surrogate
+        is refused there, by a message that names only the index. That ordering is what keeps a
+        value-free refusal from ever being handed an unencodable character to interpolate, and it
+        is the reason AC3's crash mode is structural rather than textual. Asserting the order (not
+        just "it does not crash") is the half that fails if anyone reorders the loop: proven at this
+        face by a true swap of the two arms, which turns this cell red with the metacharacter text as
+        the actual message. (An earlier attempt at that mutation only moved the UTF-8 arm past the
+        ``<`` arm and still passed — a no-op edit that would have made this claim false, caught by
+        re-reading the line order rather than the return code.)
+        """
+        from executor.executor import _validate_command_structure
+
+        with pytest.raises(ValueError, match="strict UTF-8") as got:
+            _validate_command_structure(["/usr/bin/echo", "\ud800;tail"])
+        assert "metacharacter" not in str(got.value).lower(), "the metacharacter arm answered a surrogate"
+        # The refusal must be strictly UTF-8 encodable: the #334 crash mode is an unpaired
+        # surrogate surviving INTO the message text and then dying on the audit write, which is
+        # what `_record_rejection_audit` / the 422 detail hop would hit. `isascii()` would have
+        # passed on any ASCII string, including a broken one, so the check is the encode itself.
+        str(got.value).encode("utf-8")  # raises UnicodeEncodeError if a surrogate leaked into the text
+
+    # ---------------------------------------------------------------------------
+    # #713 AC1/AC2 — the ruled FORM B sentence (owner `O396`, "B.").
+    #
+    # Form B: name the element index AND every class the element trips, comma-joined in
+    # the order the ROW's own six-class list enumerates (`pipe/semicolon-ampersand,
+    # quoting/expansion, grouping-braces, redirect, glob-history, whitespace-control`).
+    # The order is lifted from the row, not invented here; the fused-`<` arm is NOT in the
+    # map (AC6 — it raises on shape, not on set membership, so a class word there would
+    # report a match the code never made); the script-file hint is RETAINED verbatim
+    # (owner part 3, human-directed). Cells were written and observed RED at the shipped
+    # text first — see the leg report.
+    # ---------------------------------------------------------------------------
+
+    def test_class_map_partitions_the_pinned_set_with_no_seventh_class(self):
+        """The row's six classes must COVER the shipped set exactly — pairwise disjoint,
+        no member unassigned, no class naming a character the gate does not check.
+
+        This is the instrument behind the leg's STOP condition ("if you hit an element that
+        trips a class the row's six cannot name, STOP — that is a row defect, not a diff").
+        It is asserted against `SHELL_METACHARS` by value, so a set edit that outruns the
+        class map reddens this cell rather than silently producing a refusal with no class
+        to name. It can fail in three distinct ways: a gap, an overlap, and a class member
+        that is not in the set (the last is also AC4's widening ban, seen from the map side).
+        """
+        from executor.executor import METACHAR_CLASSES, SHELL_METACHARS
+
+        names = [name for name, _chars in METACHAR_CLASSES]
+        assert names == [
+            "pipe/semicolon-ampersand",
+            "quoting/expansion",
+            "grouping-braces",
+            "redirect",
+            "glob-history",
+            "whitespace-control",
+        ], "the class list or its ORDER moved — the order is the row's, not the code's"
+        union = frozenset()
+        for _name, chars in METACHAR_CLASSES:
+            union |= chars
+        assert union == frozenset(SHELL_METACHARS), (
+            f"class map no longer partitions SHELL_METACHARS: "
+            f"uncovered={sorted(SHELL_METACHARS - union)} extra={sorted(union - SHELL_METACHARS)}"
+        )
+        for i in range(len(METACHAR_CLASSES)):
+            for j in range(i + 1, len(METACHAR_CLASSES)):
+                assert not (METACHAR_CLASSES[i][1] & METACHAR_CLASSES[j][1]), (
+                    f"classes {METACHAR_CLASSES[i][0]!r} and {METACHAR_CLASSES[j][0]!r} overlap — "
+                    "a member in two classes makes the comma-joined sentence ambiguous"
+                )
+
+    @pytest.mark.parametrize(
+        ("element", "index", "expected_classes"),
+        [
+            # Both pairs from the lead's own measurements at 623/627, quoted in the dispatch:
+            # MEMBER counts, not class counts. Recomputed here: `{x}$y` trips 3 MEMBERS in 2
+            # CLASSES; `echo $(id | sh)` trips 4 members in 3 classes. The class sentence is
+            # what the row ruled, so the cell asserts the class list, and the member count is
+            # asserted beside it so nobody reads the dispatch's numbers as this one.
+            ("{x}$y", 1, "quoting/expansion, grouping-braces"),
+            ("echo $(id | sh)", 0, "pipe/semicolon-ampersand, quoting/expansion, grouping-braces"),
+            ("a|b;c", 2, "pipe/semicolon-ampersand"),
+            ("*?!", 1, "glob-history"),
+            ("a>b", 0, "redirect"),
+            ("poison\nq;", 1, "pipe/semicolon-ampersand, whitespace-control"),
+        ],
+    )
+    def test_refusal_names_index_and_every_class_in_the_rows_order(self, element, index, expected_classes):
+        """AC1 + AC2, Form B: the index is named, EVERY class the element trips is named,
+        comma-joined in the row's order, and only that order.
+
+        Falsifiable in the ways that matter: an index-free message fails it (the shipped text
+        today), a single-class-only message fails the multi-class rows, a set-iteration order
+        fails the exact-string assert (a set would put `grouping-braces` before
+        `quoting/expansion` for `{x}$y`), and an absent class fails every row.
+        """
+        from executor.executor import SHELL_METACHARS, _validate_command_structure
+
+        argv = ["z" * 1] * index + [element] if index else [element]
+        with pytest.raises(ValueError) as got:
+            _validate_command_structure(argv)
+        reason = str(got.value)
+        assert f"Argument {index}" in reason, reason
+        assert f"classes: {expected_classes}." in reason, reason
+        # Order guard, independent of the exact string: first mention must be first in the row.
+        positions = [reason.index(c) for c in expected_classes.split(", ")]
+        assert positions == sorted(positions), reason
+        # The hint the owner retained, still in its shipped words.
+        assert "Wrap complex commands in a script file and execute that instead." in reason, reason
+        # No member character may ride in the sentence — it is class names only.
+        assert not set(reason) & set(SHELL_METACHARS), "the refusal carried a metacharacter byte"
+
+    def test_fused_less_than_arm_names_index_and_carries_no_class_word(self):
+        """AC6 and owner part 2: the fused-`<` raise gets its OWN sentence, naming the shape,
+        and must NOT name a class.
+
+        It fires on `elem != "<"` — a structural condition, before the set test — so
+        `metachars = SHELL_METACHARS - {"<"}` never matched it and the word `redirect` there
+        would claim a match on a set the element was not tested against. Asserted both ways:
+        the sentence is the fused one, and none of the six class names appears in it.
+        """
+        from executor.executor import METACHAR_CLASSES, _validate_command_structure
+
+        with pytest.raises(ValueError) as got:
+            _validate_command_structure(["a<b"])
+        reason = str(got.value)
+        assert "Argument 0" in reason, reason
+        assert "fused" in reason.lower(), f"the fused-`<` arm did not name its own shape: {reason}"
+        for name, _chars in METACHAR_CLASSES:
+            assert name not in reason, f"the fused-`<` sentence carried the class word {name!r}"
+        assert "Wrap complex commands in a script file and execute that instead." in reason, reason
+
+    def test_report_shape_now_names_the_brace_class_not_a_percent(self):
+        """The row's headline correction, in the ruled sentence: `%{http_code}` is refused for
+        the BRACES and the refusal must say so, while `%` itself still passes.
+
+        AC3's no-echo rule is checked from the class side here: naming a class is not naming a
+        byte, so this stays truthful with the cells above (`not set(reason) & set(SHELL_METACHARS)`).
+        """
+        from executor.executor import _validate_command_structure
+
+        argv = ["curl", "-sS", "-w", "%{http_code}", "https://example.com"]
+        with pytest.raises(ValueError) as got:
+            _validate_command_structure(argv)
+        reason = str(got.value)
+        assert "Argument 3" in reason, reason
+        assert "classes: grouping-braces." in reason, reason
+        assert "percent" not in reason.lower() and "%" not in reason, reason
+        assert _validate_command_structure(["/usr/bin/printf", "%s", "ok"]) == [
+            "/usr/bin/printf",
+            "%s",
+            "ok",
+        ]
+
+    def test_metachar_refusal_sentence_is_still_one_line_and_value_free(self):
+        """AC3 re-proved against the RULED text, not the old thin one: adding the class list must
+        not have re-opened the echo path or the line-forging path.
+
+        The element below carries a bound-secret-path shape, a newline and a semicolon. The
+        refusal now prints two class names; it must print none of the element's own characters,
+        and it must stay one line so a stored audit `reason` and a journal entry cannot gain a
+        forged second line.
+        """
+        from executor.executor import SHELL_METACHARS, _validate_command_structure
+
+        bound_path = "/run/secrets/venya/00000000-0000-4000-8000-000000000713"
+        with pytest.raises(ValueError) as got:
+            _validate_command_structure(["/usr/bin/echo", f"{bound_path}\n|tail"])
+        reason = str(got.value)
+        assert bound_path not in reason and "00000000-0000-4000-8000-000000000713" not in reason, reason
+        assert "\n" not in reason and "\r" not in reason, reason
+        assert not set(reason) & set(SHELL_METACHARS), reason
+        assert "pipe/semicolon-ampersand, whitespace-control" in reason, reason
+
 
 class TestStage2NoSecretMaterial:
     """Stage-2 payload carries NO secret material at all.
@@ -712,7 +1004,7 @@ class TestStructuralGate:
         """Every SHELL_METACHARS member through production execute() →
         rejected BEFORE any strategy call (acceptance: sbx path guarded)."""
         ex, strategy = self._executor()
-        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+        with pytest.raises(ValueError, match=r"Command rejected: Argument \d+ .*metacharacter"):
             ex.execute(["/usr/bin/echo", f"hi{ch}tail"], [])
         strategy.create_sandbox.assert_not_called()
         strategy.execute_command.assert_not_called()
@@ -723,7 +1015,7 @@ class TestStructuralGate:
         rejected whole-string — quote-scoped parsing cannot soundly
         distinguish local vs remote interpretation here."""
         ex, _strategy = self._executor()
-        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+        with pytest.raises(ValueError, match=r"Command rejected: Argument \d+ .*metacharacter"):
             ex.execute(["/usr/bin/echo", "a; b"], [])
 
     def test_structural_gate_precedes_policy(self):
@@ -740,7 +1032,7 @@ class TestStructuralGate:
         """The invariant is not config-dependent: `permissive` preset returns
         True early in the policy layer, yet metachars are still rejected."""
         ex, strategy = self._executor(preset="permissive")
-        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+        with pytest.raises(ValueError, match=r"Command rejected: Argument \d+ .*metacharacter"):
             ex.execute(["/usr/bin/echo", "hi;", "rm", "x"], [])
         strategy.execute_command.assert_not_called()
 
@@ -752,7 +1044,7 @@ class TestStructuralGate:
         from executor.executor import CommandRejected
 
         ex, _strategy = self._executor()
-        with pytest.raises(CommandRejected, match="Command rejected: Shell metacharacters"):
+        with pytest.raises(CommandRejected, match=r"Command rejected: Argument \d+ .*metacharacter"):
             ex.execute(["/usr/bin/echo", "hi;", "tail"], [])
 
     def test_policy_rejection_is_command_rejected_class(self):
@@ -819,7 +1111,7 @@ class TestStructuralGate:
         free)."""
         audit = MagicMock()
         ex, strategy = self._executor(audit=audit)
-        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+        with pytest.raises(ValueError, match=r"Command rejected: Argument \d+ .*metacharacter"):
             ex.execute(["/usr/bin/echo", elem], [{"secret_id": "00000000-0000-0000-0000-000000000001"}])
         strategy.create_sandbox.assert_not_called()
         strategy.execute_command.assert_not_called()
@@ -1134,7 +1426,7 @@ class TestArgvDirectPosture322:
         strategy sees it — the argv-direct switch adds no path around the
         gate (relay maps this class to the existing 503 idiom, unchanged)."""
         ex, strategy = self._executor()
-        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+        with pytest.raises(ValueError, match=r"Command rejected: Argument \d+ .*metacharacter"):
             self._execute(ex, ["/usr/bin/echo", "hi; touch /tmp/pwned"])
         strategy.execute_command.assert_not_called()
         strategy.create_sandbox.assert_not_called()

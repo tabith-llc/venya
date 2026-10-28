@@ -7,6 +7,21 @@ Notable changes to Venya will be documented in this file.
 At the `v0.1.0beta1` cut (`e9c7c25`) this section was emptied — the entries that sat there
 were folded into `0.1.0beta1` in that same commit. The rows below landed since that cut:
 
+- **An executor refusal now says which argument it means and what kind of character it
+  carries (`#713`).** The command gate has refused a metacharacter inside an argv element by
+  printing one sentence that named nothing: on a fifteen-element command the caller had to
+  bisect to find the element. The refusal now reads `Argument 3 contains a disallowed shell
+  metacharacter — classes: grouping-braces.` and names every class the element trips, in the
+  order `pipe/semicolon-ampersand, quoting/expansion, grouping-braces, redirect,
+  glob-history, whitespace-control`. It names classes, never the element's own characters: a
+  refused argument can be a session-bound secret path, and this sentence is re-emitted as the
+  relay's 422 detail, forwarded by the server hop, journalled and stored in the audit reason.
+  The one ruled exception keeps its own wording — a `<` fused into a larger element is refused
+  for its SHAPE, so no class word belongs in that sentence. The "wrap complex commands in a
+  script file" advice stays, written for the human operator who reads it. No character was
+  added to the refused set: `%` is still accepted, and the shape that motivated the report
+  (`%{http_code}`) is refused for its braces, which is what the new text now says out loud.
+
 - **`venya admin split-ca-key` no longer leaves the key material in its own buffer
   (`#674` AC3).** The splitter builds a working copy of what it is handed — a checksum
   plus the key — and until now that copy stayed as it was when the command finished. It is

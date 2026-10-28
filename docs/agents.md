@@ -76,10 +76,18 @@ rediscover them:
 - **No stdin channel exists for your command, and shell metacharacters are
   rejected (503).** The gate is PER ELEMENT on the argv list — no join, no shell
   parsing — so a token containing any of ``| ; & $ ` ( ) { } < > ! * ?``, a NUL, a
-  lone surrogate, or a newline is refused even when it is buried inside one word.
-  No pipes, no `&&`, no redirects. The single exception: a standalone `<` token
+  carriage return, a lone surrogate, or a newline is refused even when it is buried inside one word
+  (the carriage return is named here because the refusal classifies it; ticket
+  #722 owns the shipped lists that omitted it). No pipes, no `&&`, no redirects. The single exception: a standalone `<` token
   immediately followed by `/run/secrets/venya/<id>` for a secret injected in the
   same run.
+  The refusal names the element index and every character class the token trips, in this order:
+  `pipe/semicolon-ampersand` (`| ; &`), `quoting/expansion` (`$` and backtick), `grouping-braces`
+  (`( ) { }`), `redirect` (`< >`), `glob-history` (`* ? !`), `whitespace-control` (newline, carriage
+  return, NUL). It names classes, never the token's own characters — a refused argument may be a
+  session-bound secret path, and the refusal line is re-emitted on the 422 face, journalled and stored
+  in the audit reason. A `%` is NOT in any class and is not blocked: `%{http_code}` is refused for its
+  braces (ticket #713).
 - **A dangerous-pattern policy scans commands before execution.** For
   ssh/sshpass remote-exec commands only the LOCAL (sandbox) portion is
   scanned — tokens after the ssh destination are remote-side and pass;
