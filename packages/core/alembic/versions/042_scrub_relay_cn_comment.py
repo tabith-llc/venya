@@ -4,7 +4,7 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Scrub a development-site hostname out of a shipped column comment — #697
+"""Scrub a development-site hostname out of a shipped column comment — #689
 
 Revision ID: 042
 Revises: 041
