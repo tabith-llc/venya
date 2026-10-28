@@ -648,34 +648,54 @@ venya_apply_code_fixes() {
         n_failed=$((n_failed + 1))
     fi
 
-    # --- Fix 3: init.py — db.flush() immediately after db.add(admin_role) ---
-    # Patch-site-specific anchor (#519 criterion 2): the old file-wide
-    # 'db.flush()' grep let any unrelated occurrence mask a missing site
-    # flush. Every db.add(admin_role) line must now be followed by the flush.
-    if [ ! -f "$f" ]; then
-        error "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - file absent ($f)"
-        n_failed=$((n_failed + 1))
+    # --- Fix 3: the seed-role flush sits between the role add and the audit id read ---
+    # #718 re-anchor, owner ruling R-2629 ("reanchor"): the guard is kept, not dropped,
+    # and now watches the shape the behavior moved to. What this guard has ALWAYS
+    # protected is one specific thing — a db.flush() between adding the role row and
+    # reading role.id for the role_created audit field table, because an id is only
+    # assigned by the flush and an unflushed row audits role_id null. The add left
+    # routes/init.py for server/role_seed.py at cb64e28, so the old
+    # `db.add(admin_role)` anchor no longer exists; the three literals below are the
+    # live form of the same invariant.
+    #
+    # It asserts and edits nothing, the #618 Fix-1 posture: no served tarball predates
+    # the move, so a sed here could never fire, and bending the product source to keep a
+    # grep string alive would be guarding a line that exists only because the guard
+    # demands it. The check is that SOME db.flush() lies strictly BETWEEN the add line and
+    # the audit read line — the invariant itself, not line adjacency. #519 criterion 2
+    # stays enforced by that window: a flush that exists only outside it (before the add,
+    # or after the id is already read) cannot satisfy the guard, and a file-wide occurrence
+    # away from the site must never mask a missing site flush. It is deliberately not
+    # "the first flush in the file", which would abort a healthy tree over an unrelated
+    # earlier flush. Reason named per cause (lead ruling s108) so the operator reads one
+    # file, not two.
+    local seed n_add n_audit n_total n_between fix3_reason=""
+    seed="$INSTALL_DIR/packages/server/src/server/role_seed.py"
+    if [ ! -f "$seed" ]; then
+        fix3_reason="role_seed.py absent ($seed)"
     else
-        local n_anchor n_paired
-        n_anchor=$(grep -cF 'db.add(admin_role)' "$f" || true)
-        n_paired=$(grep -A1 -F 'db.add(admin_role)' "$f" | grep -cE '^[[:space:]]*db\.flush\(\)[[:space:]]*$' || true)
-        if [ "${n_anchor:-0}" -eq 0 ]; then
-            error "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - db.add(admin_role) anchor absent (upstream shape changed)"
-            n_failed=$((n_failed + 1))
-        elif [ "$n_paired" -ge "$n_anchor" ]; then
-            info "  Fix 3 (init.py admin_role flush): already clean"
-            n_clean=$((n_clean + 1))
+        n_add=$(grep -n -m1 -F 'db.add(role)' "$seed" | cut -d: -f1 || true)
+        n_audit=$(grep -n -m1 -F 'role_id": role.id' "$seed" | cut -d: -f1 || true)
+        n_total=$(grep -cF 'db.flush()' "$seed" || true)
+        if [ -z "$n_add" ]; then
+            fix3_reason="the seed-role add is not in role_seed.py ($seed): no db.add(role) line to anchor on"
+        elif [ -z "$n_audit" ]; then
+            fix3_reason="role_seed.py audits no created id: no role_id/role.id read after the add at line $n_add in $seed"
+        elif [ "${n_total:-0}" -eq 0 ]; then
+            fix3_reason="no db.flush() anywhere in $seed, so the audit read at line $n_audit would take role.id before it exists"
         else
-            sed -i '/db\.add(admin_role)/a\        db.flush()' "$f"
-            n_paired=$(grep -A1 -F 'db.add(admin_role)' "$f" | grep -cE '^[[:space:]]*db\.flush\(\)[[:space:]]*$' || true)
-            if [ "$n_paired" -ge "$n_anchor" ]; then
-                info "  Fix 3 (init.py admin_role flush): applied"
-                n_applied=$((n_applied + 1))
-            else
-                error "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - sed did not land the flush"
-                n_failed=$((n_failed + 1))
+            n_between=$(grep -nF 'db.flush()' "$seed" | awk -F: -v a="$n_add" -v b="$n_audit" 'BEGIN{c=0} {if ($1+0 > a+0 && $1+0 < b+0) c++} END{print c}' || true)
+            if [ "${n_between:-0}" -eq 0 ]; then
+                fix3_reason="none of the $n_total db.flush() lines in $seed sits between the role add (line $n_add) and the audit id read (line $n_audit) — a flush outside that window does not make role.id exist"
             fi
         fi
+    fi
+    if [ -z "$fix3_reason" ]; then
+        info "  Fix 3 (seed-role flush before the audit id read): already clean"
+        n_clean=$((n_clean + 1))
+    else
+        error "  Fix 3 (seed-role flush before the audit id read): FAILED-ANCHOR-MISSING - $fix3_reason"
+        n_failed=$((n_failed + 1))
     fi
 
     # --- Fix 4: executors.py — timezone check AT the not_after site ---

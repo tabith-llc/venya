@@ -23,6 +23,16 @@ and edits nothing. (2) A dead anchor is a hard abort, not a warning: every
 ``FAILED-ANCHOR-MISSING`` line is ``[ERROR]`` and the function exits nonzero
 before the venv, the migrations and the service start.
 
+#718 (owner ruling R-2629, "reanchor") moved Fix 3 the same way. Its anchor was
+``db.add(admin_role)`` in ``routes/init.py`` and the role add now lives in
+``server/role_seed.py``, inside a loop over a table, so that literal is gone. The
+guard keeps its purpose — a ``db.flush()`` must sit between the seed-role add and
+the audit read of ``role.id`` — and asserts it as a LINE WINDOW over
+``role_seed.py``, editing nothing. Two consequences these cells pin: Fix 3 can
+never report ``applied`` again, and the re-aimed guard must still be able to FAIL
+(``test_seed_flush_outside_the_window_is_not_a_mask``), because a guard re-aimed at
+an anchor that can never miss is the #519 class wearing a new line number.
+
 Cells run the REAL function, extracted from the git-tracked library at
 ``venya-common.sh`` (the #505 precedent: exercise real script logic, never a
 re-implementation), against a fixture tree under the same ``set -euo
@@ -41,6 +51,7 @@ _DEPS = "packages/server/src/server/dependencies.py"
 _APP = "packages/server/src/server/app.py"
 _INIT = "packages/server/src/server/routes/init.py"
 _EXEC = "packages/server/src/server/routes/executors.py"
+_SEED = "packages/server/src/server/role_seed.py"
 
 # The LIVE shape of Fix 1 (#618 re-anchor). The guard asserts this pair and
 # never edits it: the configured URL arrives as the init_db parameter the
@@ -76,8 +87,11 @@ def heartbeat():
         renew()
 """
 
-# Patched (post-condition) sources for fixes 2 and 4: the exact shapes the
-# seds produce.
+# Patched (post-condition) sources for the fixes that still patch (2 and 4): the
+# exact shapes the seds produce. PATCHED_INIT carries the flush line only because
+# the #718 re-anchor made Fix 3 an assertion over role_seed.py, not a sed on init.py —
+# the shape below is what init.py looked like when Fix 3 last applied, and Fix 2 is
+# the only guard that reads it now.
 PATCHED_INIT = """
 def init_step():
     from core.iam.models import Role
@@ -91,6 +105,38 @@ def heartbeat():
                 if not_after.tzinfo is None:
                     not_after = not_after.replace(tzinfo=timezone.utc)
 """
+
+# --- Fix 3's #718 re-anchor (#718, owner ruling R-2629 "reanchor") -----------------
+# The guard no longer seds anything. It asserts that SOME db.flush() line lies strictly
+# BETWEEN the seed-role add and the audit read of role.id — the invariant the old
+# adjacency sed existed to create, now that the add lives in role_seed.py inside a loop
+# over a table (so there is no literal `admin_role` there, and there must not be one
+# added to satisfy a grep). LIVE_SEED is that shape in minimum dress; the three negative
+# fixtures are the three ways it can genuinely fail.
+LIVE_SEED = """
+def ensure_seed_roles(db):
+    roles = {}
+    created = []
+    for name in SEED_ROLES:
+        role = Role(name=name)
+        db.add(role)
+        roles[name] = role
+        created.append(name)
+    db.flush()
+    for role in roles.values():
+        audit_lifecycle(db, ROLE_CREATED, None, {"role_id": role.id, "role_name": role.name})
+    return roles, created
+"""
+# The flush is gone entirely: role.id would be read before the row has an id.
+SEED_NO_FLUSH = LIVE_SEED.replace("    db.flush()\n", "")
+# #519 criterion 2 in its new dress: a db.flush() EXISTS in the file, but only OUTSIDE
+# the window, so it cannot be what makes the id exist. A file-wide occurrence must not
+# mask the missing site flush.
+SEED_MASKED_FLUSH = LIVE_SEED.replace("    db.flush()\n", "").replace(
+    "    roles = {}\n", "    db.flush()  # unrelated, before any role was added\n    roles = {}\n"
+)
+# The add anchor moved (a rename of the loop variable is enough): nothing to anchor on.
+NO_ANCHOR_SEED = LIVE_SEED.replace("db.add(role)", "db.add(new_role)")
 
 # Anchor-absent sources: neither the live shape nor anything the guards accept
 # for any fix. DEPS here is the RETIRED env-only form — since #618 it is no
@@ -107,8 +153,15 @@ def _write_tree(
     init: str = UNPATCHED_INIT,
     exec_src: str = UNPATCHED_EXEC,
     app: str = LIVE_APP,
+    seed: str = LIVE_SEED,
 ) -> None:
-    for rel, content in ((_DEPS, deps), (_APP, app), (_INIT, init), (_EXEC, exec_src)):
+    for rel, content in (
+        (_DEPS, deps),
+        (_APP, app),
+        (_INIT, init),
+        (_EXEC, exec_src),
+        (_SEED, seed),
+    ):
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
@@ -182,24 +235,26 @@ def test_anchors_present_applied() -> None:
     """Criterion 1/4 (RED at HEAD: the old code printed success unconditionally
     and fix-3/4 reported nothing at all when the file-wide grep masked them):
     with every PATCH anchor present, each remaining fix applies, its
-    post-condition lands, and the report says 'applied' three times. Fix 1 is
-    the fourth line and reports 'already clean' — #618 made it a presence
-    assertion over dependencies.py + app.py, so it has nothing to sed."""
+    post-condition lands, and the report says 'applied' for the two fixes that
+    still sed. Fix 1 and Fix 3 are the two presence assertions — #618 made the
+    first one, #718/R-2629 the second — so each reports 'already clean' and
+    neither edits the tree."""
     root = Path(tempfile.mkdtemp())
     _write_tree(root)
     proc = _run_fixes(root)
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
     applied, clean, failed = _counts(out)
-    assert (applied, clean, failed) == (3, 1, 0), out
+    assert (applied, clean, failed) == (2, 2, 0), out
     # Post-conditions actually landed in the files (not just in the log):
     assert "FAILED" not in out
     # Fix 1 asserts and never edits: the live pair is byte-unchanged.
     assert (root / _DEPS).read_text() == LIVE_DEPS
     assert (root / _APP).read_text() == LIVE_APP
+    # Fix 3 asserts too, since R-2629: role_seed.py must come back byte-identical.
+    assert (root / _SEED).read_text() == LIVE_SEED
     init_after = (root / _INIT).read_text()
     assert "from ..iam.models" not in init_after and "from core.iam.models" in init_after
-    assert re.search(r"db\.add\(admin_role\)\n\s*db\.flush\(\)", init_after), init_after
     exec_after = (root / _EXEC).read_text()
     assert re.search(r"not_after = current_cert\.not_after\n.*not_after\.tzinfo", exec_after, re.DOTALL)
     assert "FAILED" not in out
@@ -211,13 +266,13 @@ def test_already_patched_reports_clean_not_failure() -> None:
     files stay byte-identical."""
     root = Path(tempfile.mkdtemp())
     _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP)
-    before = {rel: (root / rel).read_bytes() for rel in (_DEPS, _APP, _INIT, _EXEC)}
+    before = {rel: (root / rel).read_bytes() for rel in (_DEPS, _APP, _INIT, _EXEC, _SEED)}
     proc = _run_fixes(root)
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
     applied, clean, failed = _counts(out)
     assert (applied, clean, failed) == (0, 4, 0), out
-    after = {rel: (root / rel).read_bytes() for rel in (_DEPS, _APP, _INIT, _EXEC)}
+    after = {rel: (root / rel).read_bytes() for rel in (_DEPS, _APP, _INIT, _EXEC, _SEED)}
     assert before == after, "already-patched tree was touched"
     # Run a THIRD time: stable at 4 clean (no drift across re-installs).
     proc2 = _run_fixes(root)
@@ -233,7 +288,7 @@ def test_anchor_absent_is_loud_never_success() -> None:
     install for two days without stopping anything; the old unconditional
     success line ('Fixed init.py imports') must stay gone."""
     root = Path(tempfile.mkdtemp())
-    _write_tree(root, NO_ANCHOR_DEPS, NO_ANCHOR_INIT, NO_ANCHOR_EXEC, app=NO_ANCHOR_APP)
+    _write_tree(root, NO_ANCHOR_DEPS, NO_ANCHOR_INIT, NO_ANCHOR_EXEC, app=NO_ANCHOR_APP, seed=NO_ANCHOR_SEED)
     proc = _run_fixes(root)
     out = proc.stdout + proc.stderr
     applied, clean, failed = _counts(out)
@@ -254,9 +309,16 @@ def test_anchor_absent_is_loud_never_success() -> None:
 
 def test_file_wide_occurrence_no_longer_masks_a_needed_fix() -> None:
     """Criterion 2: the old Fix 3 skipped whenever 'db.flush()' appeared
-    ANYWHERE in init.py, and Fix 4 likewise for 'not_after.tzinfo'. Now the
-    anchors are patch-site specific: a file-wide occurrence away from the
-    site must NOT mask the site fix (both fixes land)."""
+    ANYWHERE in init.py, and Fix 4 likewise for 'not_after.tzinfo'. The anchors
+    are patch-site specific. #718 moved the flush invariant to the window guard
+    below (`test_seed_flush_outside_the_window_is_not_a_mask`), so this cell now
+    carries Fix 4's half: an unrelated 'not_after.tzinfo' mention far from the
+    site must NOT mask the site guard, and the fix still lands.
+
+    It also pins that Fix 3 can no longer report 'applied' from ANY init.py
+    shape: a tree whose init.py carries the old adjacency pair and whose
+    role_seed.py is a dead anchor must fail Fix 3, so the retired sed cannot
+    quietly become a check on the wrong file."""
     root = Path(tempfile.mkdtemp())
     masking_init = UNPATCHED_INIT + "\n    db.flush()  # unrelated, lives in another function\n"
     masking_exec = (
@@ -267,25 +329,41 @@ def test_file_wide_occurrence_no_longer_masks_a_needed_fix() -> None:
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
     applied, _clean, failed = _counts(out)
-    assert failed == 0 and applied == 3, out
-    init_after = (root / _INIT).read_text()
-    assert re.search(r"db\.add\(admin_role\)\n\s*db\.flush\(\)", init_after), init_after
+    assert failed == 0 and applied == 2, out
+    exec_after = (root / _EXEC).read_text()
+    assert re.search(r"not_after = current_cert\.not_after\n.*not_after\.tzinfo", exec_after, re.DOTALL)
+
+    # The retired anchor cannot satisfy the guard: the old adjacency pair is present in
+    # init.py, role_seed.py has no add to anchor on, and Fix 3 must say so.
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=NO_ANCHOR_SEED)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 3" in lines[0], out
+    assert "no db.add(role) line" in lines[0], out
+    assert proc.returncode != 0, out
 
 
 def test_current_repo_source_reports_what_is_actually_true() -> None:
     """Criterion 5 pinned as a cell: run the function against a copy of the
     CURRENT repo sources — the honest per-fix verdict at this tip, so nobody
     has to re-derive it and any source-shape drift trips here. #618 moved this
-    verdict from (1, 2, 1) to (1, 3, 0): the dead Fix-1 anchor is gone, so a
-    healthy tree now reports ZERO failures and the installer does not abort.
+    verdict from (1, 2, 1) to (1, 3, 0); #718 (R-2629) moves it again to
+    (0, 4, 0), because the only remaining sed target that used to fire on a
+    healthy tree was Fix 3's init.py flush insertion, and that fix is now a
+    presence assertion over role_seed.py:
       Fix 1 already clean (the live dependencies.py expression AND the app.py
             call-site are both present — the presence assertion holds),
       Fix 2 already clean (source already uses core.iam.models),
-      Fix 3 applied (flush is batched later in the block, not at the site —
-            the inserted flush is redundant-but-harmless; see report),
-      Fix 4 already clean (tz guard already sits at the site)."""
+      Fix 3 already clean (role_seed.py flushes between the seed-role add at
+            db.add(role) and the audit read of role.id),
+      Fix 4 already clean (tz guard already sits at the site).
+
+    role_seed.py is copied from the repo rather than from a fixture, so this is
+    the one cell that reads the shipped source and the shipped guard together."""
     root = Path(tempfile.mkdtemp())
-    for rel in (_DEPS, _APP, _INIT, _EXEC):
+    for rel in (_DEPS, _APP, _INIT, _EXEC, _SEED):
         src = REPO_ROOT / rel
         dst = root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -294,12 +372,63 @@ def test_current_repo_source_reports_what_is_actually_true() -> None:
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
     applied, clean, failed = _counts(out)
-    assert (applied, clean, failed) == (1, 3, 0), out
+    assert (applied, clean, failed) == (0, 4, 0), out
     assert "FAILED" not in out, out
     assert "Fix 1 (db URL from config): already clean" in out
     assert "Fix 2 (init.py imports): already clean" in out
-    assert "Fix 3 (init.py admin_role flush): applied" in out
+    assert "Fix 3 (seed-role flush before the audit id read): already clean" in out
     assert "Fix 4 (executors.py heartbeat tz guard): already clean" in out
+    # Nothing was touched: the tree is what the repo says it is.
+    assert (root / _SEED).read_bytes() == (REPO_ROOT / _SEED).read_bytes()
+
+
+def test_seed_flush_outside_the_window_is_not_a_mask() -> None:
+    """★ THE PAIRED NEGATIVE for the re-anchored Fix 3 (R-2629's acceptance), shown RED
+    then GREEN in one cell.
+
+    A guard re-aimed at an anchor that can never miss is the #519 fake-success class with
+    a new line number, so this drives the two shapes in which the invariant is genuinely
+    broken and requires the loud verdict, then requires clean on the live shape.
+
+    (a) no db.flush() in the file at all — role.id would be read while still None;
+    (b) a db.flush() present but OUTSIDE the window, before any role is added — the file-
+        wide-occurrence mask, #519 criterion 2, in its new dress.
+    Both must abort nonzero and name role_seed.py. (c) is the green: the same tree with
+    the site flush restored reports already clean and exits 0."""
+
+    def seed_lines(root: Path) -> list[str]:
+        proc = _run_fixes(root)
+        out = proc.stdout + proc.stderr
+        lines = _dead_anchor_lines(out)
+        assert len(lines) == 1 and "Fix 3" in lines[0], out
+        assert "[ERROR]" in lines[0], out
+        assert "role_seed.py" in lines[0], out
+        assert proc.returncode != 0, f"dead seed anchor did not abort the install: {out}"
+        return lines
+
+    # (a) flush absent
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_NO_FLUSH)
+    line = seed_lines(root)[0]
+    assert "no db.flush() anywhere" in line, line
+
+    # (b) flush present but outside the window — the mask
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_MASKED_FLUSH)
+    line = seed_lines(root)[0]
+    assert "none of the 1 db.flush() lines" in line, line
+    assert "sits between the role add" in line, line
+    assert "a flush outside that window does not make role.id exist" in line, line
+
+    # (c) GREEN arm: the live shape passes, and the other three fixes are unaffected
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=LIVE_SEED)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert _counts(out) == (0, 4, 0), out
+    assert "Fix 3 (seed-role flush before the audit id read): already clean" in out
+    assert not _dead_anchor_lines(out)
 
 
 def test_one_dead_anchor_alone_aborts_and_names_the_file() -> None:
@@ -313,7 +442,7 @@ def test_one_dead_anchor_alone_aborts_and_names_the_file() -> None:
     proc = _run_fixes(root)
     out = proc.stdout + proc.stderr
     applied, clean, failed = _counts(out)
-    assert (applied, clean, failed) == (3, 0, 1), out
+    assert (applied, clean, failed) == (2, 1, 1), out
     assert proc.returncode != 0, out
     lines = _dead_anchor_lines(out)
     assert len(lines) == 1 and "Fix 1" in lines[0] and "[ERROR]" in lines[0], out
@@ -321,7 +450,6 @@ def test_one_dead_anchor_alone_aborts_and_names_the_file() -> None:
     assert "app.py was not reached" in lines[0], out
     # The three healthy fixes still did their work before the stop.
     assert "from core.iam.models" in (root / _INIT).read_text()
-    assert re.search(r"db\.add\(admin_role\)\n\s*db\.flush\(\)", (root / _INIT).read_text())
     assert "not_after.tzinfo" in (root / _EXEC).read_text()
 
 
@@ -401,3 +529,18 @@ def test_absent_files_abort_too_one_distinct_message_per_file() -> None:
     lines = _dead_anchor_lines(out)
     assert len(lines) == 1 and "Fix 4" in lines[0], out
     assert "file absent" in lines[0] and str(root / _EXEC) in lines[0], out
+
+    # (d) role_seed.py absent — the #718 re-anchor reads a NEW file, and the core and
+    # executor archives are the identical whole-tree git archive, so its absence is
+    # truncation, not an old release: it must abort with its own line naming the path.
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP)
+    (root / _SEED).unlink()
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 3" in lines[0], out
+    assert "role_seed.py absent" in lines[0] and str(root / _SEED) in lines[0], out
+    # and it is a distinct sentence from (c), so the operator reads one file
+    assert lines[0] != "", out
