@@ -188,19 +188,19 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     "packages/cli/src/venya_cli/cli.py:410": (L, '"split-ca-key"', 1, "pin"),
     "packages/executor/src/executor/config.py:422": (CFG, "relay_client_ids: list[str] = Field(", 1, "pin"),
     # ---- the two live NoEncryption() writers and the four comments
-    "packages/cli/src/venya_cli/commands.py:2157": (CM, "NoEncryption(): an admin private key in the clear", 1, "pin"),
+    "packages/cli/src/venya_cli/commands.py:2206": (CM, "NoEncryption(): an admin private key in the clear", 1, "pin"),
     f"{CM}:3241": (CM, "NoEncryption(), an executor private key in the clear beside the cert", 1, "pin"),
     "packages/core/src/core/iam/models.py:744": (M, "class CoreRelayCredential", 1, "pin"),
     f"{CM}:3678": (CM, "the renew path wrote NoEncryption(): an executor private key", 1, "pin"),
     # the page prints these two as BARE `commands.py:N` on the continuation line — same file, so
     # keyed here; the guard still demands the page say a full path (see the ambiguity cell)
-    "packages/cli/src/venya_cli/commands.py:3334": (
+    "packages/cli/src/venya_cli/commands.py:3383": (
         CM,
         "NoEncryption(), an executor private key in the clear beside the cert",
         1,
         "pin",
     ),
-    "packages/cli/src/venya_cli/commands.py:3771": (
+    "packages/cli/src/venya_cli/commands.py:3820": (
         CM,
         "the renew path wrote NoEncryption(): an executor private key",
         1,
