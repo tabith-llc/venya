@@ -97,6 +97,20 @@ were folded into `0.1.0beta1` in that same commit. The rows below landed since t
   `docs/beta-known-limitations.md` stands exactly as written: the example moved,
   the disclosure did not.
 
+- **`venya run` names the executor it used, and refuses when none is set (`#712` half (a)).**
+  The CLI run path invented an executor id when the operator gave none and sent that
+  made-up token to the server, which answered with a failure naming neither the id nor
+  where it came from — so a missing flag read on the terminal exactly like an executor
+  that was not installed. It now resolves the id the way the rest of the executor plane
+  does, `--executor-id` first then `executor_id` in `/etc/venya/executor.toml`, and when
+  neither is present it refuses before any network call, saying that no executor id was
+  configured and naming the two places to set it. On the paths that do run, the answer
+  now ends `Command exited with code: 0 (executor=venya-exec-1)` — the caller's own id,
+  echoed, on a non-zero exit and on a failed session or relay call too, never a host read
+  out of the command text. This is parity with the MCP face above, and it puts the two
+  surfaces a human and an agent drive during an incident in the same shape. No wire
+  change, no new field, no migration; commands that already pass an id behave as before.
+
 ## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.

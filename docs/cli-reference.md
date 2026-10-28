@@ -1172,7 +1172,7 @@ venya run [-- <command> ...] [OPTIONS]
 |----------|----------|----------------|---------|-------------|
 | `COMMAND_ARGS` (positional, remainder) | no | remainder (see note) | — | Command to execute (a leading -- separator is consumed, not sent to the executor) |
 | `--secret` | no | repeatable (accumulates) | — | Secret key to inject (can be specified multiple times) |
-| `--executor-id` | no | string | — | Executor ID to target (default: from config or 'default') |
+| `--executor-id` | no | string | — | Executor ID to target (default: executor_id from /etc/venya/executor.toml; the command is refused if neither is set) |
 | `--server-url` | no | string | — | Server URL override (default: from config) |
 
 > **REMAINDER semantics (`run` only):** everything after the first command token belongs to
@@ -1184,7 +1184,7 @@ venya run [-- <command> ...] [OPTIONS]
 **Examples**
 
 ```bash
-venya run -- /usr/bin/true  # smoke-test an executor round trip
+venya run -- /usr/bin/true  # smoke-test an executor round trip (id from --executor-id or executor.toml)
 venya run --secret db/password -- /usr/bin/ssh tier1@t1 systemctl status apache2  # inject a secret into a sandboxed remote command; the agent never sees the value
 venya run --executor-id venya-exec-1 -- /bin/echo hello  # target a specific executor
 ```

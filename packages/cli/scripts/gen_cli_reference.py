@@ -80,7 +80,7 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         ),
     ],
     ("run",): [
-        (["run", "--", "/usr/bin/true"], "smoke-test an executor round trip"),
+        (["run", "--", "/usr/bin/true"], "smoke-test an executor round trip (id from --executor-id or executor.toml)"),
         (
             ["run", "--secret", "db/password", "--", "/usr/bin/ssh", "tier1@t1", "systemctl", "status", "apache2"],
             "inject a secret into a sandboxed remote command; the agent never sees the value",
