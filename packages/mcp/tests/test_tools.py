@@ -539,7 +539,17 @@ def test_tool_descriptions_teach_shape_and_file_path() -> None:
     and the usage-template metadata (ticket secret-shape-metadata). The
     pre-fix run_command example ('ssh bot@web-server-3 …' with a password
     secret bound) could not consume the injected secret at all — that shape
-    of misleading example must never return."""
+    of misleading example must never return.
+
+    #711 re-pointed the run_command pin. The example that replaced it taught
+    sshpass together with an unattended remote sudo, the combination beta does
+    not support, so it was misleading in the other direction. The description
+    now carries both supported postures with the condition that picks between
+    them, so the pin below requires all three things at once: the ruled
+    key-authentication delivery (the standalone '<' plus the bound secret path,
+    which is what finally consumes the secret), the password posture still
+    shown beside it, and the absence of the unsupported combination.
+    """
     import asyncio
 
     from venya_mcp.server import list_tools
@@ -553,8 +563,17 @@ def test_tool_descriptions_teach_shape_and_file_path() -> None:
     assert "/run/secrets/venya/" in ls_desc
 
     rc_desc = by_name["run_command"].description
+    # The ruled delivery for an unattended remote sudo: key authentication, the
+    # redirect as its own argument, the session-bound path as its target.
+    assert "ssh bot@web-server-3 sudo -S apt install -y apache2 " in rc_desc
+    assert "< /run/secrets/venya/7" in rc_desc
+    # The password posture stays taught beside it — showing both with their
+    # conditions is what keeps either one from being an assumption.
     assert "sshpass -f /run/secrets/venya/" in rc_desc
     assert "'usage' template" in rc_desc
+    # And the combination the limitation entry documents as unsupported must
+    # not come back as an example: sshpass carrying a remote sudo in one command.
+    assert "sshpass -f /run/secrets/venya/7 ssh bot@web-server-3 sudo" not in rc_desc
 
 
 # --- SDK validation-seam pin (ticket mcp-validation-seam-untested #350) ---
