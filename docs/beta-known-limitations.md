@@ -42,21 +42,21 @@ and this entry does not claim it was)
 
 **What is enforced today.** One door: the DIAL, which is the core connecting OUT to an
 executor. The relay context is built by `_build_relay_ssl_context`
-(`packages/server/src/server/routes/executors.py:639`) and, since `54457a6`, that builder
+(`packages/server/src/server/routes/executors.py:641`) and, since `54457a6`, that builder
 consults a certificate revocation list at the TLS handshake —
 `ssl_ctx.load_verify_locations(capath=crl_capath)` then
 `ssl_ctx.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF`
-(`packages/server/src/server/routes/executors.py:687-688`). The list is minted fresh for
-every dial by `_ensure_dial_crl_store` (`packages/server/src/server/routes/executors.py:713`), which the relay path calls
-at `packages/server/src/server/routes/executors.py:2027`, and the context carrying it is built at
-`packages/server/src/server/routes/executors.py:2042`. In operator language: when the core is about to send a command to
+(`packages/server/src/server/routes/executors.py:689-690`). The list is minted fresh for
+every dial by `_ensure_dial_crl_store` (`packages/server/src/server/routes/executors.py:715`), which the relay path calls
+at `packages/server/src/server/routes/executors.py:2111`, and the context carrying it is built at
+`packages/server/src/server/routes/executors.py:2126`. In operator language: when the core is about to send a command to
 an executor, it will not complete that handshake against a credential the list says is
 revoked, and it will not complete it against a list it cannot refresh either. The three
 answers are distinct and deliberately named apart — a revoked leaf is refused with 403 and
-says so (`packages/server/src/server/routes/executors.py:810`); a stale or unavailable list is refused with 503 whose text
-says **"no revocation asserted"** (`packages/server/src/server/routes/executors.py:710`) and never claims a revocation that
+says so (`packages/server/src/server/routes/executors.py:837`); a stale or unavailable list is refused with 503 whose text
+says **"no revocation asserted"** (`packages/server/src/server/routes/executors.py:712`) and never claims a revocation that
 did not happen; a missing CA anchor keeps the pre-existing TLS-misconfiguration wording
-(`packages/server/src/server/routes/executors.py:2035`, and the same wording again at `:1997` for a context that cannot be
+(`packages/server/src/server/routes/executors.py:2119`, and the same wording again at `:1997` for a context that cannot be
 built) rather than being relabelled as a revocation event.
 
 **What is NOT enforced.** The other door — the LISTENER, the executor's `:8443` side that
@@ -76,7 +76,7 @@ tip, while `git grep -i crl -- packages/executor/src` now returns the #586 Gap A
 The two relay surfaces are also **not symmetric in any verify
 flag**: the file sets no `verify_flags` line at all, so it lacks the
 `VERIFY_X509_STRICT | VERIFY_X509_PARTIAL_CHAIN` the dial sets deliberately
-(`packages/server/src/server/routes/executors.py:674`). Chain handling differs between the two
+(`packages/server/src/server/routes/executors.py:676`). Chain handling differs between the two
 doors, not just list handling. **Since #597 and #586 Gap A this door is not blind — it refuses a
 revoked core-relay peer by registry match and a revoked executor-class peer by revocation-list match,
 both after the handshake and before any request byte: `peer_revocation_refusal` and
@@ -166,8 +166,8 @@ can present as a client.
 
 **One boundary is settled and is not on the plan: work already in flight is NOT terminated by a
 revocation.** That is the owner's ruling, recorded in the shipped source
-(`packages/server/src/server/routes/executors.py:717-722` and the scope note at
-`packages/server/src/server/routes/executors.py:2023-2025`); fail-closed on a stale list applies
+(`packages/server/src/server/routes/executors.py:719-724` and the scope note at
+`packages/server/src/server/routes/executors.py:2100-2102`); fail-closed on a stale list applies
 at the dial, and killing live sessions is ruled AGAINST, not deferred. The accept point already
 matches that boundary: a refusal happens after the handshake and before any request byte
 (`packages/executor/src/executor/relay_listener.py:364-386`), and the RF-3 admission permit is
@@ -395,10 +395,10 @@ on a list.
 plane, because it is not true.** Three shipped mechanisms, all tighter than the theft window:
 the core re-mints the revocation list fresh at every relay connection and refuses outright if a
 current list cannot be produced (`_ensure_dial_crl_store`,
-`packages/server/src/server/routes/executors.py:713` — its docstring carries the owner's ruled
+`packages/server/src/server/routes/executors.py:715` — its docstring carries the owner's ruled
 posture, "refuse everything until a properly refreshed list arrives", 2026-10-13); a stale or
 missing list is answered as a refusal with 503 that asserts no revocation
-(`_STALE_LIST_DETAIL`, `packages/server/src/server/routes/executors.py:710`, routed by `_dial_crl_verdict_for`, `packages/server/src/server/routes/executors.py:796`
+(`_STALE_LIST_DETAIL`, `packages/server/src/server/routes/executors.py:712`, routed by `_dial_crl_verdict_for`, `packages/server/src/server/routes/executors.py:823`
 — of the three handshake codes, only `CERT_REVOKED` (23) is ever reported as revoked; "unable to
 get CRL" (3) and "CRL expired" (12) are staleness, deliberately never relabelled revocations);
 and on the administrator plane, revocation is a per-request serial lookup at the front door
@@ -423,7 +423,7 @@ POST to this endpoint every 30s", `packages/server/src/server/routes/executors.p
 and server-side changes reach each executor "on each executor's next heartbeat (~30 s)"
 (`packages/server/src/server/routes/admin.py:1077`). The core's fleet view marks a credential
 no-longer-online once 60 seconds pass without a beat (`list_executors`,
-`packages/server/src/server/routes/executors.py:1619`), so about a minute is the outer edge of
+`packages/server/src/server/routes/executors.py:1696`), so about a minute is the outer edge of
 what an operator waits to SEE the stop. These figures are better than the "roughly five minutes"
 this bound was described as while this page was being drafted — the shipped number is the one
 above, and nothing here is a regression against it. They remain properties of the reporting

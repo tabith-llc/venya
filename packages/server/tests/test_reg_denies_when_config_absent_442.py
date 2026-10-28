@@ -239,5 +239,14 @@ def test_incumbent_exemption_cell_still_passes():
     from server.routes import executors as exec_mod
 
     src = inspect.getsource(exec_mod.register_executor)
-    assert "_incumbent_exemption_applies" in src, "the incumbent exemption must remain in the require-token arm"
+    assert (
+        "_incumbent_exemption_applies" in src or "_incumbent_exemption_offloaded" in src
+    ), "the incumbent exemption must remain in the require-token arm"
+    # Strengthened, not relaxed (#603 offload leg): the arm may now reach the exemption through
+    # the off-loop wrapper, so the guard follows the delegation instead of a single literal —
+    # the exemption body must STILL be the one called, or the arm is no longer the exemption.
+    wrapper_src = inspect.getsource(exec_mod._incumbent_exemption_offloaded)
+    assert (
+        "_incumbent_exemption_applies" in wrapper_src
+    ), "the off-loop wrapper must delegate to the one exemption implementation, not reimplement it"
     assert "Enrollment token required" in src
