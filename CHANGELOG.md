@@ -40,6 +40,18 @@ were folded into `0.1.0beta1` in that same commit. The rows below landed since t
   the same shape. No new field on any wire message, no change to what a caller has to
   send, and nothing about secrets moves: the id is already in the caller's own request.
 
+- **A `masked_count` now says what it does not say (`#715`, disclosed as a known limitation).**
+  Two passes can produce that number — the executor's own Stage-1 mask, and the server-side
+  Stage-2 filter — and the answer carries no record of which one ran. The count itself is honest
+  about which pass won; what is missing is the history. On the fallback arm, where the server did
+  not answer, the mask reflects the local set only, which may be narrower than the session's full
+  set. The masking posture is unchanged and holds in every state: Stage 1 always runs, the fallback
+  keeps Stage 1's masked output rather than passing anything through, and a deployment with no
+  Stage 2 configured was always on the local set. What is deferred is the provenance signal, so the
+  limitation is written down in `docs/beta-known-limitations.md` for the duration rather than left
+  for a reader to discover. No behaviour changed and no field moved on any wire message: this row is
+  a disclosure, and it leaves with the leg that adds the three-valued answer.
+
 ## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
