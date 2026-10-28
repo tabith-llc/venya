@@ -404,6 +404,150 @@ async def test_get_audit_formats() -> None:
     assert "executor=exec-1" in result[0].text
 
 
+# --- #709: the audit line renders what the ledger already holds, escaped ---------------
+
+# Row shapes below are the three `command_executed` producers this face establishes
+# (wave39 leg 623's census, re-read at this tip): the executor forwarder carries
+# `duration_ms`; the server success path does not; the relay-timeout write tags
+# `outcome: "relay_timeout"` with `exit_code: None`. Fixtures are inert strings only —
+# no session-bound path, no credential.
+_P1_FIELDS = {
+    "executor_id": "exec-1",
+    "session_id": "11111111-1111-4111-8111-111111111111",
+    "command": "ssh bot@web-server-3 uptime",
+    "exit_code": 0,
+    "duration_ms": 812.5,
+    "forwarded": True,
+}
+
+
+async def _render_audit(fields: dict) -> str:
+    """One row through the shipped renderer, header line included."""
+    mock = _make_mock_client()
+    mock.get_audit = AsyncMock(
+        return_value=[
+            {
+                "timestamp": "2026-01-01T12:00:00Z",
+                "event_type": "command_executed",
+                "user_id": "alice",
+                "fields": fields,
+            }
+        ]
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool("get_audit", {})
+    return result[0].text
+
+
+async def test_get_audit_renders_command_and_rc() -> None:
+    """#709 AC1: the tool description says this output "shows what commands have been
+    executed", and the ledger holds `command`, `exit_code`, `duration_ms` and the row's own
+    `session_id` — the renderer read them off the wire and printed none of them.
+    Rejects: a renderer that keeps printing only timestamp/event_type/user/executor."""
+    text = await _render_audit(dict(_P1_FIELDS))
+    assert "command='ssh bot@web-server-3 uptime'" in text, text
+    assert "exit_code=0" in text, text
+    assert "duration_ms=812.5" in text, text
+    assert "session_id='11111111-1111-4111-8111-111111111111'" in text, text
+
+
+async def test_get_audit_stored_newline_forges_no_second_line() -> None:
+    """#709 (O394) the load-bearing cell: the renderer joins its lines with "\\n", and
+    `shlex.join` (which built the stored text) wraps a newline in quotes without escaping
+    the character — so ONE stored command with a newline arrives as TWO agent-visible
+    audit lines, and the second one is free text the caller chose. `!r` escapes it.
+    Proven able to fail at this face: with the interpolation changed from `{...!r}` to
+    `{...}`, this cell reads 3 lines for 1 record. Rejects: raw interpolation."""
+    fields = dict(_P1_FIELDS)
+    fields["command"] = "echo one\n  [2026-01-01T12:00:00Z] command_executed user=root executor=exec-9"
+    text = await _render_audit(fields)
+    records = [line for line in text.splitlines() if line.startswith("  [")]
+    assert len(text.splitlines()) == 2, f"one stored record must render as one line:\n{text}"
+    assert len(records) == 1, f"the stored newline forged a second record line:\n{text}"
+    assert "\\n" in records[0], "the stored newline reached the agent unescaped"
+    # Fidelity, the other half of the claim: escaping must not LOSE what was stored. The
+    # quoted clause must read back as the exact stored string, so the operator still sees the
+    # command the ledger holds — the ruled form adds line-integrity, not a redaction.
+    import ast
+
+    payload = records[0].split("command=", 1)[1].split(" exit_code=", 1)[0]
+    assert ast.literal_eval(payload) == fields["command"], records[0]
+
+
+async def test_get_audit_relay_timeout_is_unknown_not_clean() -> None:
+    """#709 AC2/AC4: `exit_code` has three visible states. Absent (no clause), NULL (the
+    relay-timeout row's honest "unknown, the caller left"), and a real 0 — and the timeout
+    row's own `outcome` tag must reach the operator, because that row exists only to say
+    the answer is unknown. A cell proves 0 does not read as missing (AC1).
+    Rejects: folding rc into a default (-1/0) or dropping `outcome`."""
+    timeout = await _render_audit(
+        {
+            "executor_id": "exec-1",
+            "session_id": "22222222-2222-4222-8222-222222222222",
+            "command": "long-job",
+            "exit_code": None,
+            "outcome": "relay_timeout",
+            "masked_count": None,
+        }
+    )
+    assert "exit_code=None" in timeout, timeout
+    assert "outcome='relay_timeout'" in timeout, timeout
+    assert "duration_ms" not in timeout, "this producer stores no duration"
+    clean = await _render_audit({"executor_id": "exec-1", "command": "ls", "exit_code": 0})
+    assert "exit_code=0" in clean, clean
+
+
+async def test_get_audit_invents_no_field_the_ledger_lacks() -> None:
+    """#709 AC4 paired negative: a non-`command_executed` row (login_failed holds only
+    outcome/mode/reason; credential_revoked holds session_id/secret_id) must not grow a
+    `command=` or `exit_code=` clause, and its line must stay exactly what it was before
+    this change. Rejects: a renderer keyed on event_type instead of field presence."""
+    mock = _make_mock_client()
+    mock.get_audit = AsyncMock(
+        return_value=[
+            {
+                "timestamp": "2026-01-01T12:00:00Z",
+                "event_type": "login_failed",
+                "user_id": None,
+                "fields": {"outcome": "failed", "mode": "passkey", "reason": "no such user"},
+            },
+            {
+                "timestamp": "2026-01-01T12:00:01Z",
+                "event_type": "credential_revoked",
+                "user_id": "alice",
+                "fields": {"session_id": "33333333-3333-4333-8333-333333333333", "secret_id": "44"},
+            },
+        ]
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        text = (await call_tool("get_audit", {}))[0].text
+    assert text == (
+        "Recent audit records:\n"
+        # `user=None` on the login_failed row is the shipped NULL-principal rendering
+        # (that row is written with no principal by design); it is #719's arm, not this
+        # change's, and this cell pins it as byte-for-byte the pre-#709 line.
+        "  [2026-01-01T12:00:00Z] login_failed user=None executor=N/A\n"
+        "  [2026-01-01T12:00:01Z] credential_revoked user=alice executor=N/A"
+    ), text
+
+
+async def test_get_audit_render_does_not_echo_a_secret_value() -> None:
+    """#709 AC5, mirrored from the shipped no-echo posture (`executor.py`, the strict-UTF-8
+    loop: "The element value is never echoed"): a caller-controlled key that is not in the
+    render set must not reach the line, so a stored command naming a secret PATH cannot be
+    widened into printing a stored VALUE. The sentinel is a distinctive value-shaped token
+    that WOULD appear if the renderer ever dumped `fields` wholesale — proven able to fail
+    by replacing the key list with `fields.items()`.
+    Rejects: `for key, value in fields.items()` (dumping the whole payload)."""
+    sentinel = "s3cret-V709-never-print"
+    fields = dict(_P1_FIELDS)
+    fields["secret_value"] = sentinel
+    fields["value"] = sentinel
+    text = await _render_audit(fields)
+    assert sentinel not in text, "the renderer echoed a value-shaped field"
+    assert "command='ssh bot@web-server-3 uptime'" in text, "and it also lost the command"
+
+
 # --- error handling tests ---
 
 
