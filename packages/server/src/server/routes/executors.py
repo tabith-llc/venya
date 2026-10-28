@@ -10,6 +10,7 @@ Handles executor CSR submission, certificate signing, and revocation
 list polling for mTLS-based executor authentication.
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -49,6 +50,7 @@ from ..middleware.auth import (
 )
 from ..rate_limit import rate_limit_registration
 from ..revocation import executor_revocation_state
+from ..revocation_offload import liveness_session_factory, run_off_loop
 from ..revocation_read import (
     REVOCATION_UNAVAILABLE_DETAIL,
     RevocationReadUnavailable,
@@ -737,14 +739,12 @@ def _ensure_dial_crl_store(request: Request, db: Session) -> str:
     lapse between mint and verify; if the DB read or the mint ever stalls or fails,
     this function raises and the dial refuses — fail-closed by construction.
 
-    shortcut: reads the shared revocations table on the dial path; moving the
-    staleness decision off the lockable DB path is ruled follow-on work (#586
-    slice-1 follow-on (c), the #603 family), upgrade when that slice lands. What
-    changed at #656 site 1 is the SHAPE of that read, not its existence: it now runs
-    inside the same bounded seam as the bounded GET route (revocation_read.bounded_read
-    via CAManager.generate_crl), so a held ACCESS EXCLUSIVE here costs a refusal in the
-    shipped stale class instead of parking the core loop. The remaining deferral is the
-    one this sentence has always named — taking the decision off the table entirely.
+    shortcut: still reads the shared revocations table on the dial path. What #603 AC1 moved is
+    WHERE that read runs — a worker thread, so a held lock costs this dial a refusal instead of the
+    core's whole event loop (see ``_dial_crl_store_offloaded``) — and #656 site 1 moved its SHAPE,
+    inside the same bounded seam as the bounded GET route (revocation_read.bounded_read via
+    CAManager.generate_crl). Moving the staleness DECISION off the lockable DB path entirely remains
+    ruled follow-on work (#586 slice-1 follow-on (c), the #603 family); upgrade when that lands.
     """
     ca_manager = _get_ca_manager(request)
     config = getattr(request.app.state, "config", None)
@@ -791,6 +791,32 @@ def _ensure_dial_crl_store(request: Request, db: Session) -> str:
             raise RuntimeError("openssl rehash produced no CRL link — the dial would carry no revocation source")
         _write_atomic(".anchor-fingerprint", fingerprint.encode())
     return str(store)
+
+
+async def _dial_crl_store_offloaded(request: Request, db: Session) -> str:
+    """The dial CRL store, minted OFF the event loop when a real backend is present.
+
+    Same body as ``_ensure_dial_crl_store`` (that function is unchanged and still the single
+    implementation — a second one would be the split-brain class ``revocation.py`` names). This only
+    moves the thread placement, to the shipped ``publish_once`` discipline: the Session is created,
+    used and closed inside the worker thread, never the request's.
+
+    Every raise keeps its established arm at the call site (``HTTPException`` re-raised verbatim,
+    ``OSError``/``TypeError`` → "Server TLS misconfiguration", anything else → the stale-class 503
+    that names the LIST and never a revocation). A reserved-pool timeout is one of those "anything
+    else" cases and is logged by the caller with the same wording, so the bounded-pool trade is
+    observable rather than silent. The ``dial/crl-mint`` label is set INSIDE that body and read by the
+    seam on the same thread, so it survives the hop and a refusal still counts by site.
+    """
+    factory = liveness_session_factory(request)
+    if factory is None:
+        return _ensure_dial_crl_store(request, db)
+    return await asyncio.to_thread(
+        run_off_loop,
+        factory,
+        lambda off_db: _ensure_dial_crl_store(request, off_db),
+        "execute/dial-crl-store",
+    )
 
 
 def _dial_crl_verdict_for(exc: ssl.SSLError) -> tuple[int, int, str] | None:
@@ -853,6 +879,43 @@ def _verified_incumbent_serial(request: Request, executor_id: str) -> str | None
     except ValueError:
         return None
     return canonical_serial(cert.serial_number)
+
+
+async def _incumbent_exemption_offloaded(
+    request: Request, db: Session, executor_id: str, presented_serial: str
+) -> bool:
+    """The incumbent exemption, read OFF the event loop when a real backend is present.
+
+    Same ruled order as ``_incumbent_exemption_applies`` (that function is the body; this is only the
+    thread placement). Returns the same bool.
+
+    Placement: ``asyncio.to_thread`` on the loop's default executor, with a Session created, used and
+    closed INSIDE the worker thread — the shipped ``publish_once`` discipline
+    (``revocation_snapshot.py``), never the request-scoped Session, which would cross threads. The
+    session factory prefers the RESERVED liveness pool (``LIVENESS_POOL_SIZE = 1``,
+    ``LIVENESS_MAX_OVERFLOW = 1``, ``LIVENESS_POOL_TIMEOUT = 2.0``), so a stalled revocation read
+    costs one reserved connection and a 2.0 s refusal, not one of the shared pool's 15 slots and not
+    the loop. THE BOUND IS THE TRADE: a second concurrent reader during a stall fails its checkout in
+    ``sqlalchemy.exc.TimeoutError`` and is refused in the shipped stale class (logged, observable)
+    rather than queueing silently.
+
+    The read itself stays inside the shipped bounded seam — ``executor_revocation_state`` opens
+    ``bounded_read``, and its ``register/incumbent-exemption`` ``for_site`` label is set by the body
+    this wrapper delegates to. Context copies into the worker thread, so a refusal off the loop is
+    still counted under the site that raised it; nothing here widens a deadline or moves a decision.
+
+    With no class-level factory on the backend — every MagicMock-wired unit harness — this returns the
+    inline read on the request Session, byte-for-byte the shipped behavior.
+    """
+    factory = liveness_session_factory(request)
+    if factory is None:
+        return _incumbent_exemption_applies(db, executor_id, presented_serial)
+    return await asyncio.to_thread(
+        run_off_loop,
+        factory,
+        lambda off_db: _incumbent_exemption_applies(off_db, executor_id, presented_serial),
+        "register/incumbent-exemption",
+    )
 
 
 def _incumbent_exemption_applies(db: Session, executor_id: str, presented_serial: str) -> bool:
@@ -1071,7 +1134,20 @@ async def register_executor(
             # accepted ONLY from the verified current-record credential —
             # revocation state first, then serial match (see helper).
             incumbent_serial = _verified_incumbent_serial(request, req.executor_id)
-            if incumbent_serial is None or not _incumbent_exemption_applies(db, req.executor_id, incumbent_serial):
+            # #603 AC1: the exemption read is a read of the LOCKABLE revocation population. On the
+            # single-worker core it ran on the event loop, so a held ACCESS EXCLUSIVE froze the whole
+            # loop (measured: 49 s, then 57 s re-measured, with zero access-log lines) and the shipped
+            # freshness ceiling could never fire. The #603 seam already bounds that WAIT
+            # (revocation_read.bounded_read, inside executor_revocation_state); what this leg adds is
+            # placement — the read now runs in a worker thread on its OWN Session, created, used and
+            # closed inside that thread, never crossing, which is the shipped publish_once discipline
+            # (revocation_snapshot.py, "part of the fix, not an optimization"). A backend with no real
+            # session factory (a MagicMock in a unit harness) keeps the inline read byte-for-byte: the
+            # discriminator is the CLASS, not the instance, per the reserved-pool rule in
+            # middleware/auth.py.
+            if incumbent_serial is None or not await _incumbent_exemption_offloaded(
+                request, db, req.executor_id, incumbent_serial
+            ):
                 metrics.EXECUTOR_REGISTERED.labels(result="token_required").inc()
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -2023,8 +2099,15 @@ async def execute_command_on_executor(
     # Scope note (ruled boundary): this refuses the connection; it does not yank
     # work already in flight, and nothing here may be "hardened" into doing that
     # without a fresh owner ruling.
+    #
+    # #603 AC1 (this leg): the mint reads the LOCKABLE executor_cert_revocations table, and the
+    # site's own house marker named that as the upgrade trigger. It now runs in a worker thread on its
+    # OWN Session (the publish_once discipline), so a held table lock costs this dial a refusal, not
+    # the whole core's event loop. The bound traded is the same one as the register arm: the reserved
+    # liveness pool (SIZE=1, OVERFLOW=1, TIMEOUT=2.0) — a second concurrent mint during a stall is
+    # refused in the shipped stale class below, logged and observable, never silently queued.
     try:
-        crl_capath = _ensure_dial_crl_store(request, db)
+        crl_capath = await _dial_crl_store_offloaded(request, db)
     except HTTPException:
         raise  # _get_ca_manager's own 503 keeps its established wording
     except (OSError, TypeError) as e:
