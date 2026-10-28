@@ -10,6 +10,7 @@ import base64
 import inspect
 import shlex
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import httpx2
@@ -18,9 +19,11 @@ import pytest
 from executor.command_validator import CommandValidator
 from executor.executor import (
     SHELL_METACHARS,
+    CommandRejected,
     CommandResult,
     Executor,
     SecretBundle,
+    _sshpass_owns_the_stdin,
     _validate_command_structure,
     render_command,
 )
@@ -1155,17 +1158,20 @@ class TestRedirectAllowance:
 
     def test_canonical_sudo_shape_passes_full_pipeline(self):
         ex, _strategy = self._executor()
-        secrets = [_make_secret("1", b"ssh-pass"), _make_secret("2", b"sudo-pass")]
+        secrets = [_make_secret("2", b"sudo-pass")]
         # Canonical templates must NOT carry `sudo -S -p ''`: ssh joins remote
         # argv with spaces WITHOUT re-quoting, the empty arg vanishes, and the
         # remote sudo swallows the next token as its prompt string (misparse →
         # usage error, exit 1). Field-proven 2026-09-25 on tvc/tve; the sudo
         # prompt text appearing in stderr is harmless (carries no secret).
+        # Shape re-cut for #695 (owner reversal R-2633): ssh AUTHENTICATES, so the
+        # ruled `<` pair reaches the remote `sudo -S`. The same command with
+        # `sshpass` in front is refused instead — TestSshpassRedirectRefusal695 —
+        # because there the redirect binds to sshpass's own stdin.
         cmd = [
-            "/usr/bin/sshpass",
-            "-f",
-            "/run/secrets/venya/1",
             "/usr/bin/ssh",
+            "-i",
+            "id_ed25519",
             "bot@target-1",
             "/usr/bin/sudo",
             "-S",
@@ -1255,6 +1261,190 @@ class TestRedirectAllowance:
         args, kwargs = audit.emit.call_args
         assert args == ("command_rejected",)
         assert "SESSION-BOUND" in kwargs["reason"]
+
+
+class TestSshpassRedirectRefusal695:
+    """#695 (owner reversal `R-2633`): the ruled session-bound `<` pair is refused when
+    `sshpass` stands in front of `ssh` and a remote `sudo -S` sits behind it — the
+    redirect binds to sshpass's own stdin, the remote prompt is answered by nothing, and
+    the command then waits out the whole per-command ceiling holding the executor's one
+    admission permit. The refusal NAMES THE PROCESS the redirect bound to and echoes no
+    element value (the #713 / R-2631 no-echo bar).
+
+    Three-part conjunction only, and each missing part is a shape that still runs — every
+    loosening is proven here as its own paired negative."""
+
+    def _executor(self, audit=None):
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        ex = Executor(
+            command_validator=CommandValidator(),
+            session_id="s-695",
+            injection_strategy=strategy,
+            audit_logger=audit,
+        )
+        ex.http_client = None
+        return ex, strategy
+
+    _SSHPASS: ClassVar[list[str]] = ["/usr/bin/sshpass", "-f", "/run/secrets/venya/1"]
+    _REMOTE_SUDO_S: ClassVar[list[str]] = ["/usr/bin/sudo", "-S", "id"]
+    _PAIR: ClassVar[list[str]] = ["<", "/run/secrets/venya/2"]
+
+    @staticmethod
+    def _secrets():
+        return [_make_secret("1", b"ssh-pass"), _make_secret("2", b"sudo-pass")]
+
+    def _conjunction(self, host="bot@target-1"):
+        return self._SSHPASS + ["/usr/bin/ssh", host] + self._REMOTE_SUDO_S + self._PAIR
+
+    def test_the_conjunction_is_refused_naming_the_process(self):
+        """Positive: the hung argv is refused at the gate BEFORE the sandbox is created,
+        and the sentence names sshpass as the process the redirect bound to."""
+        ex, strategy = self._executor()
+        with pytest.raises(CommandRejected) as excinfo:
+            ex.execute(self._conjunction(), self._secrets())
+        reason = str(excinfo.value)
+        assert "sshpass" in reason
+        assert "sudo -S" in reason
+        strategy.create_sandbox.assert_not_called()
+
+    def test_refusal_still_arrives_as_the_same_422_lane(self):
+        """Same-status cell (the scope guard made executable): the reversal changes the
+        TEXT, not the lane — still the pre-run structural rejection the relay answers 422
+        and the server forwards, so it carries the unchanged `Command rejected:` prefix
+        the #410 allowlist keys on."""
+        ex, _strategy = self._executor()
+        with pytest.raises(CommandRejected) as excinfo:
+            ex.execute(self._conjunction("bot@t"), self._secrets())
+        assert str(excinfo.value).startswith("Command rejected: ")
+        assert isinstance(excinfo.value, ValueError)
+
+    def test_refusal_names_the_index_not_the_value(self):
+        """No-echo cell (R-2631 carried over): the element INDEX is named, neither the
+        secret path nor the secret id appears, and the text stays one line — it crosses
+        the 422 detail, the server journal and the audit `reason`."""
+        ex, _strategy = self._executor()
+        with pytest.raises(CommandRejected) as excinfo:
+            ex.execute(self._conjunction("bot@t"), self._secrets())
+        reason = str(excinfo.value)
+        assert "Argument 8" in reason  # the '<' element, counted from the argv head
+        assert "/run/secrets/venya/" not in reason
+        assert "\n" not in reason
+
+    def test_rejection_audits_command_rejected(self):
+        """The refusal lands on the same `command_rejected` audit path as every other
+        structural rejection — the operator and the ledger both get the named reason."""
+        audit = MagicMock()
+        ex, _strategy = self._executor(audit=audit)
+        with pytest.raises(CommandRejected):
+            ex.execute(self._conjunction("bot@t"), self._secrets())
+        args, kwargs = audit.emit.call_args
+        assert args == ("command_rejected",)
+        assert "sshpass" in kwargs["reason"]
+
+    def test_sshpass_without_the_redirect_still_passes(self):
+        """Paired negative 1: sshpass + remote `sudo -S`, NO `<` pair — the documented
+        ssh-password shape, untouched by the ruling."""
+        assert _validate_command_structure(
+            self._SSHPASS + ["/usr/bin/ssh", "bot@t"] + self._REMOTE_SUDO_S,
+            frozenset({"/run/secrets/venya/1", "/run/secrets/venya/2"}),
+        )
+
+    def test_redirect_without_sshpass_still_passes(self):
+        """Paired negative 2: the ruled pair with key authentication — the shape the docs
+        name as the working one (#711) — still validates."""
+        assert _validate_command_structure(
+            ["/usr/bin/ssh", "bot@t"] + self._REMOTE_SUDO_S + self._PAIR,
+            frozenset({"/run/secrets/venya/2"}),
+        )
+
+    def test_sshpass_and_redirect_without_a_remote_stdin_reader_still_passes(self):
+        """Paired negative 3: sshpass + the ruled pair, but the remote command reads no
+        stdin. Over-refusing is a behaviour change and the ruling bars it."""
+        assert _validate_command_structure(
+            self._SSHPASS + ["/usr/bin/ssh", "bot@t", "uptime"] + self._PAIR,
+            frozenset({"/run/secrets/venya/1", "/run/secrets/venya/2"}),
+        )
+
+    def test_sshpass_after_a_local_sudo_is_not_the_conjunction(self):
+        """Paired negative 4: the command does not START with `sshpass`, so the predicate
+        never engages (first-element scope, rule D1). NOTE what this cell does NOT prove —
+        a `sudo -S` sitting before the `ssh` is not screened by anything here; that case is
+        carried by `test_local_stdin_reader_inside_the_command_is_not_the_conjunction`,
+        which is the cell that actually pins the remote-tail scope."""
+        assert _validate_command_structure(
+            ["/usr/bin/sudo", "-S", "id"] + self._SSHPASS + ["/usr/bin/ssh", "bot@t", "uptime"] + self._PAIR,
+            frozenset({"/run/secrets/venya/1", "/run/secrets/venya/2"}),
+        )
+
+    def test_quoted_remote_element_is_the_same_conjunction(self):
+        """The shape `venya run -- ssh h "sudo -S id"` delivers: ONE remote element holding
+        both `sudo` and `-S`. Same starvation, so a reader that only looked at adjacent
+        argv elements would miss the hour-long hold."""
+        ex, strategy = self._executor()
+        cmd = self._SSHPASS + ["/usr/bin/ssh", "bot@t", "/usr/bin/sudo -S id"] + self._PAIR
+        with pytest.raises(CommandRejected, match="sshpass"):
+            ex.execute(cmd, self._secrets())
+        strategy.create_sandbox.assert_not_called()
+
+    def test_first_element_scope_is_deliberate(self):
+        """Scope pin, and a named residual gap: the conjunction is read at the FIRST
+        element, mirroring `CommandValidator._split_local_remote` rule D1 (gate on the
+        first token). `env sshpass …` therefore is NOT refused here, even though the
+        redirect would starve the same way. That is the ruled scope — "the three-part
+        conjunction only", nothing looser — and the gap is booked in the report's
+        "what this does not fix", not quietly widened in a diff."""
+        assert _sshpass_owns_the_stdin(["env", "sshpass", "-f", "s", "ssh", "h", "sudo", "-S", "id"]) is False
+        assert _sshpass_owns_the_stdin(["sshpass", "-f", "s", "ssh", "h", "sudo", "-S", "id"]) is True
+        # and the same shape through the gate: accepted, because the arm is not reached
+        assert _validate_command_structure(
+            ["env", "sshpass", "-f", "/run/secrets/venya/1", "ssh", "h", "sudo", "-S", "id"] + self._PAIR,
+            frozenset({"/run/secrets/venya/1", "/run/secrets/venya/2"}),
+        )
+
+    def test_local_stdin_reader_inside_the_command_is_not_the_conjunction(self):
+        """Predicate-scope pin (the case the element-level negatives cannot reach): an
+        `sshpass`-first command whose `sudo -S` sits on the JUMP side, BEFORE the `ssh`,
+        and whose remote command reads no stdin. `sshpass -f s sudo -S ssh h uptime`
+        escalates locally to run ssh — the `<` still binds to sshpass, but there is no
+        remote stdin reader to starve, so the ruled conjunction is not met. A predicate
+        that scanned the whole command instead of the remote tail refuses this, and reddens
+        here."""
+        assert _sshpass_owns_the_stdin(["sshpass", "-f", "s", "sudo", "-S", "ssh", "h", "uptime"] + self._PAIR) is False
+        assert _validate_command_structure(
+            ["/usr/bin/sshpass", "-f", "/run/secrets/venya/1", "/usr/bin/sudo", "-S", "/usr/bin/ssh", "h", "uptime"]
+            + self._PAIR,
+            frozenset({"/run/secrets/venya/1", "/run/secrets/venya/2"}),
+        )
+
+    def test_unbound_pair_still_takes_the_session_bound_arm_first(self):
+        """Precedence pin: an sshpass conjunction whose pair is NOT session-bound still
+        dies with the shipped SESSION-BOUND sentence — arm order unchanged."""
+        ex, _strategy = self._executor()
+        with pytest.raises(CommandRejected, match="SESSION-BOUND"):
+            ex.execute(
+                self._SSHPASS + ["/usr/bin/ssh", "bot@t"] + self._REMOTE_SUDO_S + ["<", "/etc/passwd"],
+                self._secrets(),
+            )
+
+    def test_predicate_is_the_three_part_conjunction_by_value(self):
+        """Value pin on the predicate itself, so a widened arm cannot slide in behind a
+        green suite (the #713 AC4 lesson: a cell parametrised from the shipped set cannot
+        see the set change)."""
+        assert _sshpass_owns_the_stdin(["sshpass", "-f", "s", "ssh", "h", "sudo", "-S", "id"]) is True
+        assert _sshpass_owns_the_stdin(["sshpass", "-f", "s", "ssh", "h", "sudo", "id"]) is False
+        assert _sshpass_owns_the_stdin(["sshpass", "ssh", "h", "sudo", "--stdin", "id"]) is True
+        assert _sshpass_owns_the_stdin(["sudo", "-S", "id"]) is False
+        assert _sshpass_owns_the_stdin(["sshpass", "sudo", "-S", "id"]) is False  # no ssh: not remote
+        assert _sshpass_owns_the_stdin(["sshpass", "ssh", "h", "sudo"]) is False  # sudo, no -S
+        assert _sshpass_owns_the_stdin([]) is False
+        assert (
+            _sshpass_owns_the_stdin(["/usr/bin/sshpass", "-p", "pw", "/usr/bin/ssh", "h", "/usr/bin/sudo", "-S"])
+            is True
+        )
+        assert _sshpass_owns_the_stdin(["sshpass", "ssh", "h", "sudo -S id"]) is True  # quoted remote element
+        assert _sshpass_owns_the_stdin(["sshpass", "ssh", "h", "uptime"]) is False
 
 
 class TestRedirectReRender332:
@@ -1400,13 +1590,14 @@ class TestArgvDirectPosture322:
         """`<`-case regression pin (the ruled exception must keep WORKING):
         a command with a session-bound pair dispatches with argv=None and the
         pair RAW in the sh -c payload — identical bytes to the pre-switch
-        posture for this case (#332 re-emission preserved)."""
+        posture for this case (#332 re-emission preserved).
+
+        Shape re-cut for #695 (owner reversal R-2633): key authentication, no
+        sshpass, so the pair is live rather than refused. What this cell pins is
+        the RAW re-emission, and that still has to happen."""
         ex, strategy = self._executor()
         bound = "/run/secrets/venya/2"
         cmd = [
-            "/usr/bin/sshpass",
-            "-f",
-            "/run/secrets/venya/1",
             "/usr/bin/ssh",
             "bot@target-1",
             "/usr/bin/sudo",
@@ -1415,7 +1606,7 @@ class TestArgvDirectPosture322:
             "<",
             bound,
         ]
-        self._execute(ex, cmd, [_make_secret("1", b"ssh-pass"), _make_secret("2", b"sudo-pass")])
+        self._execute(ex, cmd, [_make_secret("2", b"sudo-pass")])
         args, kwargs = strategy.execute_command.call_args
         assert kwargs["argv"] is None
         assert args[0].endswith(f"< {bound}")
