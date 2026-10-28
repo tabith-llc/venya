@@ -136,7 +136,9 @@ The server enforces at store time (`routes/secrets.py:_validate_shape_metadata`)
 - **No shell metacharacters.** Commands are validated element-by-element
   against `SHELL_METACHARS` (`executor.py:_validate_command_structure`).
   One ruled exception exists: the standalone `<` followed by a session-bound
-  secret path (the `sudo-stdin` delivery pair). Everything else — pipes,
+  secret path (the `sudo-stdin` delivery pair), and that exception is conditional — the pair is
+  refused when `sshpass` is the first element and the remote command behind `ssh` carries a
+  `sudo -S`/`--stdin`, the shape described in the `sudo-stdin` row above. Everything else — pipes,
   semicolons, backticks, substitution syntax, braces — is refused before the
   sandbox starts. The refusal names the element index and every character class
   the token trips — `pipe/semicolon-ampersand`, `quoting/expansion`,

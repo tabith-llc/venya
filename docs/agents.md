@@ -80,7 +80,12 @@ rediscover them:
   (the carriage return is named here because the refusal classifies it; ticket
   #722 owns the shipped lists that omitted it). No pipes, no `&&`, no redirects. The single exception: a standalone `<` token
   immediately followed by `/run/secrets/venya/<id>` for a secret injected in the
-  same run.
+  same run — and that exception has a condition of its own: it is refused when
+  `sshpass` is the first token, the pair is session-bound, and the remote command behind `ssh` carries
+  a `sudo -S` or `sudo --stdin`. The guest shell binds the `<` to the first process it starts, so in
+  that one shape the file feeds `sshpass`'s stdin instead of the remote `sudo`, and the command is
+  refused before anything runs rather than waiting out the per-command limit (ticket #695). Keep the
+  redirect and authenticate `ssh` with a key, or keep `sshpass` and drop the redirect.
   The refusal names the element index and every character class the token trips, in this order:
   `pipe/semicolon-ampersand` (`| ; &`), `quoting/expansion` (`$` and backtick), `grouping-braces`
   (`( ) { }`), `redirect` (`< >`), `glob-history` (`* ? !`), `whitespace-control` (newline, carriage

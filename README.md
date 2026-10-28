@@ -32,7 +32,9 @@ the doc that governs it, and you can hold the code to it.
   does not is refused before it starts. **No shell runs an agent's command — with one
   ruled exception:** a standalone `<` token naming a secret injected in the same call is
   the one form that does go through the guest shell, so the shell can open that file for
-  the command it wraps; every other pipe, `&&`, or redirect is rejected
+  the command it wraps; that one form is itself refused when `sshpass` leads the command and the
+  remote carries a `sudo -S`, so no shell ever runs on a redirect that would starve it. Every
+  other pipe, `&&`, or redirect is rejected
   ([docs/agents.md](docs/agents.md) "Hard rules", which carries the exception in full).
 - **Secret handling.** Values are injected inside the sandbox and never enter the
   agent's context; output comes back redacted, and a filter failure returns nothing raw.

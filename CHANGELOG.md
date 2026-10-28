@@ -124,6 +124,18 @@ were folded into `0.1.0beta1` in that same commit. The rows below landed since t
   every field. No timeout moves: the relay, the nginx and client-side bounds and the execute read
   timeout are all untouched, because a tick interval is a cadence, not a fuse.
 
+- **A session-bound `<` redirect that `sshpass` would take for itself is now refused (`#695`).** The
+  one ruled exception to the metacharacter gate is a standalone `<` followed by a secret path bound to
+  the same call, and it exists so a command can answer a `sudo -S` prompt. The guest shell binds that
+  `<` to the first process it starts, so in `sshpass … ssh … sudo -S …` the file is read as
+  `sshpass`'s own password and the remote `sudo` is never answered: the command ran for its full time
+  limit and got nothing. The gate now refuses that shape before anything runs, and the refusal names
+  the redirect and says to authenticate `ssh` with a key or drop the redirect — not both uses at once.
+  Three shapes are accepted exactly as before: `sshpass` with no redirect, a redirect with no
+  `sshpass`, and `sshpass` plus a redirect whose remote command carries no `sudo -S` or `--stdin`. The
+  remote command is read in both forms the wire carries — separate elements (`sudo -S id`) and one
+  quoted element (`"sudo -S id"`). No character was added to the refused set and no timeout moved.
+
 ## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.

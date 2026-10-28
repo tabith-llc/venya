@@ -971,7 +971,12 @@ an unattended remote `sudo` in the same command are **not supported** in beta1.
 
 **What is NOT claimed here:** that `sshpass` is refused, disabled or unsupported as a capability — it is
 shipped and it is not in the executor's blocked-pattern list; the refusal under **strict** comes from the
-empty default allowlist, and it is a posture, not a judgement about this verb. And **not** that a
+empty default allowlist, and it is a posture, not a judgement about this verb. One shape is refused by the
+structural gate instead, whatever the preset: where `sshpass` leads the command, the session-bound `<` pair is
+present, and the remote command behind `ssh` carries a `sudo -S` or `sudo --stdin` — the conjunction this entry
+describes. The three shapes that are not that conjunction — `sshpass` with no redirect, a redirect with no
+`sshpass`, and `sshpass` plus a redirect with no remote `sudo -S` — are accepted as before, so the capability is
+intact and the refusal is the collision, not the verb. And **not** that a
 passphrase-prompt helper is a workaround for this case: that path has no physical capture in beta, so no
 alternative is offered beyond the two above.
 
