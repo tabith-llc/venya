@@ -253,6 +253,105 @@ async def test_run_command_masked_output() -> None:
     assert "2 secret(s) masked" in result[0].text
 
 
+async def test_run_command_names_the_executor_it_ran_on() -> None:
+    """#712 AC1/AC2: the render names the executor, on success and on a refusal.
+
+    Before this the answer was "Command exited with code 0." for every executor and
+    every host, so a sandbox answer read exactly like a production answer.
+    """
+    mock = _make_mock_client()
+    mock.run_command = AsyncMock(
+        return_value={"exit_code": 1, "stdout": "", "stderr": "permission denied", "masked_count": 0}
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool(
+            "run_command",
+            {"executor_id": "reston-va-storage-01", "command": "rm -rf /", "secret_keys": []},
+        )
+    assert result[0].text.splitlines()[0] == "Command exited with code 1. (executor=reston-va-storage-01)"
+
+
+async def test_run_command_failure_rc_and_missing_rc_still_name_the_executor() -> None:
+    """#712 AC2: attribution is not a rc-0-only feature — a refused command and a
+    response that carries no exit_code at all both name where they ran."""
+    for payload, expected_head in (
+        ({"exit_code": 255, "stdout": "", "stderr": "ssh: connect timed out", "masked_count": 0}, "255"),
+        ({"stdout": "output", "stderr": "", "masked_count": 0}, "-1"),
+    ):
+        mock = _make_mock_client()
+        mock.run_command = AsyncMock(return_value=payload)
+        with patch("venya_mcp.server.get_client", return_value=mock):
+            result = await call_tool(
+                "run_command",
+                {"executor_id": "reston-va-network-01", "command": "ls", "secret_keys": []},
+            )
+        expected = f"Command exited with code {expected_head}. (executor=reston-va-network-01)"
+        assert result[0].text.splitlines()[0] == expected
+
+
+async def test_run_command_two_executors_are_distinguishable_from_their_responses_alone() -> None:
+    """#712 AC4 paired negative: one session, two executors, byte-identical payloads.
+
+    The ONLY thing that may differ between the two answers is the attribution. Strip the
+    executor back out of the render and these two texts collide — which is the accident
+    this row was filed on.
+    """
+    mock = _make_mock_client()
+    mock.run_command = AsyncMock(
+        return_value={"exit_code": 0, "stdout": "no such file", "stderr": "", "masked_count": 0}
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        network = await call_tool(
+            "run_command", {"executor_id": "reston-va-network-01", "command": "ls", "secret_keys": []}
+        )
+        storage = await call_tool(
+            "run_command", {"executor_id": "reston-va-storage-01", "command": "ls", "secret_keys": []}
+        )
+    assert network[0].text != storage[0].text
+    assert "executor=reston-va-network-01" in network[0].text
+    assert "reston-va-storage-01" not in network[0].text
+    assert "executor=reston-va-storage-01" in storage[0].text
+    assert "reston-va-network-01" not in storage[0].text
+    # the payload half is untouched: same rc, same stdout, only the attribution differs
+    assert network[0].text.splitlines()[1:] == storage[0].text.splitlines()[1:]
+
+
+async def test_run_command_attribution_is_the_id_the_call_carried_not_a_parse_of_the_command() -> None:
+    """#712 AC5: no argv sniffing. The command names a host the caller never addressed;
+    the render attributes the executor the CALL carried, and never the one in the text."""
+    mock = _make_mock_client()
+    mock.run_command = AsyncMock(return_value={"exit_code": 0, "stdout": "", "stderr": "", "masked_count": 0})
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool(
+            "run_command",
+            {"executor_id": "sandbox-7", "command": "ssh bot@prod-web-9 uptime", "secret_keys": []},
+        )
+    assert result[0].text.splitlines()[0] == "Command exited with code 0. (executor=sandbox-7)"
+    assert "prod-web-9" not in result[0].text
+    assert mock.run_command.await_args.kwargs["executor_id"] == "sandbox-7"
+
+
+async def test_run_command_attribution_adds_no_secret_text() -> None:
+    """#712 AC6 paired negative: the new text is the caller's own id — no secret key
+    name, no sandbox secret path reaches the render through it."""
+    mock = _make_mock_client()
+    mock.run_command = AsyncMock(
+        return_value={"exit_code": 0, "stdout": "peer auth: [REDACTED:9]", "stderr": "", "masked_count": 1}
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool(
+            "run_command",
+            {
+                "executor_id": "web-3",
+                "command": "cat /etc/shadow",
+                "secret_keys": ["bot_password_web_server_3"],
+            },
+        )
+    assert "(executor=web-3)" in result[0].text
+    assert "bot_password_web_server_3" not in result[0].text
+    assert "/run/secrets/" not in result[0].text
+
+
 async def test_run_command_unparsable_string_maps_to_clean_tool_error() -> None:
     """M1 (#322): the client-boundary shlex.split raises ValueError with an
     actionable message; the tool layer's EXISTING exception path turns it
