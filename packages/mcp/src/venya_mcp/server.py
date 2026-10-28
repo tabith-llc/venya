@@ -246,8 +246,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text="\n".join(lines))]
 
         elif name == "run_command":
+            executor_id = arguments["executor_id"]
             result = await client.run_command(
-                executor_id=arguments["executor_id"],
+                executor_id=executor_id,
                 command=arguments["command"],
                 secret_keys=arguments["secret_keys"],
             )
@@ -256,7 +257,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             stderr = result.get("stderr", "")
             masked_count = result.get("masked_count", 0)
 
-            lines = [f"Command exited with code {exit_code}."]
+            # The answer names the executor it ran on, echoed from the caller's own
+            # argument — never inferred from the command text (#712 AC5). Without it a
+            # sandbox answer and a production answer read identically (#712).
+            lines = [f"Command exited with code {exit_code}. (executor={executor_id})"]
             if stdout:
                 lines.append(f"\nstdout:\n{stdout}")
             if stderr:

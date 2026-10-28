@@ -31,6 +31,15 @@ were folded into `0.1.0beta1` in that same commit. The rows below landed since t
   every subprocess call in `packages/*/src` bounded, with one named exemption recorded with
   its reason.
 
+- **`run_command` answers now name the executor they ran on (`#712`).** The MCP tool used to
+  reply with only the exit code, stdout, stderr and the masked-count note, so an answer
+  read the same whether it came from a sandbox or from the host the caller meant. The
+  reply line now carries the `executor_id` the caller supplied — echoed from the call,
+  never guessed from the command text — on success and on a non-zero exit alike. The
+  `get_audit` face has printed `executor=` this whole time; this puts the two siblings in
+  the same shape. No new field on any wire message, no change to what a caller has to
+  send, and nothing about secrets moves: the id is already in the caller's own request.
+
 ## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.

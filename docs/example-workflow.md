@@ -93,7 +93,7 @@ run_command(
 ```
 
 ```
-Command exited with code 255.
+Command exited with code 255. (executor=reston-va-network-01)
 
 stderr:
 ssh: connect to host 192.0.2.40 port 22: Connection timed out
@@ -120,7 +120,7 @@ run_command(
 ```
 
 ```
-Command exited with code 0.
+Command exited with code 0. (executor=reston-va-storage-01)
 
 stdout:
 Volume reston-data-01 status: DEGRADED
@@ -167,7 +167,7 @@ run_command(
 ```
 
 ```
-Command exited with code 0.
+Command exited with code 0. (executor=reston-va-storage-01)
 
 stdout:
 Failover initiated for volume reston-data-01
