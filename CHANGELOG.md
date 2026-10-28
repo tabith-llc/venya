@@ -80,6 +80,23 @@ were folded into `0.1.0beta1` in that same commit. The rows below landed since t
   for a reader to discover. No behaviour changed and no field moved on any wire message: this row is
   a disclosure, and it leaves with the leg that adds the three-valued answer.
 
+- **The `run_command` example shows both supported authentication postures
+  (`#711`).** The shipped example paired `sshpass` with an unattended remote
+  `sudo` — the one combination beta does not support, because `sshpass` reads the
+  password from its own side and the remote `sudo -S` is answered by nothing — so
+  the description pointed an agent at a command that could not finish the job it
+  described. It now shows the two shapes the product does support, each with the
+  condition that makes it the right one: key authentication with the
+  session-bound redirect where the target enrolls the key and a remote `sudo` is
+  needed, and `sshpass` password authentication with no remote `sudo` in the same
+  command where the target grants a stored password only. Neither posture is
+  assumed, because a customer target may grant either, and the description says
+  so. Both example commands are read back out of the shipped description and run
+  through the real command gate in the test suite, so an example cannot drift
+  into a shape the product would refuse. The limitation entry in
+  `docs/beta-known-limitations.md` stands exactly as written: the example moved,
+  the disclosure did not.
+
 ## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
