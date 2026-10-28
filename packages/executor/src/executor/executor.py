@@ -306,6 +306,50 @@ def _bound_secret_paths(secret_ids: Iterable[str]) -> frozenset[str]:
     return frozenset(f"{CONTAINER_SECRET_DIR}/{secret_id}" for secret_id in secret_ids)
 
 
+def _sshpass_owns_the_stdin(command: list[str]) -> bool:
+    """Whether a near-side `<` redirect in this argv is taken by `sshpass` instead of
+    reaching the remote `sudo -S` it was written for (#695, owner reversal `R-2633`).
+
+    The THREE-PART conjunction and nothing looser: `sshpass` as the first element, a
+    session-bound `<` pair at the call site, and a remote `sudo` carrying `-S`/`--stdin`
+    behind the `ssh`. A `sshpass` command with no redirect, a redirect with no `sshpass`,
+    and `sshpass` + redirect with no remote `sudo -S` are each accepted exactly as before
+    — over-refusing is a behaviour change and the ruling bars it.
+
+    Why the conjunction is refused rather than allowed: `strategies/sbx_strategy.py` runs
+    the reconstituted string through `sh -c`, so a `<` binds to the FIRST process — here
+    `sshpass`, which reads its password from its own stdin and runs `ssh` on a tty it owns
+    — so the remote `sudo -S` prompt is answered by nothing and the command waits for the
+    whole per-command ceiling (`#696`) holding the executor's single admission permit.
+
+    First-element scope mirrors `CommandValidator._split_local_remote` (rule D1: gate on
+    the first token), so the two local/remote readings cannot disagree about what `sshpass`
+    means in a command.
+
+    The remote command is read in BOTH shapes the wire carries: separate argv elements
+    (`… sudo -S id`, the journal form) and one quoted element (`… "sudo -S id"`, what
+    `venya run -- ssh h "sudo -S id"` delivers). A remote element that merely CONTAINS the
+    words inside a larger argument (`echo "sudo -S"`) is refused too — the cost of reading
+    the string form, and the safe direction here, since a missed conjunction is the hour-long
+    hold. shortcut: word-level reading of a remote element, upgrade when a remote-command
+    parser exists for this gate.
+    """
+    n = len(command)
+    if n == 0 or os.path.basename(command[0]) != "sshpass":
+        return False
+    ssh_idx = next((i for i in range(1, n) if os.path.basename(command[i]) == "ssh"), None)
+    if ssh_idx is None:
+        return False
+    # The remote side, flattened to words: a `-S` may sit in the SAME element as its
+    # `sudo` (the quoted one-argument form) or in the NEXT element (the journal form), and
+    # both are the same command reaching the same starved prompt.
+    remote_words = [w for tok in command[ssh_idx + 1 : n] for w in tok.split()]
+    for k, word in enumerate(remote_words):
+        if os.path.basename(word) == "sudo" and any(later in ("-S", "--stdin") for later in remote_words[k + 1 :]):
+            return True
+    return False
+
+
 def render_command(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> str:
     """Reconstitute a gate-validated argv list into the ``sh -c`` payload.
 
@@ -403,6 +447,20 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
                     "Redirect '<' is only permitted when immediately followed by a "
                     "SESSION-BOUND secret path (/run/secrets/venya/<id> for a secret "
                     "injected in this session). Any other redirect target is rejected."
+                )
+            # The ruled session-bound pair is the ONLY shape that reaches here, so this is the
+            # same `<` arm with one more sentence (#695, owner reversal `R-2633`: "ship the
+            # validator refusal for sshpass + < + remote sudo -S, naming which process the
+            # redirect bound to") — no new arm, no re-ordering, and still the shipped
+            # ValueError -> CommandRejected -> relay 422 lane. Names the PROCESS the redirect
+            # bound to, never an element value (the #713/R-2631 no-echo bar).
+            if _sshpass_owns_the_stdin(command):
+                raise ValueError(
+                    f"Argument {i} redirects '<' into a session-bound secret path, but "
+                    "sshpass stands in front of ssh and owns that stdin: the remote sudo -S "
+                    "is never answered, so the command would wait for the full per-command "
+                    "ceiling instead of running. Authenticate ssh with a key and keep the "
+                    "redirect, or drop the redirect and keep sshpass — not both."
                 )
         if any(c in elem for c in metachars):
             # Form B (#713): the index and every class tripped, in the row's order. The element

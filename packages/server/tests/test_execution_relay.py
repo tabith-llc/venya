@@ -1882,6 +1882,32 @@ class TestPolicyRejectionRelay410:
         assert resp.status_code == 422
         assert resp.json()["detail"] == "Executor returned an error"
 
+    def test_sshpass_redirect_refusal_695_crosses_the_allowlist_unchanged(self):
+        """#695 (owner reversal R-2633) scope guard, server half: the sshpass + `<` +
+        remote `sudo -S` refusal is a NEW SENTENCE ON THE EXISTING 422 lane, so the #410
+        prefix is what the caller reads — the allowlist itself is unchanged. Detail is
+        the executor's literal, forwarded verbatim at 422."""
+        reason = (
+            "Command rejected: Argument 8 redirects '<' into a session-bound secret path, "
+            "but sshpass stands in front of ssh and owns that stdin: the remote sudo -S is "
+            "never answered, so the command would wait for the full per-command ceiling "
+            "instead of running."
+        )
+        resp = self._harness_with_response(self._relay(422, {"detail": reason}))
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == reason
+
+    def test_same_sentence_on_a_503_is_still_erased(self):
+        """Paired negative for the cell above, and the allowlist made executable: the
+        #695 sentence arriving on the 503 transport lane is NOT forwarded — forwarding is
+        keyed to the 422 lane plus the `Command rejected:` prefix, and widening that to a
+        second status is the change the ruling bars (the #697 operational-fault lane is
+        gated by its OWN prefix, not by this text)."""
+        reason = "Command rejected: Argument 8 redirects '<' into a session-bound secret path"
+        resp = self._harness_with_response(self._relay(503, {"detail": reason}))
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Executor returned an error"
+
     def test_422_non_json_body_stays_generic(self):
         """Paired negative (robustness): non-JSON relay body on the 422 lane
         degrades to the generic detail, never a 500."""
