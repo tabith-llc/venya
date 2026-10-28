@@ -410,6 +410,18 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             exc_info=True,
         )
 
+    # #718: re-apply the two product roles on EVERY boot, not only inside the init route.
+    # The get-or-create lived only in `routes/init.py` `init_core`, which is gated away by
+    # `deployment_is_initialized()` on an already-initialised core — so a core whose `roles`
+    # table was emptied after init had no shipped path back, while three doors (role grant
+    # 400, admin gate 403, break-glass 503) refused without naming the missing row. Kept
+    # non-fatal for the same reason as #597 above: a core that cannot re-apply its roles
+    # still serves and still refuses loudly at those doors, which beats a startup that
+    # aborts on a transient DB fault. Each role it actually creates emits `role_created`.
+    from .role_seed import ingest_seed_roles
+
+    ingest_seed_roles(backend)
+
     # Unconditional: a missing passphrase is a hard failure in every mode.
     # The former `not config.debug` exemption was a dead letter — init_db
     # above constructs BackendConfig(passphrase=None), which raises

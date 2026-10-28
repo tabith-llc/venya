@@ -316,6 +316,11 @@ Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/
 
 Production deployment guide: **[Installation Guide](docs/installation.md)**
 
+Setup note worth knowing before your first unattended boot: the core's two product roles —
+`admin` and `user` — are re-applied at startup whenever they are missing, audited as
+`role_created`, and never rewritten once they exist
+([details](docs/installation.md#how-the-two-product-roles-get-created)).
+
 ### Prerequisites
 
 - Linux — Ubuntu 24.04 LTS (core/executor; tested target, installers assume it). Workstation CLI additionally supports Debian 13 and macOS (verified macOS 26.6.2 arm64)

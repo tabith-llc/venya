@@ -28,6 +28,7 @@ from ..fido2.browser_adapter import challenge_to_browser_options
 from ..fido2.manager import WebAuthnError
 from ..recovery_codes import generate_recovery_code as _generate_recovery_code
 from ..recovery_codes import hash_recovery_code as _hash_recovery_code
+from ..role_seed import ensure_seed_roles
 from ..utils.user_id import USER_ID_PATTERN
 
 router = APIRouter()
@@ -476,28 +477,17 @@ async def init_core(
                 except CAExistsError:
                     logger.debug("CA already exists on disk")
 
-        # Idempotent get-or-create on roles.name: a re-init over a wiped-but-
-        # roles-intact DB (the AGENTS.md re-enrollment recipe leaves roles, and a
-        # fresh installer seeds them via migration) must not die on the
-        # uq_roles_name UniqueViolation a bare INSERT would raise.
-        admin_role = db.query(Role).filter(Role.name == "admin").first()
-        if admin_role is None:
-            admin_role = Role(
-                name="admin",
-                permissions="read-write",
-                description="System administrator — full access",
-            )
-            db.add(admin_role)
-
-        user_role = db.query(Role).filter(Role.name == "user").first()
-        if user_role is None:
-            user_role = Role(
-                name="user",
-                permissions="read",
-                description="Regular user — read-only access",
-            )
-            db.add(user_role)
-        db.flush()
+        # Idempotent get-or-create on roles.name, via the same helper the core runs at
+        # startup (`server/role_seed.py`) — the two write paths must not drift into three.
+        # What seeds these rows is `init` step 1 and that boot re-apply, and each creation
+        # emits `role_created`. NO MIGRATION SEEDS THEM: the installer does run migrations
+        # (`install-venya-core.sh` -> `core.migrations._run_migrations`), and migration 001
+        # creates the `roles` table plus its `uq_roles_name` constraint and inserts no rows.
+        # A re-init over a wiped-but-roles-intact DB (the fleet re-enrollment recipe leaves
+        # `roles` intact) must not die on the uq_roles_name UniqueViolation a bare INSERT
+        # would raise, so this is get-or-create, never an IntegrityError catch.
+        roles, _created_roles = ensure_seed_roles(db)
+        admin_role = roles["admin"]
 
         admin_user = User(
             user_id=req.user_id,
