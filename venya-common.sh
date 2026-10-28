@@ -669,22 +669,39 @@ venya_apply_code_fixes() {
     # "the first flush in the file", which would abort a healthy tree over an unrelated
     # earlier flush. Reason named per cause (lead ruling s108) so the operator reads one
     # file, not two.
-    local seed n_add n_audit n_total n_between fix3_reason=""
+    #
+    # STATEMENTS, NOT TEXT (#718 follow-on, owner blessing O421 "blessit"). The three
+    # literals used to be matched by substring, so a commented-out site flush carried the
+    # same bytes as the live one and the guard reported `already clean` on a tree that
+    # flushes nothing. The flush is therefore anchored at the start of its own statement
+    # (`^[[:space:]]*db\.flush\(\)`), which still matches the live line with its trailing
+    # comment and still matches the #519 fixture shape at any indent depth. The add and the
+    # audit read keep their substring match — the audit dict sits INSIDE a call in that
+    # fixture, so a line-start anchor there would abort a healthy tree — but each drops any
+    # line whose first non-space character is `#`, and each takes the first SURVIVING line
+    # rather than `-m1`, because `-m1` on the raw text would let one comment hide the real
+    # site below it. shortcut: a docstring line that opens with the flush call still counts
+    # as a statement, upgrade when role_seed.py grows prose at line start or the check moves
+    # to an AST parse in python.
+    local seed n_add n_audit n_text n_total n_between fix3_reason=""
     seed="$INSTALL_DIR/packages/server/src/server/role_seed.py"
     if [ ! -f "$seed" ]; then
         fix3_reason="role_seed.py absent ($seed)"
     else
-        n_add=$(grep -n -m1 -F 'db.add(role)' "$seed" | cut -d: -f1 || true)
-        n_audit=$(grep -n -m1 -F 'role_id": role.id' "$seed" | cut -d: -f1 || true)
-        n_total=$(grep -cF 'db.flush()' "$seed" || true)
+        n_add=$(grep -nF 'db.add(role)' "$seed" | grep -vE '^[0-9]+:[[:space:]]*#' | head -n1 | cut -d: -f1 || true)
+        n_audit=$(grep -nF 'role_id": role.id' "$seed" | grep -vE '^[0-9]+:[[:space:]]*#' | head -n1 | cut -d: -f1 || true)
+        n_text=$(grep -cF 'db.flush()' "$seed" || true)
+        n_total=$(grep -cE '^[[:space:]]*db\.flush\(\)' "$seed" || true)
         if [ -z "$n_add" ]; then
-            fix3_reason="the seed-role add is not in role_seed.py ($seed): no db.add(role) line to anchor on"
+            fix3_reason="the seed-role add is not in role_seed.py ($seed): no db.add(role) line to anchor on (a commented-out add adds no role)"
         elif [ -z "$n_audit" ]; then
-            fix3_reason="role_seed.py audits no created id: no role_id/role.id read after the add at line $n_add in $seed"
-        elif [ "${n_total:-0}" -eq 0 ]; then
+            fix3_reason="role_seed.py audits no created id: no role_id/role.id read after the add at line $n_add in $seed (a commented-out audit reads nothing)"
+        elif [ "${n_text:-0}" -eq 0 ]; then
             fix3_reason="no db.flush() anywhere in $seed, so the audit read at line $n_audit would take role.id before it exists"
+        elif [ "${n_total:-0}" -eq 0 ]; then
+            fix3_reason="none of the $n_text db.flush() occurrences in $seed is a statement at the head of its own line — a commented-out or inline mention does not assign ids, so the audit read at line $n_audit would take role.id before it exists"
         else
-            n_between=$(grep -nF 'db.flush()' "$seed" | awk -F: -v a="$n_add" -v b="$n_audit" 'BEGIN{c=0} {if ($1+0 > a+0 && $1+0 < b+0) c++} END{print c}' || true)
+            n_between=$(grep -nE '^[[:space:]]*db\.flush\(\)' "$seed" | awk -F: -v a="$n_add" -v b="$n_audit" 'BEGIN{c=0} {if ($1+0 > a+0 && $1+0 < b+0) c++} END{print c}' || true)
             if [ "${n_between:-0}" -eq 0 ]; then
                 fix3_reason="none of the $n_total db.flush() lines in $seed sits between the role add (line $n_add) and the audit id read (line $n_audit) — a flush outside that window does not make role.id exist"
             fi
