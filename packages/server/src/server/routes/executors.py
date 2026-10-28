@@ -802,8 +802,9 @@ async def _dial_crl_store_offloaded(request: Request, db: Session) -> str:
     used and closed inside the worker thread, never the request's.
 
     Every raise keeps its established arm at the call site (``HTTPException`` re-raised verbatim,
-    ``OSError``/``TypeError`` → "Server TLS misconfiguration", anything else → the stale-class 503
-    that names the LIST and never a revocation). A reserved-pool timeout is one of those "anything
+    ``OSError``/``TypeError`` → the established TLS-misconfiguration class, anything else → the
+    stale-class 503 that names the LIST and never a revocation). A reserved-pool timeout is one of
+    those "anything
     else" cases and is logged by the caller with the same wording, so the bounded-pool trade is
     observable rather than silent. The ``dial/crl-mint`` label is set INSIDE that body and read by the
     seam on the same thread, so it survives the hop and a refusal still counts by site.

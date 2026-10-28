@@ -57,40 +57,40 @@ HE = "install-venya-executor.sh"
 #: containing that literal. Kinds: pin | dated | exempt.
 MANIFEST: dict[str, tuple[str, str, int, str]] = {
     # ---- #586 entry: the dial door
-    "packages/server/src/server/routes/executors.py:639": (E, "def _build_relay_ssl_context", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:687-688": (E, "VERIFY_CRL_CHECK_LEAF", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:713": (E, "def _ensure_dial_crl_store", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:641": (E, "def _build_relay_ssl_context", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:689-690": (E, "VERIFY_CRL_CHECK_LEAF", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:715": (E, "def _ensure_dial_crl_store", 1, "pin"),
     f"{E}:1979": (E, "crl_capath = _ensure_dial_crl_store(request, db)", 1, "pin"),
     f"{E}:1994": (E, "ssl_ctx = _build_relay_ssl_context", 1, "pin"),
     f"{E}:789": (E, "Executor certificate revoked", 1, "pin"),
     f"{E}:699": (E, "_STALE_LIST_DETAIL = REVOCATION_UNAVAILABLE_DETAIL", 1, "pin"),
     f"{E}:1987": (E, "Server TLS misconfiguration", 1, "pin"),
     # ---- the `.../executors.py:N` short forms the #586 entry prints
-    "packages/server/src/server/routes/executors.py:2027": (
+    "packages/server/src/server/routes/executors.py:2111": (
         E,
-        "crl_capath = _ensure_dial_crl_store(request, db)",
+        "crl_capath = await _dial_crl_store_offloaded(request, db)",
         1,
         "pin",
     ),
-    "packages/server/src/server/routes/executors.py:2042": (E, "ssl_ctx = _build_relay_ssl_context", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:810": (E, "Executor certificate revoked", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:710": (
+    "packages/server/src/server/routes/executors.py:2126": (E, "ssl_ctx = _build_relay_ssl_context", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:837": (E, "Executor certificate revoked", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:712": (
         E,
         "_STALE_LIST_DETAIL = REVOCATION_UNAVAILABLE_DETAIL",
         1,
         "pin",
     ),
-    "packages/server/src/server/routes/executors.py:2035": (E, "Server TLS misconfiguration", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:2119": (E, "Server TLS misconfiguration", 1, "pin"),
     ":1997": (E, "Server TLS misconfiguration", 2, "pin"),
-    "packages/server/src/server/routes/executors.py:674": (E, "VERIFY_X509_STRICT", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:717-722": (
+    "packages/server/src/server/routes/executors.py:676": (E, "VERIFY_X509_STRICT", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:719-724": (
         E,
         "refuse everything until a properly refreshed list arrives",
         1,
         "pin",
     ),
-    "packages/server/src/server/routes/executors.py:2023-2025": (E, "Scope note (ruled boundary)", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:1619": (
+    "packages/server/src/server/routes/executors.py:2100-2102": (E, "Scope note (ruled boundary)", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:1696": (
         E,
         "is_online = 0.0 <= delta.total_seconds() < 60",
         1,
@@ -223,7 +223,7 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     f"{TCF}:55": (TCF, "assert ADMIN_SHORT_CERT_LIFETIME_SECONDS == 3600", 1, "pin"),
     "packages/server/src/server/routes/admin.py:1077": (AD, "executor's next heartbeat (~30 s)", 1, "pin"),
     f"{HL}:78": (HL, "def _check_ca", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:796": (E, "def _dial_crl_verdict_for", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:823": (E, "def _dial_crl_verdict_for", 1, "pin"),
     "executors.py:702": (E, "def _ensure_dial_crl_store", 1, "pin"),
     "executors.py:628": (E, "def _build_relay_ssl_context", 1, "pin"),
     "executors.py:1571": (E, "is_online = 0.0 <= delta.total_seconds() < 60", 1, "pin"),

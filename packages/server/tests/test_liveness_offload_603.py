@@ -351,7 +351,7 @@ class TestLoopAliveBehindARealLockPostgresql:
     3. ``test_the_off_loop_read_keeps_the_loop_serving_during_the_same_wait`` — the claim itself.
        Dispatched through the shipped seam, the ticker keeps firing for the whole wait and the read
        still refuses in the same class. The ANSWER is identical to cell 2; only the loop survived.
-    4. ``test_a_real_revocation_answers_the_same_off_loop_as_on_it`` — placement changes no verdict.
+    4. ``test_a_seeded_revocation_reads_the_same_off_loop_as_on_it`` — placement changes no answer.
     """
 
     @staticmethod
@@ -513,33 +513,55 @@ class TestLoopAliveBehindARealLockPostgresql:
         finally:
             teardown()
 
-    def test_a_real_revocation_answers_the_same_off_loop_as_on_it(self):
-        """No lock held: the verdict is identical on both faces. Placement is the only variable,
-        and a real revocation stays a revocation when the read moves threads."""
-        from core.iam.models import Base, Executor, ExecutorCertRevocation
-        from server.revocation import executor_revocation_state
+    def test_a_seeded_revocation_reads_the_same_off_loop_as_on_it(self):
+        """No lock held: the same bounded population read answers identically on both faces.
+
+        Placement is the only variable. This reads the ONE population the held-lock cells read
+        (``executor_cert_revocations``) rather than driving ``revocation.executor_revocation_state``,
+        because that function also queries ``executors`` and a gated cell must not create or drop a
+        table a peer's FK depends on inside a schema these cells share — my own first draft of this
+        cell had its ``drop_all`` refused by an existing ``execution_sessions`` constraint, which is
+        #607's hang class met from the DDL side. The ruled-order half of the parity claim (a revoked
+        serial reads NOT-exempt through ``executor_revocation_state``) is the unit face
+        ``test_site_1_register_exemption_goes_through_the_offload_seam``, which drives that real
+        function against a session double.
+        """
+        from core.iam.models import Base, ExecutorCertRevocation
+        from server.revocation_read import bounded_read
         from sqlalchemy import text
 
         engine = self._engine()
-        # executor_revocation_state reads the identity row FIRST (the ruled order), so this cell
-        # needs both relations the population spans — the same pair the held-lock cells above lock.
-        Base.metadata.create_all(engine, tables=[Executor.__table__, ExecutorCertRevocation.__table__])
+        Base.metadata.create_all(engine, tables=[ExecutorCertRevocation.__table__])
         factory = self._session_factory()
+        # A serial unique to this run: these cells share one schema with every other door-gated
+        # file on the venue, and a fixed literal would collide with a peer's row in the same table.
+        seed_serial = f"0000{os.getpid():04x}{threading.get_ident() & 0xFFFF:04x}"
         seed = factory()
         try:
             seed.execute(
-                text("INSERT INTO executor_cert_revocations (serial_number, revoked_at) VALUES ('0000beef', now())")
+                text("INSERT INTO executor_cert_revocations (serial_number, revoked_at) " "VALUES (:serial, now())"),
+                {"serial": seed_serial},
             )
             seed.commit()
 
             def _reader_on(db):
-                return executor_revocation_state(db, "exec-1", presented_serial="BEEF").revoked
+                with bounded_read(db, site="gate/parity"):
+                    rows = db.query(ExecutorCertRevocation).all()
+                return sorted(r.serial_number for r in rows)
 
             on_loop = asyncio.run(self._drive_inline(factory, _reader_on))
             off_loop = asyncio.run(self._drive_off_loop(factory, _reader_on))
-            assert on_loop is True, "a serial on the revocation population must read revoked on the loop"
-            assert off_loop is True, "…and revoked off it: this leg changes placement, never the answer"
+            assert seed_serial in on_loop, f"the seeded revocation is missing on the loop face: {on_loop!r}"
+            assert on_loop == off_loop, (
+                f"the same read answered differently by thread — {on_loop!r} vs {off_loop!r}; this leg "
+                "moves placement, never an answer"
+            )
         finally:
+            seed.execute(
+                text("DELETE FROM executor_cert_revocations WHERE serial_number = :serial"),
+                {"serial": seed_serial},
+            )
+            seed.commit()
             seed.close()
             engine.dispose()
-            Base.metadata.drop_all(engine, tables=[ExecutorCertRevocation.__table__, Executor.__table__])
+            Base.metadata.drop_all(engine, tables=[ExecutorCertRevocation.__table__])
