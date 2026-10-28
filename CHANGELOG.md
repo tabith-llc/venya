@@ -40,6 +40,19 @@ were folded into `0.1.0beta1` in that same commit. The rows below landed since t
   the same shape. No new field on any wire message, no change to what a caller has to
   send, and nothing about secrets moves: the id is already in the caller's own request.
 
+- **`get_audit` lines now name the command they ran, escaped (`#709`).** The tool
+  asked to show what commands had been executed and printed only the timestamp, the
+  event type, the user and the executor: the command text, its exit code, its duration
+  and the row's own session id were all stored, all returned by the API, and dropped at
+  the last hop, so "did my write run?" could not be answered from the tool's own output.
+  They are printed now, on one line each — the command text arrives escaped, so a newline
+  stored inside a command stays data inside that line rather than becoming a second audit
+  record an agent would read as its own event. A row whose answer is genuinely unknown
+  keeps saying so: `exit_code=None` beside `outcome='relay_timeout'`, which is never
+  rendered as a clean run, and a row that never stored a command is rendered exactly as
+  before. No migration, no wire change, no new endpoint — every field already existed in
+  the stored row.
+
 ## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
