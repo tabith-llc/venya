@@ -138,6 +138,29 @@ SEED_MASKED_FLUSH = LIVE_SEED.replace("    db.flush()\n", "").replace(
 # The add anchor moved (a rename of the loop variable is enough): nothing to anchor on.
 NO_ANCHOR_SEED = LIVE_SEED.replace("db.add(role)", "db.add(new_role)")
 
+# #718 follow-on (leg 668, owner blessing O421): the guard reads STATEMENTS now. The old form
+# grepped the three literals as substrings, so a commented-out site flush carried the same bytes as
+# the live call and the guard reported `already clean` on a tree that flushes nothing. Each fixture
+# below is one way the text can survive without the statement surviving.
+SEED_COMMENTED_FLUSH = LIVE_SEED.replace("    db.flush()\n", "    # db.flush()  # ids assigned at commit\n")
+# The flush text at the END of a live statement — a mention, not a call.
+SEED_TRAILING_ONLY_FLUSH = LIVE_SEED.replace("    db.flush()\n", "    roles = dict()  # db.flush() lives here\n")
+# A comment naming the add ABOVE the real add: the anchor must step over it, not stop on it.
+SEED_ADD_COMMENT_ABOVE = LIVE_SEED.replace(
+    "        db.add(role)\n",
+    "        # db.add(role) sat here before the loop\n        db.add(role)\n",
+)
+SEED_COMMENTED_ADD = LIVE_SEED.replace("        db.add(role)\n", "        # db.add(role)\n")
+SEED_COMMENTED_AUDIT = LIVE_SEED.replace(
+    '        audit_lifecycle(db, ROLE_CREATED, None, {"role_id": role.id, "role_name": role.name})\n',
+    '        # audit_lifecycle(db, ROLE_CREATED, None, {"role_id": role.id, "role_name": role.name})\n',
+)
+# A flush that CARRIES a trailing comment is still a statement — this is the shipped live shape
+# (`db.flush()  # assigns ids; …`), so the stricter anchor must not abort it.
+SEED_FLUSH_TRAILING_COMMENT = LIVE_SEED.replace(
+    "    db.flush()\n", "    db.flush()  # assigns ids; the audit field table needs them\n"
+)
+
 # Anchor-absent sources: neither the live shape nor anything the guards accept
 # for any fix. DEPS here is the RETIRED env-only form — since #618 it is no
 # longer a sed target, it is a dead anchor, which is the point of the cell.
@@ -544,3 +567,120 @@ def test_absent_files_abort_too_one_distinct_message_per_file() -> None:
     assert "role_seed.py absent" in lines[0] and str(root / _SEED) in lines[0], out
     # and it is a distinct sentence from (c), so the operator reads one file
     assert lines[0] != "", out
+
+
+# -------------------------------------------------------------------------------------------
+# Leg 668 (#718 follow-on, owner blessing O421 "blessit"): the guard matches STATEMENTS, not text.
+# Finding 1 of the leg-653 peer review of leg 646: arm G — the site flush COMMENTED OUT, its text
+# left inside the add/audit window — reported `already clean` on a tree that flushes nothing. Four
+# red arms (commented flush, flush text only in a trailing comment, commented add, commented audit
+# read), two greens that must NOT be lost (a comment above the site, and the shipped live shape
+# whose flush carries a trailing comment), and one cause-per-reading arm.
+# -------------------------------------------------------------------------------------------
+
+
+def test_commented_out_flush_is_not_a_clean_tree() -> None:
+    """THE ACCEPTANCE ARM of this leg — the tree that used to read clean.
+
+    `# db.flush()` inside the window is a comment. It assigns no ids, so the audit read takes
+    role.id while it is still None, and the guard must abort and say which of the two readings it
+    made (absent vs commented), not reuse the absent sentence."""
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_COMMENTED_FLUSH)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"a commented-out flush did not abort the install: {out}"
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 3" in lines[0] and "[ERROR]" in lines[0], out
+    assert "role_seed.py" in lines[0], lines[0]
+    assert "is a statement at the head of its own line" in lines[0], lines[0]
+    assert "would take role.id before it exists" in lines[0], lines[0]
+    # and NOT the absent-tree sentence — the operator must learn the flush text is still there
+    assert "no db.flush() anywhere" not in lines[0], lines[0]
+    assert _counts(out) == (0, 3, 1), out
+
+
+def test_flush_text_inside_a_trailing_comment_is_not_a_statement() -> None:
+    """The same hole one step wider: the text lives at the END of a live statement
+    (`roles = dict()  # db.flush() lives here`). A substring grep calls that a flush;
+    it is a mention."""
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_TRAILING_ONLY_FLUSH)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 3" in lines[0], out
+    assert "is a statement at the head of its own line" in lines[0], lines[0]
+
+
+def test_commented_out_add_anchor_is_a_dead_anchor() -> None:
+    """Same class, other end of the window: a commented-out `# db.add(role)` used to be the
+    anchor, so the window was measured from a comment."""
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_COMMENTED_ADD)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 3" in lines[0], out
+    assert "no db.add(role) line to anchor on" in lines[0], lines[0]
+
+
+def test_commented_out_audit_read_is_a_dead_anchor() -> None:
+    """And the read end: the audit call commented out must not anchor on its own comment,
+    because the window would then be measured against a line that reads nothing."""
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_COMMENTED_AUDIT)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 3" in lines[0], out
+    assert "audits no created id" in lines[0], lines[0]
+
+
+def test_comment_above_the_site_does_not_steal_the_anchor() -> None:
+    """GREEN, and the arm that decides how the anchor is taken: a comment naming the add sits
+    ABOVE the real add. `-m1` on the raw text stops at the comment and measures the window from
+    it (the false-abort class), so the guard takes the first line that SURVIVES the comment
+    filter instead — and this tree is healthy, so it must say `already clean`."""
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_ADD_COMMENT_ABOVE)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert _counts(out) == (0, 4, 0), out
+    assert "Fix 3 (seed-role flush before the audit id read): already clean" in out
+
+
+def test_live_flush_carrying_a_trailing_comment_still_passes() -> None:
+    """GREEN, and the reason the anchor is a PREFIX and not a whole-line match: the shipped
+    `role_seed.py:93` is `db.flush()  # assigns ids; the audit field table needs them`. A
+    whole-line anchor measured 0 matches on the live file and would abort every install from a
+    healthy tree; `^[[:space:]]*db\\.flush\\(\\)` matches it once."""
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_FLUSH_TRAILING_COMMENT)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert _counts(out) == (0, 4, 0), out
+    # the shipped source is the same shape, and the anchor is measured against IT, not a fixture
+    live = (REPO_ROOT / _SEED).read_text().splitlines()
+    statement_flushes = [i + 1 for i, line in enumerate(live) if re.match(r"^[ \t]*db\.flush\(\)", line)]
+    adds = [i + 1 for i, line in enumerate(live) if re.match(r"^[ \t]*db\.add\(role\)", line)]
+    audits = [i + 1 for i, line in enumerate(live) if re.match(r"^[ \t]*\{\"role_id\": role\.id", line)]
+    assert (len(adds), len(statement_flushes), len(audits)) == (1, 1, 1), (adds, statement_flushes, audits)
+    assert adds[0] < statement_flushes[0] < audits[0], (adds, statement_flushes, audits)
+
+
+def test_a_commented_flush_aborts_without_editing_anything() -> None:
+    """Fix 3 asserts and edits nothing (the #618 posture), and tightening the match must not
+    smuggle in a repair attempt: the rejected tree comes back byte-identical, so an operator
+    reads the cause line rather than finding a rewritten product file."""
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP, seed=SEED_COMMENTED_FLUSH)
+    before = (root / _SEED).read_bytes()
+    proc = _run_fixes(root)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert (root / _SEED).read_bytes() == before, "the guard edited role_seed.py — it asserts, never repairs"
