@@ -80,6 +80,19 @@ were folded into `0.1.0beta1` in that same commit. The rows below landed since t
   for a reader to discover. No behaviour changed and no field moved on any wire message: this row is
   a disclosure, and it leaves with the leg that adds the three-valued answer.
 
+- **`run_command` now ticks while a command is in flight (`#710`).** A host calls an MCP tool at its own
+  per-request deadline, and that deadline is shorter than the time `venya_mcp` is willing to wait for an
+  executor, so a slow command was lost at the harness and the caller could not tell "still running" from
+  "never ran". A conforming client re-arms its deadline when a `notifications/progress` arrives, so the
+  tool now sends one while the call is outstanding. The payload is a tick counter and one fixed stage
+  word: no command text, no argv, no output fragment, no secret key, no path and no executor id cross
+  that channel, so it adds no disclosure surface beside the output masking that already runs. It is
+  opt-in per request — a caller that sent no `progressToken`, or a handler invoked outside a request
+  context, is served exactly as before and nothing is emitted — and a notification that cannot be
+  delivered is dropped and logged rather than altering the answer. The reply itself is unchanged in
+  every field. No timeout moves: the relay, the nginx and client-side bounds and the execute read
+  timeout are all untouched, because a tick interval is a cadence, not a fuse.
+
 ## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
