@@ -222,6 +222,39 @@ def _direct_path_timeout() -> float:
 # transport 500 with no command_rejected event.
 SHELL_METACHARS = set("\x00|;&$`(){}<>!*?\n\r")
 
+#: The six coarse character classes of ticket metacharacter-refusal-names-no-index-or-character-class
+#: (#713), in the order that row enumerates them, each with the members of `SHELL_METACHARS` it
+#: covers. The refusal names the element index and EVERY class an element trips, comma-joined in
+#: THIS order (owner ruling on #713, form B) — so the list is a tuple, not a dict: iteration order
+#: is part of the ruled contract, and a dict's would silently depend on insertion.
+#: It is a partition of the set, disjoint and total (measured: union == SHELL_METACHARS, no pair
+#: overlaps), which is what lets the sentence name classes instead of characters without losing a
+#: member. `%` is deliberately in NO class because it is in no set: widening either is AC4's
+#: prohibited direction.
+#: `<` is covered here as the redirect class alongside `>`, and `metachars` below removes it from
+#: the membership test — the fused-`<` raise has its own sentence precisely because it fires on
+#: SHAPE (`elem != "<"`), not on a set hit, so naming a class there would report a match the code
+#: never made.
+METACHAR_CLASSES: tuple[tuple[str, frozenset[str]], ...] = (
+    ("pipe/semicolon-ampersand", frozenset("|;&")),
+    ("quoting/expansion", frozenset("$`")),
+    ("grouping-braces", frozenset("(){}")),
+    ("redirect", frozenset("<>")),
+    ("glob-history", frozenset("*?!")),
+    ("whitespace-control", frozenset("\x00\n\r")),
+)
+
+
+def _metachar_classes(elem: str) -> str:
+    """Every class in `METACHAR_CLASSES` that `elem` trips, comma-joined in that order.
+
+    Class NAMES only, never the matched characters and never the element: the refusal is
+    re-emitted as the relay's 422 detail, forwarded by the server hop, journalled and stored
+    in the audit row's `reason`, so an echoed value would disclose a session-bound secret path
+    across four surfaces and could forge an extra line (`\n` is itself a member). #713 AC3.
+    """
+    return ", ".join(name for name, chars in METACHAR_CLASSES if any(c in elem for c in chars))
+
 
 def _redirect_pair(command: list[str], i: int, allowed_redirect_paths: frozenset[str]) -> bool:
     """The ONE shared condition for the ruled session-bound redirect pair
@@ -340,8 +373,13 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
             )
         if "<" in elem:
             if elem != "<":
+                # Its own sentence, naming the SHAPE this arm actually tested — `<` fused into a
+                # larger element — and no class word: this raise happens before the membership
+                # test, whose set excludes `<` (#713 AC6, owner form-B ruling part 2).
                 raise ValueError(
-                    "Shell metacharacters are not permitted. "
+                    f"Argument {i} carries a fused '<': this character is accepted only as its "
+                    "own standalone element, and only immediately followed by a session-bound "
+                    "secret path. Shell metacharacters are not permitted. "
                     "Wrap complex commands in a script file and execute that instead."
                 )
             if not _redirect_pair(command, i, allowed_redirect_paths):
@@ -351,7 +389,12 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
                     "injected in this session). Any other redirect target is rejected."
                 )
         if any(c in elem for c in metachars):
+            # Form B (#713): the index and every class tripped, in the row's order. The element
+            # value is still never echoed, and the class names are ASCII words, so the sentence
+            # stays one line for the 422 detail, the journal and the audit `reason`.
             raise ValueError(
+                f"Argument {i} contains a disallowed shell metacharacter — "
+                f"classes: {_metachar_classes(elem)}. "
                 "Shell metacharacters are not permitted. "
                 "Wrap complex commands in a script file and execute that instead."
             )

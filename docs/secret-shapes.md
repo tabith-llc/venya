@@ -138,7 +138,12 @@ The server enforces at store time (`routes/secrets.py:_validate_shape_metadata`)
   One ruled exception exists: the standalone `<` followed by a session-bound
   secret path (the `sudo-stdin` delivery pair). Everything else — pipes,
   semicolons, backticks, substitution syntax, braces — is refused before the
-  sandbox starts.
+  sandbox starts. The refusal names the element index and every character class
+  the token trips — `pipe/semicolon-ampersand`, `quoting/expansion`,
+  `grouping-braces`, `redirect`, `glob-history`, `whitespace-control` (newline, carriage
+  return, NUL) — never the token's own characters, so a secret-shaped argument stays out of the
+  422 detail, the journal and the audit reason (ticket #713; the carriage return and NUL are named
+  because they are members, and ticket #722 owns the shipped lists that left them out).
 - **Trusted paths.** What the gate computes is RESOLUTION into a trusted
   directory (`DEFAULT_TRUSTED_PATHS`: `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`),
   not shell-ness: an absolute path qualifies only inside one of those, and a bare
