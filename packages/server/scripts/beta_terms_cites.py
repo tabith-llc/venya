@@ -27,7 +27,7 @@ So each cite carries three human-decided facts here, and only these:
     symbol is claimed, e.g. a page-docstring quote or a line RANGE whose endpoints are the claim).
 
 The maintenance/anchor block at the foot of the page is ``dated`` as a rule: it records "moved :622
-to :628 at c36439b", and rewriting those digits to today's lines turns a dated observation into a
+to :628 at b92bb00", and rewriting those digits to today's lines turns a dated observation into a
 false claim about a commit that never had them. That is the provenance law, not a convenience.
 """
 
@@ -248,7 +248,7 @@ DATED_BLOCK_FIRST_PAGE_LINE = 660
 #: Tokens deliberately outside the pin set, with the reason. Anything else that is neither
 #: manifest nor dated makes the guard RED rather than being quietly skipped.
 DATED_OVERRIDES: dict[str, str] = {
-    f"{HC}:1385-1389": "c36439b pass record: what that commit shipped, not what the reader should open",
+    f"{HC}:1385-1389": "b92bb00 pass record: what that commit shipped, not what the reader should open",
     "config.py:149-152": "90f2bcb pass record",
     "auth.py:731": "90f2bcb pass record (`:731`→`:748`)",
     "middleware/auth.py:493": "583d902/7b055e4 pass record",
@@ -257,19 +257,19 @@ DATED_OVERRIDES: dict[str, str] = {
     "daemon.py:2163": "583d902 pass record",
     "ca.py:758": "583d902 pass record",
     "ca.py:803": "583d902 pass record",
-    "ca.py:45": "c36439b 'did not move' roster",
+    "ca.py:45": "b92bb00 'did not move' roster",
     "ca.py:1470": "pre-move face in the old→new record",
     "routes/admin_certs.py:317": "583d902 pass record",
     "tests/test_clock_skew_fraction_rf7.py:55": "583d902 pass record",
-    "test_clock_skew_fraction_rf7.py:55": "c36439b 'did not move' roster",
+    "test_clock_skew_fraction_rf7.py:55": "b92bb00 'did not move' roster",
     "routes/admin.py:1064": "old face in an old→new pair",
     "admin.py:1064": "old face in an old→new pair",
-    "models.py:379": "c36439b 'did not move' roster",
-    "models.py:380": "c36439b 'did not move' roster",
+    "models.py:379": "b92bb00 'did not move' roster",
+    "models.py:380": "b92bb00 'did not move' roster",
     "routes/executors.py:1525": "old face in an old→new pair",
     "executors.py:1525": "90f2bcb pass record",
     "middleware/auth.py:731": "90f2bcb pass record",
-    "install-venya-core.sh:965": "c36439b 'did not move' roster",
-    "install-venya-executor.sh:558": "c36439b 'did not move' roster",
-    "test_relay_dial_crl_586.py:21-24": "c36439b 'did not move' roster",
+    "install-venya-core.sh:965": "b92bb00 'did not move' roster",
+    "install-venya-executor.sh:558": "b92bb00 'did not move' roster",
+    "test_relay_dial_crl_586.py:21-24": "b92bb00 'did not move' roster",
 }

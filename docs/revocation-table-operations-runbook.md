@@ -1,6 +1,6 @@
 # Revocation-Table Operations Runbook
 
-> **Provenance:** written 2026-10-17 against the working tree at `96e6167` on the
+> **Provenance:** written 2026-10-17 against the working tree at `6044b0a` on the
 > `bug/603-heartbeat-revocation-read-s130` branch, as acceptance criterion 4 of the #603 AC1
 > shape-A ruling (`wave29-specs-20261016/wren-603-shapeA-ruling-flash2-s130.md` §3.4). Every
 > lock-behavior claim below is a MEASUREMENT taken on a live core (PostgreSQL 16.15, `venya-core-3`)

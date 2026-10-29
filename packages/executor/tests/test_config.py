@@ -219,7 +219,7 @@ class TestConcurrencyKnob:
 class TestDeadSessionAndCaptureKnobs620:
     """#620: seven executor keys that bound nothing are gone, and they must stay gone.
 
-    Removal pins in the shape the dead rotation knobs used (`85bfa85`): an absence
+    Removal pins in the shape the dead rotation knobs used (`683b418`): an absence
     assertion for every removed name, a compat half proving a deployed `executor.toml`
     that still carries the tables loads instead of failing to boot, and the #598 half —
     the removed keys used to be ANNOUNCED as "in use", so the announcement must stop

@@ -176,7 +176,7 @@ executor count in the run's results file.
   committed files.
 - **CA keys at rest:** BOTH CA private keys are encrypted at rest — the admin
   CA key (passphrase via `/etc/venya/venya-core.env`, 0640 root:venya) and,
-  since fix `4218ec1` (UNRELEASED, physically accepted 2026-09-20), the
+  since fix `bc08030` (UNRELEASED, physically accepted 2026-09-20), the
   root/executor `ca.key` (`VENYA_CA_KEY_PASSPHRASE`, same EnvironmentFile).
 - **Proof-of-new-bytes before mutating probes (PROCESS RULE, user-ordered
   2026-09-20).** Any acceptance probe that mutates state against a live
@@ -353,7 +353,7 @@ not take effect.
 Core env vars (beyond the common three): `VENYA_DB_PASSWORD` (PostgreSQL),
 `VENYA_DB_PASSPHRASE` (server encryption passphrase — NO default, and a hard
 floor of 15 characters the installer checks before any mutation; the
-former dev-only default was removed 2026-09-19 (`803acd9`, first shipped 2026-09-20 on
+former dev-only default was removed 2026-09-19 (`3c74b80`, first shipped 2026-09-20 on
 the pre-beta alpha line, tag `v0.1.0alpha12` — that line is withdrawn by owner order
 2026-10-18, so the tag is the record of the proof, not a release to install from),
 `CORE_HOSTNAME` (server name
@@ -580,7 +580,7 @@ current PIN) instead.
 > -R`) **wipes the PIN** — always follow it with `change-pin` / `-S` before
 > the ceremony. Keys that HAVE a PIN but no built-in UV (clientPin-only,
 > TrustKey class) ARE supported — registration takes the raw clientPin path
-> (fix `init-pin-invalid-after-installation-reset`, dev since fc94308).
+> (fix `init-pin-invalid-after-installation-reset`, dev since b5ba738).
 
 **Windows variant (ruling 2026-09-18, ticket `windows-fido2-requires-elevation`):**
 C.2 reset + PIN management are **the operator's/customer IT's responsibility,
@@ -619,7 +619,7 @@ echo "Admin token: ${ADMIN_TOKEN:0:20}..."          # prefix only — never log 
 server committed a pending user row (e.g. key not attached → `No FIDO2 devices
 found`), just **re-run `init`** — the server supersedes abandoned PENDING
 (unenrolled) rows automatically and returns 201 with a fresh challenge (fix
-`init-pin-invalid-after-installation-reset`, dev since fc94308). A **409** now
+`init-pin-invalid-after-installation-reset`, dev since b5ba738). A **409** now
 means a COMPLETED admin enrollment exists — protection, not residue: use a
 different user id, or only deliberately reset (on a core that is already
 initialized — any user with `enrolled_at` set, or any credential row — the
@@ -1060,9 +1060,9 @@ injected secret file**, uses it, and the returned output has the value
 
 | Symptom | Cause | Recovery |
 |---------|-------|----------|
-| `venya init`/`enroll` 409 | a COMPLETED admin enrollment exists (abandoned PENDING rows are auto-superseded since `init-pin-invalid-after-installation-reset`, dev fc94308) | use a different user id; `--installation-reset` only deliberately (unauthenticated only while the core is uninitialized — an initialized core requires an authenticated admin, #450). Pre-fix/legacy servers still 409 on pending rows → CLI prints the reset hint there (C.3) |
+| `venya init`/`enroll` 409 | a COMPLETED admin enrollment exists (abandoned PENDING rows are auto-superseded since `init-pin-invalid-after-installation-reset`, dev b5ba738) | use a different user id; `--installation-reset` only deliberately (unauthenticated only while the core is uninitialized — an initialized core requires an authenticated admin, #450). Pre-fix/legacy servers still 409 on pending rows → CLI prints the reset hint there (C.3) |
 | Pasted block did nothing after the ssh banner | paste race: lines typed while ssh connects are consumed by the local terminal buffer (observed twice, 2026-09-17) | verify remote state before rerunning (`ls /tmp/...`, `ls /opt/venya`); use single-line commands or paste only after the remote prompt |
-| `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has NO PIN (UV impossible). Keys WITH a PIN but no built-in UV (clientPin-only, TrustKey class) are supported since fc94308 — raw clientPin registration path | set the PIN (C.2), re-run — on current servers the retry needs no `--installation-reset` (pending rows auto-superseded) |
+| `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has NO PIN (UV impossible). Keys WITH a PIN but no built-in UV (clientPin-only, TrustKey class) are supported since b5ba738 — raw clientPin registration path | set the PIN (C.2), re-run — on current servers the retry needs no `--installation-reset` (pending rows auto-superseded) |
 | CLI 409 message unclear | stale CLI predating detail-carrying fix | update the workstation venv/install (B.3); state also visible via `journalctl -u venya-core` or the `users` table |
 | `admin …` 403 | admin mTLS client cert stale/missing | re-sync C.1 (harness stand-in); do not sudo-curl around it |
 | `venya store` fails: "No active key version configured" | pre-027 install with no active key version (503) — post-027 fresh installs seed `v1`; if seen there, check `alembic_version` | pass `--key-version v1` (pre-027 installs only) |

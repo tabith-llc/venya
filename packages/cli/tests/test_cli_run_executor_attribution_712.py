@@ -12,7 +12,7 @@ that made-up token to the server in the session body and in the execute URL, whe
 it failed with a message naming neither the id nor where it came from. And on the
 success path it printed no executor at all, so a sandbox answer and the answer from
 the host the operator meant read identically. The MCP face got its attribution at
-``5719b2f0``; this is the parity half.
+``c34d2aa1``; this is the parity half.
 
 The owner's acceptance bar, verbatim, is what the first two cells test: the refusal
 names the absence ("no executor id was configured") and the fabricated token is

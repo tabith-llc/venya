@@ -7,7 +7,7 @@
 """Interlock for docs/beta-known-limitations.md — the beta terms page a design partner signs.
 
 **The defect this exists to stop.** The page carried ~110 `file:line` coordinates and asserted each one
-"was proved by reading the line the symbol names". A read-only audit at `45dc015a851b` (2026-10-18)
+"was proved by reading the line the symbol names". A read-only audit at `28d0a93d3adf` (2026-10-18)
 found **60 of the 86 coordinates in the entry bodies land on the wrong line** — a blank, a comment, or
 a different function — while every one of the page's *limitations* was still true of the product. The
 numbers rot within a day or two on this tree; the page's own maintenance note says so. Nothing in the
@@ -58,12 +58,12 @@ _spec.loader.exec_module(gen)
 
 #: The sha the coordinates were last RE-PINNED by the generator, or ``None`` when they never have
 #: been. Set by running the generator at the cut commit (`--write`) and filling this in from ITS
-#: OWN stdout, in the same changeset. It is no longer ``None``: the generator ran at `2b90902`
-#: (`17fc21d`, 105 cites re-pinned, manifest 96 -> 93 keys), and at the face named below
+#: OWN stdout, in the same changeset. It is no longer ``None``: the generator ran at `25ece37`
+#: (`d3897ec`, 105 cites re-pinned, manifest 96 -> 93 keys), and at the face named below
 #: `--write` itself reports `105 cites already correct …; nothing written` — the coordinates are
 #: exact there BY VERIFICATION, not by inheritance. Re-struck at the `v0.1.0beta2` cut against
-#: `708542de` (`--check` rc 0, `would change: False`, 105 cites, manifest 93/93 keys at that face);
-#: the beta1 strike was `4fb736eb`, the face the beta1 cut commit was written on.
+#: `f1eb83d4` (`--check` rc 0, `would change: False`, 105 cites, manifest 93/93 keys at that face);
+#: the beta1 strike was `e8f19821`, the face the beta1 cut commit was written on.
 #: A commit cannot contain its own sha, so this
 #: value names the settled release face the pin was struck against (the parent of the commit that
 #: sets it) rather than the one the generator first ran at: the strict cell diffs `PINNED_AT..HEAD`
@@ -71,7 +71,7 @@ _spec.loader.exec_module(gen)
 #: cell RE-RESOLVES all 105 cites against the live tree and asserts agreement. A merge that moves a
 #: cited symbol from here forward reddens the suite instead of quietly publishing a stale line.
 PINNED_AT: str | None = (
-    "708542de6dfe40e4a5be5787261cf8afe184044f"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
+    "f1eb83d42a75c3f2bac95a6ae742c33b9bdee40a"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
 )
 
 #: Files whose churn invalidates the pins — the tree the cites point into.

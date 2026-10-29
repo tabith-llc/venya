@@ -12,7 +12,7 @@ this call. Before this row the CLI discarded the response body and printed
 `Certificate <serial> revoked (reason: <typed reason>)` on both arms, so an operator could not
 tell "this call did it" from "it was already done" — and on the repeat arm the printed reason was
 the wrong one's provenance. Same class as the two sentences corrected for the executor plane at
-`fcd1b34c`, and the same rule (#666): transport success is not semantic success.
+`9be09d2b`, and the same rule (#666): transport success is not semantic success.
 
 **Paired negatives are the point.** The `already_revoked` cell alone could be satisfied by
 suppressing every success message — which would be the same reporting failure in the other

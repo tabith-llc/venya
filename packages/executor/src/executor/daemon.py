@@ -1606,7 +1606,7 @@ class ReaperLoop:
                 continue
 
             # session_<session-id>_<mkdtemp-rand>: execution-session ids are
-            # UUIDs (no underscores — d4a8d9f contract), while the mkdtemp
+            # UUIDs (no underscores — f88f26c contract), while the mkdtemp
             # random suffix CAN contain underscores ([a-z0-9_] charset), so
             # parse from the left and ignore the tail. Unparseable → delete
             # without revoke (never a phantom-session revoke).
@@ -2115,7 +2115,7 @@ class ExecutorDaemon:
                 try:
                     self.cert_manager.rotate()
                     # Recreate client with new cert. Ticket daemon-reaper-cert-orphan
-                    # #178 residual (acceptance bullet left unimplemented by 9bc0cd7):
+                    # #178 residual (acceptance bullet left unimplemented by d27fbd9):
                     # the pre-rotation client used to be dropped on the floor — its
                     # connection pool + TLS session lingered with the REVOKED cert
                     # until daemon stop. Capture the outgoing client BEFORE the

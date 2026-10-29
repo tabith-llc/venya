@@ -95,7 +95,7 @@ _SESSION_SCAN_BOUND = "300s"
 #: THE FOUR ``admin/*`` ROWS BELOW ARE WIDENED AHEAD OF THEIR MERGE, and each carries the proof the
 #: guard's owner demanded — an entry enters only on a shipped call site in
 #: ``packages/server/src/**``, never from a test double. All four are #662's, read at
-#: ``7e64d5d21d41`` (branch ``bug/662-admin-sites-bounded-flash4-s133``, which is NOT an ancestor of
+#: ``9208b069b1d1`` (branch ``bug/662-admin-sites-bounded-flash4-s133``, which is NOT an ancestor of
 #: ``origin/dev`` at this base), each a module constant that is then passed at a real call site in
 #: ``packages/server/src/server/routes/admin.py`` (symbol, not line, is the durable half):
 #:   ``admin/certs-revoke``      ``ADMIN_CERT_REVOKE_SITE``     → ``bounded_read(db, site=…)`` in ``admin_revoke_admin_cert``
@@ -126,7 +126,7 @@ _SHIPPED_SITE_LABELS = frozenset(
         # the two this leg adds, one per #656 site
         "dial/crl-mint",
         "poll/fallback-read",
-        # #662's four admin-plane sites: provenanced above, UNMERGED at this base (7e64d5d)
+        # #662's four admin-plane sites: provenanced above, UNMERGED at this base (9208b06)
         "admin/certs-revoke",
         "admin/executor-revoke",
         "admin/remove-executor",

@@ -10,7 +10,7 @@
 dependency version being used and update documentation properly!"*
 
 **The defect this closes.** `docker-sbx` was declared `0.38.0` in the shipped notices page, a string
-hand-typed at `ff262be9` (2026-09-15) and never re-checked, while the executor installer pulls the
+hand-typed at `54d10713` (2026-09-15) and never re-checked, while the executor installer pulls the
 package from Docker's FLOATING apt repository and enforces only a floor (`install-venya-executor.sh`,
 `SBX_MIN_VERSION`). A typed number cannot see a move forward, so ten minor versions of drift shipped
 in a customer-facing disclosure. The fix is not a corrected number — it is a number nobody has to

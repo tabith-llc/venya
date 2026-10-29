@@ -7,7 +7,7 @@
 """#297 — CA-key custody (export/split/restore) against ENCRYPTED-at-rest keys.
 
 Class-shipped defect: the CLI read ca.key as plaintext while the server has
-stored it as PKCS#8-encrypted PEM (4218ec1/3667c6e) since the at-rest
+stored it as PKCS#8-encrypted PEM (bc08030/3667c6e) since the at-rest
 envelope landed. These cells are the missing fixture half (F-matrix, A1 brief
 #297 §4): an ENCRYPTED at-rest fixture is planted, then every custody path is
 exercised with real cryptography (house discipline: no mocked crypto). The

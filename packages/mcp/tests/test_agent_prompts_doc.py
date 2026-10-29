@@ -10,7 +10,7 @@ Ticket mcp-agents-md-prompt-guidance (vehicle ruling (b)+(d), owner
 2026-09-25): docs/agent-prompts.md is the customer-facing operating
 contract pasted into agent instruction files. Its load-bearing claims are
 pinned here to the live MCP tool surface so the doc cannot silently rot —
-the same drift class as the list_secrets description (e8a08eb promised what
+the same drift class as the list_secrets description (b06d2c4 promised what
 the rendering never delivered), in documentation form.
 """
 
@@ -176,7 +176,7 @@ class TestCommandGateWording:
 
     # Paired negative (AGENTS.md truth-table law): the guard must be capable of red, so a
     # green run is a reading and not an absence. Each form below is wording that actually
-    # shipped before leg 199 swept it (pre-4feb0890c face, docs/agents.md:37,
+    # shipped before leg 199 swept it (pre-a230099e0 face, docs/agents.md:37,
     # docs/architecture.md:190, docs/installation.md:681, docs/secret-shapes.md:111).
     FALSE_CLAIMS = (
         "Commands: use absolute binary paths. Shell builtins are rejected (503) by design.",

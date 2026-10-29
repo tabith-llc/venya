@@ -222,7 +222,7 @@ class TestGetServerUrl:
             assert result == "unknown"
 
     # --- env step (ticket cli-core-url-server-url-naming-split: chain aligned
-    # --- to the 3f3ed1b chokepoint precedence flag > env > config > toml) ---
+    # --- to the 7164b67 chokepoint precedence flag > env > config > toml) ---
 
     def test_env_used_when_no_flag(self):
         """VENYA_SERVER_URL is honored between the flag and config.json."""
@@ -237,7 +237,7 @@ class TestGetServerUrl:
             assert result == "https://env.example.com"
 
     def test_flag_beats_env(self):
-        """Paired negative (mirrors the 3f3ed1b cells): explicit flag wins
+        """Paired negative (mirrors the 7164b67 cells): explicit flag wins
         over the env var."""
         from venya_cli.commands import _get_server_url
 

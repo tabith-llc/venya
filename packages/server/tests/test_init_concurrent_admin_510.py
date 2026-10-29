@@ -808,7 +808,7 @@ class TestConcurrentBootstrapPostgresql:
         between the lock and the re-check, or a session whose next statement lands on a second
         connection — and by a session-scoped ``pg_advisory_lock``, which holds the key past the commit
         and leaks it onto a pooled connection's next borrower. Measured on this leg against the shipped 19-cell
-        file at ``492fe4e``, 8 runs per face (battery: ``flash1-645-mutation-battery-s134.py``; a single run of a
+        file at ``70e0755``, 8 runs per face (battery: ``flash1-645-mutation-battery-s134.py``; a single run of a
         timing red is an anecdote, so the cell ships with its repeat count):
 
         * guard taken, then released by a commit before the decision (M5b) — the shipped file read FULLY GREEN in

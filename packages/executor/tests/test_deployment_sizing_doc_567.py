@@ -6,7 +6,7 @@
 
 """Guard: docs/deployment-sizing.md keeps stating the sizing truth that shipped (#567).
 
-**The defect this exists to stop.** The #567 narrowing (merges `0d400a9`, `496f2ca`, `1d5570d`)
+**The defect this exists to stop.** The #567 narrowing (merges `705de4e`, `9094a92`, `bffcde2`)
 landed and NOTHING reads the page: `git grep -ln 'deployment-sizing' <dev> -- 'packages/*/tests/*'`
 hits two files, and both only NAME the path inside their own strings (one asserts the doc path sits
 in an executor refusal log line, one uses "deployment-sizing" as prose in a docstring). Neither opens

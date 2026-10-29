@@ -6,7 +6,7 @@
 
 """#687 AC5 — the CLI revoke surface displays what the core ASSERTS, not what was typed.
 
-The route half (`6526a94`, merged `6a12ee5`) corrected the audit event and the HTTP response. The CLI
+The route half (`383c9f9`, merged `231166f`) corrected the audit event and the HTTP response. The CLI
 was the fourth face and the only one left: `executor_cert_revoke` printed its own local `executor_id`
 variable on both arms, so an operator who sent a duplicate revoke for serial S under executor B saw
 ``Executor ID:  exec-b`` returned to them — the claim they made, restated as if it were the finding —
@@ -23,7 +23,7 @@ Truth table, both halves, per the AGENTS paired-negative law (`S` = serial, `A` 
 | identity form, `executor_id=A` | A | A | absent (no mismatch arm exists) | **byte-identical** |
 
 The byte-identity assertions compare the WHOLE captured stdout against literals recorded by a temporary
-probe module run at the BASE commit (`043dd17`) before this change, then deleted — not against a
+probe module run at the BASE commit (`169fcad`) before this change, then deleted — not against a
 reconstruction of what the old code did. A cell that asserts `in` would pass while the line count moved.
 """
 
@@ -48,7 +48,7 @@ def _drive(server_body, typed_id, serial=TYPED):
     return rc
 
 
-# --- The pre-fix face, recorded at base 043dd17 by a throwaway probe (deleted before commit). ---
+# --- The pre-fix face, recorded at base 169fcad by a throwaway probe (deleted before commit). ---
 PREFIX_SERIAL_PAIRED = (
     "Certificate serial was already revoked (no change).\n"
     "  Executor ID:  exec-a\n"

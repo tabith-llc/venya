@@ -360,7 +360,7 @@ class TestAuthenticateErrorHandling:
 
 class TestRegisterErrorHandling:
     """Fix 2 (init-pin-invalid-after-installation-reset): register() must unwrap
-    ClientError→CtapError exactly like authenticate() does. da2c09a restored the
+    ClientError→CtapError exactly like authenticate() does. 902ad86 restored the
     unwrap for the assertion twin; register() was missed, so a high-level
     make_credential ClientError(PIN_INVALID) escaped as a raw tuple with no retry
     — the 'Initialization failed: (<ERR.BAD_REQUEST: 2>, CtapError(0x31)>)' the

@@ -36,7 +36,7 @@ revoked peer on a served fleet, and the core's own dial-side refusal never has �
 discharging the physical half of #597 AC6(b), and #586
 (open on its **physical** half only — the dial landed, and the listener door now names a revoked
 peer in BOTH populations: the core-relay registry via #597 and the executor-serial list via Gap A
-at `c7a4075`. Both listener populations have now been refused on a served fleet: the executor-serial
+at `1950e75`. Both listener populations have now been refused on a served fleet: the executor-serial
 arm twice, and the core-relay registry arm once. What has never been seen refused is the core's dial,
 and this entry does not claim it was)
 
@@ -193,7 +193,7 @@ handshake and before any request byte, and that refusal has now been observed on
 
 **Plan — what is NOT planned.** This entry does not promise a listener CRL consult, and a reader
 should not read one into it. What the row is still open on is no longer a mechanism: the dial landed,
-the #597 registry match landed, and the executor-serial peer ask (#586 Gap A) landed at `c7a4075`, so
+the #597 registry match landed, and the executor-serial peer ask (#586 Gap A) landed at `1950e75`, so
 the two-door remedy this row describes is **built in both populations**. **What remains is the
 physical certificate** — a revoke-then-refuse seen at the **core's dial** on a served pair. Both
 listener arms have now been produced (the executor-serial arm twice, the core-relay registry arm once),
@@ -269,7 +269,7 @@ certificates as the mechanism.** The 30-day short lifetime that exists is the
 EXECUTOR leaf (`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:47`); the
 core relay-client credential is minted at 365 days (`install-venya-core.sh:1026`). **This bullet used to
 say the opposite — that no revoked serial of this class existed and that the cell proving a refusal
-could not be written against today's product. Both halves became false at `1033c2d`:** the serial is
+could not be written against today's product. Both halves became false at `0c81975`:** the serial is
 nameable now, the door refuses it, and the cell is written
 (`test_revoked_peer_is_refused_at_the_real_door_before_any_request`,
 `packages/executor/tests/test_relay_peer_revocation_597.py`). What remains un-run is the **physical**
@@ -282,8 +282,8 @@ physical proof, not on the registry.
 
 ### A core's own relay credential is revocable — the entry this page carried said it was not, and that is corrected here
 
-Status: **no longer a limitation on the revocation path** · Remedy landed at `1033c2d` (live face
-`1033c2d006e170817cabc100b49a909ad35c7eb5`) · Tracked as: #597 (row **stays open**, and honestly so —
+Status: **no longer a limitation on the revocation path** · Remedy landed at `0c81975` (live face
+`0c8197581b81864dc30c89e73375add8163e5a8d`) · Tracked as: #597 (row **stays open**, and honestly so —
 its remaining physical observation is the revoke-then-refuse seen at the **core's dial** on a served
 pair; the physical revoke-then-refuse at the **listener door** has now been produced on a served
 fleet, in both populations, and this entry does not claim the dial half was seen; that is a different
@@ -331,7 +331,7 @@ core's relay credential "does not" work. All three are false at this tip:
 3. **an unreadable peer serial admits.** Where the listener cannot read a serial off the established
    connection the refusal returns None. That is the one true fail-open on this surface; turning it
    into a refusal would lock out cores whose certificates this host cannot parse. **The same three
-   shapes apply unchanged to the executor-population arm added at `c7a4075`
+   shapes apply unchanged to the executor-population arm added at `1950e75`
    (`peer_executor_revocation_refusal`) — it is deliberately the same discipline, not a second
    policy: an empty population admits and an unreadable serial admits, so the arm can only ever
    remove a connection the list has already named dead.**
@@ -895,7 +895,7 @@ key and a physical touch, which a headless core does not have; on Windows it ope
 an interactive desktop session, so a remote or scheduled shell is not a place one can be
 done.
 
-**What changes at beta+:** landed in `dev` at `e8d5a22` (live face `022bc588e0`) — the commands that issue no request no
+**What changes at beta+:** landed in `dev` at `e8d5a22` (live face `3e6b6743c2`) — the commands that issue no request no
 longer require a ceremony for themselves, while commands that do talk to the core keep requiring
 it, unchanged, and the administrator-pair raises that catch a half-configured pair are
 preserved. The row **is** closed — 2026-10-13, `status/merged` on the label face read through
@@ -989,7 +989,7 @@ plus unattended remote `sudo` is ever built, this entry is deleted rather than s
 
 ### A revoked or unreachable executor is refused, and only one of the two reasons reaches the operator
 
-Status: known limitation in beta · Target: `#697` (both halves landed on `dev` at `6e3e6585` — the
+Status: known limitation in beta · Target: `#697` (both halves landed on `dev` at `26726a60` — the
 mechanism is shipped; what remains is a physical observation, not code, and that keeps this row open) · Tracked as: `#697`
 
 **Who is affected:** anyone relaying a command to an executor whose relay listener will not take the
@@ -1114,9 +1114,9 @@ gets switched off inside a week.
 **The coordinates on this page were re-pinned by the generator, and they are exact at one named
 face.** The owner's ruling (2026-10-18) was *"claim-truth now, numbers re-pinned at the cut commit
 with a checked assertion"*, and that recipe has now been carried out: the generator ran with
-`--write` at `2b90902` (commit `17fc21d` — 105 cites re-pinned, 60 manifest keys re-keyed, 3
+`--write` at `25ece37` (commit `d3897ec` — 105 cites re-pinned, 60 manifest keys re-keyed, 3
 duplicate keys dropped, so the manifest went from 96 keys to 93), and `--check` reads rc 0 with
-`would change: False` at the release face `f07066c`. `PINNED_AT` in
+`would change: False` at the release face `9e314f6`. `PINNED_AT` in
 `packages/server/tests/test_beta_terms_cite_interlock.py` now names that face, which makes the strict
 cell **live from this commit forward**: a merge that moves a cited symbol reddens the suite instead of
 quietly publishing a wrong line. Before this commit the cell printed a deferral and returned without
@@ -1125,7 +1125,7 @@ replaces, and it is why the sentence above says *verified*, not *disciplined*.
 
 **Re-struck at the `v0.1.0beta2` cut (2026-10-28).** The paragraph above is the `0.1.0beta1` record and
 is left exactly as written; this is the next strike, carried forward rather than edited in. At the
-cut face `708542de6dfe40e4a5be5787261cf8afe184044f` the generator was run again: `--check` reads rc 0
+cut face `f1eb83d42a75c3f2bac95a6ae742c33b9bdee40a` the generator was run again: `--check` reads rc 0
 with `would change: False` over all 105 coordinates, and `--write` reports the same face and writes
 nothing, so no digit on this page moved between the two strikes. `PINNED_AT` in
 `packages/server/tests/test_beta_terms_cite_interlock.py` now names that cut face, which is what the
@@ -1180,11 +1180,11 @@ admin lookup comment at `middleware/auth.py:493` (`_validate_admin_mtls`), the p
 `ca.py:758`/`ca.py:1470` — named in the entry as a signature field only, because no shipped
 verifier honours it.
 
-**`dev` `c36439b` was the anchor this page carried** until the 2026-10-18 terms-cite audit — re-derived by symbol on 2026-10-17
+**`dev` `b92bb00` was the anchor this page carried** until the 2026-10-18 terms-cite audit — re-derived by symbol on 2026-10-17
 (the beta-terms truth audit), and **nineteen numbers moved**. The direction of the damage matters:
 everything in the entries above is still true of the tree, but the page's coordinates were last
 re-anchored at `90f2bcb`, and two merges since then inserted lines above cited code —
-`git diff --numstat 009661593 c36439b` (the live face of that old anchor) reads
+`git diff --numstat 29520ecc6 b92bb00` (the live face of that old anchor) reads
 `routes/executors.py` **+68/−19**, `middleware/auth.py` **+39/−1**, `ca.py` **+47/−52**,
 `routes/admin.py` **+11/−4** and `venya_cli/cli.py` **+66/−2**, which is where the moves come from.
 Those numbers were recorded as read off the symbol at that anchor. **That is a dated record of what a
@@ -1226,18 +1226,18 @@ identity rewrite moved `dev` while preserving trees, so `54457a6`, `5b0dd31`, `e
 all resolve in a clone that still holds the old objects, but **none is an ancestor of the live tip**
 — a reader who clones fresh and `git show`s one of them finds nothing. Their live faces, read from
 `wave29-specs-20261016/moved-sha-map-s129.tsv` (1,835 rows) and each re-proved an ancestor of
-`c36439b` in the same turn: `54457a6`→`fc92bc15d0b818eae6a1602af46d1e80bf1b1db3`,
-`5b0dd31`→`1edc50d4652f2317118a4829506caae8f71e8709`, `e8d5a22`→`022bc588e087e87b35447f286d2f9b61c1f537ff`,
-`90f2bcb`→`009661593de4f4fc1557ae25d7ee23b09a4349df`, `2e0e751`→`167b64b1ae2aa8dd776bc134fc8e4ecfa53be4d0`,
-`4543eb5`→`89dc9029d150ea7a66466352cf0edd03db03b251`, `29beb1b`→`3ce31024db2390cd278471b7d074a4f2cc335960`,
-`7b055e4`→`5ec92834516fe8d51d02837067627b7ceadee459`, `583d902`→`76cc1dd930acad5cdab0d1e7b2bec5547a842242`,
-`3268081`→`b6899f53ba689a43d18562bdd0dc15b6f30870b3`, `0467a31`→`365de9b8a7007e07536588d0ba571652990b7a65`,
-`1be04da`→`8f58e83ffc6c284efb1fb23951831dde8371e0bb`, `7a003ad`→`45cd91292f0803aba8f662ff14ab2d2acbcaf671`.
+`b92bb00` in the same turn: `54457a6`→`2760f61dc108d80318b01a2bd127d0886d4bb269`,
+`5b0dd31`→`5e2bff9e9a8b0159fec513cb04370da46ab0c1f7`, `e8d5a22`→`3e6b6743c22964dc2d1da68c4cbb5a76c2c05fa6`,
+`90f2bcb`→`29520ecc6a7237a990bbb2ed7a94cd18e1b9683e`, `2e0e751`→`4609d95593e5662cd8f60d0150caad5fcd1fa9f6`,
+`4543eb5`→`13ccc1cfd1c245b2f13f5c6ed7819e45dfd2ae9a`, `29beb1b`→`617f09747700df5f0acc607d7de4626e7453cd33`,
+`7b055e4`→`e7d6f333c02cf5e72b249dbd248cb20308b8c23b`, `583d902`→`50201f00c065c1b65bfa2c55ffee851862d797ac`,
+`3268081`→`dd69a45926243d9b23c92a293c9f32c0059b1cc9`, `0467a31`→`c06e6786f654203c573b4bb7d40ec9f09410c211`,
+`1be04da`→`befd90ca63cd2535ddd466989a72e0bc8d3cf676`, `7a003ad`→`3b1aa184b43472e41a291a10b0008f9ace6c5b75`.
 The three entries that name a merge now carry the live face beside the old one, in the same
 parenthesis; the historical paragraphs above this one keep their dated digits, because they are
 dated observations and the rule is to translate them, not rewrite them.
 
-**`dev` `90f2bcb` was the anchor this page carried** (live face `009661593…`) — re-derived by symbol on 2026-10-15, and
+**`dev` `90f2bcb` was the anchor this page carried** (live face `29520ecc6…`) — re-derived by symbol on 2026-10-15, and
 nine numbers moved. The arithmetic is recorded so the pass self-documents instead of just
 restating digits: between the two anchors exactly three cited source files changed —
 `routes/executors.py` +23/-10 (`0467a31`, the snapshot-served revocation list: net **+13** for

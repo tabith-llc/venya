@@ -27,7 +27,7 @@ pre-offload shape, which stops the ticker) and off-loop through the shipped seam
 firing). Against a mock the claim cannot be made at all: a double returns instantly, the loop never
 stalls, and a freeze fix stays green in units while freezing a production core.
 
-Re-land note for the reader who arrives from ``9bcab037f``: that branch was cut BEFORE the #603
+Re-land note for the reader who arrives from ``2de447d66``: that branch was cut BEFORE the #603
 bounded seam (``revocation_read.py``) landed, so its header claims about what a stall costs are
 restated here against the shipped face — the seam bounds the WAIT, this module moves the read off
 the loop, and both are needed (``revocation_offload`` module docstring).

@@ -13,7 +13,7 @@ check or suite sees that. The fix for the one instance is a bound; the fix for t
 file.
 
 SCOPE, and why it is ``packages/*/src`` and not all of ``packages/``. The same walk over the
-whole tree at ``5b9a709b`` counted **111** call sites across **43** files, **70** of them with no
+whole tree at ``74dc19ee`` counted **111** call sites across **43** files, **70** of them with no
 ``timeout=``; **68** of those 70 are ``tests/`` harness files and one is a repo script
 (``packages/core/scripts/gen_bandit_suppressions.py``). A gate over all of ``packages/`` would
 red-gate 68 existing test-harness sites on its first run — a wall of exemptions that hides the
@@ -51,7 +51,7 @@ from pathlib import Path
 SUBPROCESS_CALLS = ("run", "check_output", "check_call", "call", "Popen")
 
 #: Floor on scanned files, below which a run cannot be trusted to mean "clean". The real
-#: ``packages/*/src`` surface measured **104** files at ``5b9a709b`` (the base of this row); the
+#: ``packages/*/src`` surface measured **104** files at ``74dc19ee`` (the base of this row); the
 #: floor is a path-drift tripwire, not a claim about the current count — the census PRINTS its own
 #: number beside every verdict so a shrink is visible rather than merely tolerated. House pattern:
 #: ``MIN_FILES = 400`` in ``scripts/pre_tag_scrub.py``, set there from that script's own surface.

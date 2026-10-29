@@ -521,7 +521,7 @@ class Fido2Auth:
                 # fido2 may surface a CTAP error wrapped in ClientError (original
                 # in e.cause); unwrap so the PIN retry below still applies. This
                 # is the make_credential sibling of the authenticate() unwrap
-                # restored by da2c09a — register() was missed, so a high-level
+                # restored by 902ad86 — register() was missed, so a high-level
                 # ClientError(PIN_INVALID) escaped as a raw tuple with no retry.
                 if isinstance(e, ClientError) and isinstance(e.cause, CtapError):
                     e = e.cause

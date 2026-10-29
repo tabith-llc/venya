@@ -215,7 +215,7 @@ sudo tar -tzf /root/venya-backup/venya-secrets-*.tar.gz | grep -E '\.env$|ca\.ke
 > The shares path is NOT a separate suspect: `split-ca-key` reads the same at-rest
 > envelope through the same helper (`cmd_admin_split_ca_key` and
 > `cmd_admin_export_ca_key` both call `unwrap_at_rest` in
-> `packages/cli/src/venya_cli/commands.py`, fix `066f4c8`, ticket #297), so what is
+> `packages/cli/src/venya_cli/commands.py`, fix `89b006d`, ticket #297), so what is
 > unverified for one is unverified for the other — the code path is shared, the fleet
 > round-trip is not yet run.
 

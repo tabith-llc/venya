@@ -11,7 +11,7 @@ rule FIRE WITHOUT BEING REMEMBERED: `scripts/pre_tag_scrub.py` is wired into
 `.pre-commit-config.yaml`, so every commit is judged, and it runs with `--stage pre-tag
 --ref <rev>` against the tag candidate before `git tag`. That is the honest substitute
 for the "CI gates the expanded guard" clause in the owner's #689 plan, which describes a
-mechanism this repo does not have (measured at `87a743c`: zero CI config files of any
+mechanism this repo does not have (measured at `af6775a`: zero CI config files of any
 kind; the only automated gate is the pre-commit chain, and a pytest cell is voluntary).
 
 What this file is NOT: a restatement of the pattern table. The vocabulary is imported,
@@ -43,7 +43,7 @@ import private_literals
 #: was written for, pointed at the commit that had it, is not a guard." Pinned by
 #: `git cat-file -t` so a garbage-collected or rewritten ref fails as a named
 #: instrument fault rather than a skipped cell.
-PRE_SCRUB_REF = "802bbbd"
+PRE_SCRUB_REF = "a23430a"
 
 
 def _tree(tmp_path: Path, files: dict[str, str]) -> Path:

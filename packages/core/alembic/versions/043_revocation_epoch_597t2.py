@@ -28,7 +28,7 @@ MECHANISM, AND WHY IT IS NEW IN THIS MIGRATION SET. ``031_audit_append_only_gran
 nearest-looking precedent and it is NOT one: its append-only guarantee is made of GRANTS, with
 ``REVOKE UPDATE, DELETE ON audit_events`` running last so it wins over the blanket grants. There is no
 ``CREATE TRIGGER`` anywhere in ``packages/core/alembic/versions/`` — a tree-wide grep for
-``create[[:space:]]+trigger`` at ``9f18afcb`` returned zero files — so privileges are the house
+``create[[:space:]]+trigger`` at ``c0be4504`` returned zero files — so privileges are the house
 instrument for a structural DB guard and **a trigger is new instrumentation here.** It is chosen anyway,
 and the reason is the difference between the two problems. Privileges bind WHO may write: to be
 enforced they would have to be revoked from ``venya_audit``, which forbids the very product writes this

@@ -6,7 +6,7 @@
 
 """#696 family (R-2614, Road B) — the egress-policy child gets a bound, and the class gets a gate.
 
-THE DEFECT, as re-derived at this base (``5b9a709b``): ``apply_network_policy`` ran
+THE DEFECT, as re-derived at this base (``74dc19ee``): ``apply_network_policy`` ran
 ``subprocess.run([\"sbx\", \"policy\", \"allow\", \"network\", ...], check=False)`` with NO ``timeout=``
 at all. It was the only unbounded ``subprocess`` child in ``packages/*/src``. The call sits inside
 ``_run_command_sbx``, which the relay handler runs while it holds the executor's admission permit

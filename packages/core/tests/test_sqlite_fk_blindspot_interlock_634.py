@@ -28,7 +28,7 @@ check that #640, #649 and #650 are all about, and the same class as a bare-direc
 a confident zero. **The instrument is the finding, and it is wrong in both directions.**
 
 Design: a RATCHET, not a promise. ``BASELINE`` below is the frozen set of files that build a sqlite
-engine and do not install enforcement, at ``dev 492fe4e``. The guard does not demand an empty baseline
+engine and do not install enforcement, at ``dev 70e0755``. The guard does not demand an empty baseline
 (that would be 66 files in one leg, the thing the lead ruled into tranches); it demands **no growth** —
 a new blind site reddens, and so does a silently-disappearing one, because a file that stopped being an
 engine-builder while still listed means the scanner changed under us.
@@ -56,7 +56,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 
 #: Files that build a sqlite engine and do NOT install ``PRAGMA foreign_keys=ON``, **generated from the
-#: scanner at ``dev 492fe4e`` BEFORE tranche 1 (66 entries); tranche 1 cleared one, so this list is 65 from that commit forward — not hand-typed** (the first draft of this list
+#: scanner at ``dev 70e0755`` BEFORE tranche 1 (66 entries); tranche 1 cleared one, so this list is 65 from that commit forward — not hand-typed** (the first draft of this list
 #: was hand-written and the guard immediately caught three wrong paths and two files that do install
 #: enforcement, which is the argument for generating it). Shrinks one file per tranche;
 #: must never grow.
@@ -211,7 +211,7 @@ def _installs_enforcement(tree: ast.Module) -> bool:
     """True iff some call executes ``PRAGMA foreign_keys = ON``.
 
     Deliberately AST-only, and this is the second instrument lie the row tells: ``git grep -l
-    'PRAGMA foreign_keys'`` matches COMMENTS and DOCSTRINGS. Measured at 492fe4e, grep says 15 files
+    'PRAGMA foreign_keys'`` matches COMMENTS and DOCSTRINGS. Measured at 70e0755, grep says 15 files
     mention the pragma and only 14 execute it — and one of those 15 is a file whose only mention is
     prose saying it does NOT set it. A comment is not enforcement.
     """

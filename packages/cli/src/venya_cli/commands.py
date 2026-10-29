@@ -3552,7 +3552,7 @@ def _get_server_url(args: Any) -> str:
 
     Fallback chain (aligned with the run_command chokepoint precedence —
     flag > env > config, ticket cli-core-url-server-url-naming-split /
-    cli-server-url-env-ignored fix 3f3ed1b):
+    cli-server-url-env-ignored fix 7164b67):
     1. --core-url / --server-url arg (dest=core_url)
     2. VENYA_SERVER_URL env (empty = unset)
     3. config.json via Config() (default: ~/.config/venya on Linux,
@@ -4420,7 +4420,7 @@ def cmd_admin_export_ca_key(args: Any) -> int:
         return 1
 
     # Unwrap the at-rest envelope (#297): the file is PKCS#8-encrypted PEM on
-    # every install since 4218ec1/3667c6e — the old raw read exported
+    # every install since bc08030/3667c6e — the old raw read exported
     # ciphertext-of-ciphertext. Legacy plaintext files pass through; anything
     # that is neither fails LOUD with zero output written.
     raw_at_rest = ca_key_path.read_bytes()

@@ -1,6 +1,6 @@
 # Venya Certificate & Key Rotation Runbook
 
-> **Provenance:** rewritten 2026-09-19 against the working tree at dev `28941fb`
+> **Provenance:** rewritten 2026-09-19 against the working tree at dev `b197735`
 > (full evidence register: venya-dev `testing/results-2026-09-19-1755.md`). The previous
 > version of this document described a pre-nginx deployment (TLS on :8080, CA under
 > `/etc/venya/ca`, users `venya-core`/`venya-executor`, a nonexistent
@@ -21,7 +21,7 @@ paths are the custody route, and they do not depend on that file.
 
 | Material | Location | Validity / rotation | Notes |
 |---|---|---|---|
-| Root CA keypair | core: `/var/lib/venya/ca/ca.key` (0600), `ca.crt` | manual break-glass only (§5) | key ENCRYPTED at rest since fix `4218ec1` (ticket `root-ca-key-plaintext-at-rest`, CLOSED 2026-09-20); passphrase `VENYA_CA_KEY_PASSPHRASE` in `/etc/venya/venya-core.env` (0640 root:venya), reused on re-run — an explicit wrong value fails loudly at decrypt |
+| Root CA keypair | core: `/var/lib/venya/ca/ca.key` (0600), `ca.crt` | manual break-glass only (§5) | key ENCRYPTED at rest since fix `bc08030` (ticket `root-ca-key-plaintext-at-rest`, CLOSED 2026-09-20); passphrase `VENYA_CA_KEY_PASSPHRASE` in `/etc/venya/venya-core.env` (0640 root:venya), reused on re-run — an explicit wrong value fails loudly at decrypt |
 | Admin CA keypair | core: `/var/lib/venya/ca/admin-ca/` | manual (§7) | key ENCRYPTED; passphrase in `/etc/venya/venya-core.env` (0640 root:venya) |
 | Server TLS leaf | core: `/etc/venya/tls/server.crt\|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh`, the `Server TLS certificate signed with Venya CA` block) | CN + SAN DNS = `CORE_HOSTNAME` |
 | Relay client cert | core: `/etc/venya/relay/relay-client.crt\|.key` | regenerated on installer run (the `Relay client certificate signed and verified` block) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids`. Registered in `core_relay_credentials` at core boot and revocable — see § Revoking the core's relay client credential (#597) |
@@ -55,7 +55,7 @@ desktop ceremony requires, including on Windows, is covered in `faq.md` and
 | Cut-over — the run of the installer that stopped printing the copy instruction | 2026-10-12 | `2b70210` 11:35:25 -0600, merged into `dev` as `832c11c` 11:36:13 -0600 (RF-10) |
 | Sum | **2027-01-10** | `date -u -d "2026-10-12 + 90 days"` → 2027-01-10 |
 
-**Measured absent, stated as absence and not as presence.** On a re-installed guest of this fleet the 90-day class was **not present to measure**: on `venya-core-3` (read 2026-10-21 16:42–16:46Z, seat a prior lane, leg 316, source `origin/dev = aa90d201`) the served `:443` leaf expired **2027-10-18** (365 d), the root CA **2036-09-29** (3,650 d), and the admin credential in service `CN=venya-adm3` carried a span of **3,600 SECONDS** — **three lifetimes, none of them `2027-01-10`** — with exactly **one** `admin_credentials` row, `source=issue-route`. **A mint was deliberately not performed to manufacture the missing class: minting is the owner's hand.** **So treat the table below as the arithmetic of a bootstrap plane that this guest does not carry, not as a fleet-wide inventory of live 90-day credentials, and do not re-derive a date from `ADMIN_CERT_VALIDITY_DAYS` for any credential a person renewed.**
+**Measured absent, stated as absence and not as presence.** On a re-installed guest of this fleet the 90-day class was **not present to measure**: on `venya-core-3` (read 2026-10-21 16:42–16:46Z, seat a prior lane, leg 316, source `origin/dev = 001e181d`) the served `:443` leaf expired **2027-10-18** (365 d), the root CA **2036-09-29** (3,650 d), and the admin credential in service `CN=venya-adm3` carried a span of **3,600 SECONDS** — **three lifetimes, none of them `2027-01-10`** — with exactly **one** `admin_credentials` row, `source=issue-route`. **A mint was deliberately not performed to manufacture the missing class: minting is the owner's hand.** **So treat the table below as the arithmetic of a bootstrap plane that this guest does not carry, not as a fleet-wide inventory of live 90-day credentials, and do not re-derive a date from `ADMIN_CERT_VALIDITY_DAYS` for any credential a person renewed.**
 
 **Which number is enforced where**, because two of these lifetimes are one hour apart
 in name only and a third number nearby is not a lifetime at all:
@@ -652,5 +652,5 @@ either way.
 - `shamir-combine-no-threshold-verification` — FIXED 2026-09-19 (V2 shares carry K + checksum; below-threshold/corrupt/mixed sets fail loudly; pre-V2 files restore unverified with a CLI warning — still run the §5 pairing check)
 - `export-ca-key-echoed-passphrase` — FIXED 2026-09-19 (all secret prompts now getpass; pre-fix CLIs echoed)
 - `executor-dead-rotation-config` — FIXED 2026-09-19 (dead fields removed; legacy executor.toml keys still load, ignored)
-- `root-ca-key-plaintext-at-rest` — FIXED (close confirmed against the shipped installer): root CA key is encrypted at rest (`4218ec1`; see §0)
+- `root-ca-key-plaintext-at-rest` — FIXED (close confirmed against the shipped installer): root CA key is encrypted at rest (`bc08030`; see §0)
 - `executor-ero-fs-crash-loop-on-empty-token` (H) — never deploy an executor without an install-time token (§3)

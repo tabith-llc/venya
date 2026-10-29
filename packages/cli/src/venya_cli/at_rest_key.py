@@ -94,7 +94,7 @@ def rewrap_at_rest(plaintext_pem: bytes | memoryview, server_passphrase: str | N
     """Re-encrypt plaintext PEM into the at-rest envelope.
 
     No passphrase (legacy install / disaster restore): the plaintext is
-    returned unchanged — that IS the legacy at-rest format (pre-4218ec1/
+    returned unchanged — that IS the legacy at-rest format (pre-bc08030/
     3667c6e installs); the server keeps its own unencrypted-at-rest warning.
     """
     if not server_passphrase:

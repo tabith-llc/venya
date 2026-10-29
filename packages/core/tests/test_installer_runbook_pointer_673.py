@@ -12,7 +12,7 @@ The mechanism, named so a re-anchor from an older ref cannot silently restore th
 false claim: the banner at the end of ``install-venya-core.sh`` used to print
 ``Until that lands, ...`` — a sentence asserting the renewed-pair path did not
 exist, written before #565 Part B shipped it. That false half was removed at
-``d13cbab0``; what this cell adds is the pin that did not exist then, plus the
+``cbf5398e``; what this cell adds is the pin that did not exist then, plus the
 pointer re-aim of this leg: the line aimed at runbook ``§0`` (an index), and it
 now aims directly at ``§5`` (the break-glass procedure) while keeping ``§7 step
 0`` — the one place the runbook shows reading the stored passphrase back — in the
@@ -49,7 +49,7 @@ _TRUE_NEEDS = (
     "VENYA_ADMIN_CA_KEY_PASSPHRASE (#565 Part B)",
     "machine-plane pair above needs no passphrase",
 )
-# The false claim, byte-exact from the pre-d13cbab0 banner (`2b702101`, line 1188).
+# The false claim, byte-exact from the pre-cbf5398e banner (`2b702101`, line 1188).
 _FALSE_CLAIM = "Until that lands"
 
 

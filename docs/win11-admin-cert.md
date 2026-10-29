@@ -362,7 +362,7 @@ and the #628 history follow.
   The install is elevated **by design**, not as a workaround: Windows refuses junction
   traversal by a Medium-integrity process while `uv` needs a junction for its Python alias,
   so the install takes the admin token and only the *use* is unelevated — "Install =
-  elevated, use = unelevated, and that is by design" (the Windows venue law 4, `ad2c2ab`; the
+  elevated, use = unelevated, and that is by design" (the Windows venue law 4, `f08a61a`; the
   same split is in [installation.md](installation.md): "Elevated **install**, unelevated
   **use**"). The installer says so itself — it refuses an unelevated run outright at
   `install-venya-cli.ps1:83-91` ("Administrator rights are REQUIRED to install the Venya CLI

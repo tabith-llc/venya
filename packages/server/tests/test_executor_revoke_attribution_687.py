@@ -61,7 +61,7 @@ URL_TPL = "/api/v1/admin/executors/{}/revoke"
 _UNSET = object()  # "default the owner to the holder" — distinct from NULL_OWNER below
 NULL_OWNER = None  # the nullable-column case, stored as SQL NULL
 
-# --- THE PRE-FIX FACE, captured at base 802bbbd by a temporary probe, not recalled.
+# --- THE PRE-FIX FACE, captured at base a23430a by a temporary probe, not recalled.
 # A correctly-paired repeat sent exactly these bytes; negative 2 compares against them.
 PRE_FIX_BODY = {"executor_id": A, "revoked": False, "serial_number": S}
 PRE_FIX_PAYLOAD = {"executor_id": A, "serial_number": S, "already_revoked": True}

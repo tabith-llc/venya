@@ -224,6 +224,6 @@ class TestOneCallSite:
         # purpose, and a guard that counted mentions would redden on prose.
         assert source.count("get_liveness_session()") == 1
         assert source.count("get_session()") == 1
-        # And no second engine is built here — this leg consumes ``8f58e83``, it does
+        # And no second engine is built here — this leg consumes ``befd90c``, it does
         # not re-implement it.
         assert "create_engine" not in source

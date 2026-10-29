@@ -8,7 +8,7 @@
 
 **Why this script exists.** The owner's #689 scrub plan part 3 read: *"Release workflow
 hook — scrub step runs before git tag; CI gates the expanded guard."* Measured at
-``87a743c``, **there is no CI in this repo** — no ``.github/workflows``, no
+``af6775a``, **there is no CI in this repo** — no ``.github/workflows``, no
 ``.gitlab-ci.yml``, no Jenkins/Azure/Circle/Travis file of any kind
 (``git ls-tree -r --name-only <dev> | grep -icE '\\.github/workflows|gitlab-ci|jenkins|
 azure-pipelines|drone|circleci|travis'`` -> **0**). The only automated gate this repo

@@ -57,7 +57,7 @@ LITERAL = re.compile(r"`([^`\n]{2,120})`")
 #: silently matched against some line that happens to contain them.
 _NOT_A_SYMBOL = re.compile(
     r"""
-      ^[\d.]+$                        # 3650, 0.0, 1033c2d-shaped
+      ^[\d.]+$                        # 3650, 0.0, 0c81975-shaped
     | ^v?\d+\.\d+\.\d+                # version plates
     | ^[0-9a-f]{7,40}$                # commit shas
     | ^:\d+$                          # :8443 — a port, not a symbol

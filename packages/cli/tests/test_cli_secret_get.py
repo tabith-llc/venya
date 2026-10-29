@@ -31,7 +31,7 @@ class TestSecretGetUnmaskElevation:
         REWRITTEN (ticket cli-elevation-token-query-param-transport): this
         cell formerly PINNED `params={"unmask": True, "elevation_token": …}`
         as desired — the 5th instance of a test institutionalizing a bypass
-        the server had already removed (`9732ee7` header-only transport).
+        the server had already removed (`51500f8` header-only transport).
         The pinned query param physically 403'd AND leaked the single-use
         token into the server access log (results-2026-09-21-0400 D2).
         """

@@ -87,7 +87,7 @@ Key environment variables (all optional):
 |---|---|---|
 | `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch. Required (no sidecar fallback) whenever the tarball origin is not https:// — file:// paths (#327) and plain-http:// sources alike (#375, #328). |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL password |
-| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-19 (`803acd9`, first shipped 2026-09-20 on the pre-beta alpha line, tag `v0.1.0alpha12` — that line is withdrawn by owner order 2026-10-18, so the tag names the release that proved it, not one to install from) and a **15-character minimum** refused by the installer before any mutation, the same floor the core enforces at boot; 64 is the length Venya guarantees to support, not an enforced maximum; on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts, and a re-run reusing a stored passphrase under the floor refuses at that gate |
+| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-19 (`3c74b80`, first shipped 2026-09-20 on the pre-beta alpha line, tag `v0.1.0alpha12` — that line is withdrawn by owner order 2026-10-18, so the tag names the release that proved it, not one to install from) and a **15-character minimum** refused by the installer before any mutation, the same floor the core enforces at boot; 64 is the length Venya guarantees to support, not an enforced maximum; on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts, and a re-run reusing a stored passphrase under the floor refuses at that gate |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | admin client-cert enforcement |
 | `VENYA_ADMIN_CA_PASSPHRASE` | auto-generated | stored in `/etc/venya/venya-core.env` (0640) |
@@ -156,7 +156,7 @@ yet and never stops.
 
 The run then **restarts the service when the process predates the new bytes** —
 a loud NOTICE names both timestamps — and no manual `systemctl restart` is
-needed after a re-run (landed at `6b6f2af`; the pre-GitLab ticket slug was
+needed after a re-run (landed at `c0ed801`; the pre-GitLab ticket slug was
 `installer-rerun-no-service-restart`).
 
 **The fresh-bytes proof is a gate on the success claim, not a transcript note.**
@@ -271,8 +271,8 @@ Executors need a single-use enrollment token minted by an admin. With admin
 mTLS enabled (the default), the admin client cert alone authorizes these
 operations **server-side** — from the core that holds its own machine-plane pair
 (`VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`, §2). Both headless paths below run on a
-core with no browser (CLI gate fix `d59a068` + `VENYA_SERVER_URL` resolution
-fix `3f3ed1b`, dev/unreleased; physically verified 2026-09-20).
+core with no browser (CLI gate fix `6e546e5` + `VENYA_SERVER_URL` resolution
+fix `7164b67`, dev/unreleased; physically verified 2026-09-20).
 
 Which key they work with, stated because the two admin key shapes are not
 interchangeable here: the pair under `/etc/venya/admin/` that the core installer

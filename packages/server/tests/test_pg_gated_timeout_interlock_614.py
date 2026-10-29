@@ -67,7 +67,7 @@ A prior worker lane measured GREEN at s121, committed here as source text and fe
 functions the shipped claims run. Revert the helper walk or the barrier claim and those cells
 fail loudly instead of quietly agreeing with the tree.
 
-**Counts, re-derived at dev ``492fe4e`` on 2026-10-17 (#630 AC4 — counts rot, so re-run this;**
+**Counts, re-derived at dev ``70e0755`` on 2026-10-17 (#630 AC4 — counts rot, so re-run this;**
 ``git grep -ln 'VENYA_TEST_PG_URL' -- 'packages/*/tests/*' | wc -l`` **and the scan-target count
 below, then the AST tallies this file's own helpers print):** ``git grep -ln 'VENYA_TEST_PG_URL'
 -- 'packages/*/tests/*'`` → 11 files, minus this scanner = 10 scan targets (a whole-tree grep
@@ -751,7 +751,7 @@ CONTROL_UNBOUND_SOURCE = CONTROL_C_SOURCE.replace(
 #: Measured at dev ``04eb349``: 23 across the 9 gated files (19 across 8 at the pre-re-anchor
 #: base ``59cf8ef``) — re-run ``test_the_helper_walk_is_not_vacuous_on_the_shipped_tree``.
 #: Floor on the PG engines the FILE walk must classify on the shipped tree (#649 AC2 pairing).
-#: Measured at dev ``492fe4e``: 12 PG + 12 SQLite = 24 ``create_engine`` calls across the 10
+#: Measured at dev ``70e0755``: 12 PG + 12 SQLite = 24 ``create_engine`` calls across the 10
 #: gated files, every PG one already bounded — so this floor is set BELOW the measured 12 to
 #: catch a classifier that starts answering "sqlite" to everything, which would report zero
 #: findings and look exactly like a clean tree. Re-derive with ``test_the_file_walk_is_not_
@@ -804,7 +804,7 @@ def _file_engine_findings(text: str, label: str) -> list[str]:
     else is inside neither set, and the shipped tree has exactly one: 613's
     ``TestVenueGateHonesty`` opens a real PG engine per ``UNREACHABLE`` parameterisation from a
     class name the predicate never matches. Dropping that deadline was invisible to every cell
-    in this guard — the escape this row names, measured at ``492fe4e``: the bound removed at
+    in this guard — the escape this row names, measured at ``70e0755``: the bound removed at
     613:299 left all 57 cells green.
 
     This walk keys on the FILE, so it closes the hole by COVERING the site rather than by

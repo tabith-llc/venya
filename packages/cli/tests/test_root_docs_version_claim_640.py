@@ -20,7 +20,7 @@ So this gate does two things and refuses to do a third:
 - it **enumerates** root-level `*.md` at run time, so a new root page is covered without anyone editing
   the guard — coverage is a property of the glob, not of somebody remembering to add a filename;
 - it checks **one narrow, named fact**: a claim that a version is the current one. The source of truth
-  is the dist metadata (`packages/cli/pyproject.toml`, the single version source since `c218fbc`), plus
+  is the dist metadata (`packages/cli/pyproject.toml`, the single version source since `14d8caf`), plus
   the newest dated heading in `CHANGELOG.md`.
 - it **does not read prose**. A guard that interprets sentences gets switched off inside a week; a guard
   that compares one named string survives. Version tokens that appear in dated historical notes are

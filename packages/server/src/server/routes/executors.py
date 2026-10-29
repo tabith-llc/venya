@@ -2264,7 +2264,7 @@ async def execute_command_on_executor(
 # is a machine-guarded page: every `file:line` coordinate it prints must still land on the symbol
 # it names (test_beta_terms_cite_interlock.py::test_pins_match_the_tree_they_claim_at_when_pinned,
 # live whenever a cited file moves), and the highest coordinate it prints into THIS file is :2042.
-# Measured at `e9c7c258`: inserting one line at :60 reddens that cell with 9 mismatches. New
+# Measured at `4f6339fb`: inserting one line at :60 reddens that cell with 9 mismatches. New
 # module-level code therefore goes below every cite, and only the relay arm itself (2086-2130) is
 # edited above that line. Re-pinning the page is a CUT-COMMIT act by generator, never a worker
 # leg's hand-edit — so this block moves itself out of the way instead of moving the page.

@@ -381,7 +381,7 @@ def _dialect_name(db: Any) -> str | None:
     cannot report its dialect is treated as PostgreSQL so the production contract stays pinned").
     This module treats the same input as non-PG, i.e. the LOOSER branch, and a raising
     ``get_bind`` there is not an error at all, just a silence. Measured both ways at
-    ``4620432c`` on the identical input — an object with no ``get_bind``: rate_limit takes its PG
+    ``0783169e`` on the identical input — an object with no ``get_bind``: rate_limit takes its PG
     branch, this seam takes its unbonded branch.
 
     The divergence is recorded, not repaired: aligning them would move an unknown bind from

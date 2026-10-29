@@ -35,7 +35,7 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 **Config key:** `db.passphrase` (env `VENYA_DB__PASSPHRASE` — note the DOUBLE underscore: `db` is a nested config section)
 
-**Requirement:** MUST be set, in every mode. The missing-passphrase check in `app.py` is unconditional — the former `not config.debug` exemption was a dead letter and was removed (`7e80f13`, 2026-09-20): `init_db()` constructs `BackendConfig` earlier in `lifespan()`, and that raises `BackendConfigurationError` on a missing passphrase before any request is served. There is NO unencrypted-storage fallback path.
+**Requirement:** MUST be set, in every mode. The missing-passphrase check in `app.py` is unconditional — the former `not config.debug` exemption was a dead letter and was removed (`ae35ae3`, 2026-09-20): `init_db()` constructs `BackendConfig` earlier in `lifespan()`, and that raises `BackendConfigurationError` on a missing passphrase before any request is served. There is NO unencrypted-storage fallback path.
 
 **Purpose:** Passphrase used to derive the Key Encryption Key (KEK) for encrypting secrets at rest (envelope encryption: KEK wraps a per-secret DEK via AES-256-KW; values are ChaCha20-Poly1305).
 
@@ -164,7 +164,7 @@ read as executor settings and are not — mapped below the table.
 | `executor_enrollment.token_ttl_seconds` | `VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS` |
 | `executor_enrollment.require_token` | `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN` |
 
-`executor_enrollment.require_token` defaults to **true** (landed at `6a2c313`,
+`executor_enrollment.require_token` defaults to **true** (landed at `f1a6486`,
 2026-09-20; the pre-GitLab ticket slug was `executor-rotation-require-token-400`,
 which is **not** issue #400): `POST /api/v1/executors/register`
 without a valid enrollment token is rejected 400. Setting it `false` restores open
