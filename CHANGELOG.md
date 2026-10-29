@@ -4,8 +4,15 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
-At the `v0.1.0beta1` cut (`e9c7c25`) this section was emptied — the entries that sat there
-were folded into `0.1.0beta1` in that same commit. The rows below landed since that cut:
+Nothing is pending here at the `v0.1.0beta2` cut: the rows that had landed since `v0.1.0beta1` are
+folded into the `0.1.0beta2` section below. The same emptying marked that earlier cut (`e9c7c25`).
+
+## [0.1.0beta2] - 2026-10-28
+
+> Dated at the cut: this is the local date of the commit preparing the `v0.1.0beta2` cut, not a date
+> the tag has been struck on yet. The tag is the owner's keystroke; if it lands on a later day, this
+> heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement
+> in a shipped document, which is the rule the `0.1.0beta1` heading above carries in its own note.
 
 - **An executor refusal now says which argument it means and what kind of character it
   carries (`#713`).** The command gate has refused a metacharacter inside an argv element by
