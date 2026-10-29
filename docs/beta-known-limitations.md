@@ -1123,6 +1123,17 @@ quietly publishing a wrong line. Before this commit the cell printed a deferral 
 asserting anything, so the page's numbers were protected by nobody — that is the defect this paragraph
 replaces, and it is why the sentence above says *verified*, not *disciplined*.
 
+**Re-struck at the `v0.1.0beta2` cut (2026-10-28).** The paragraph above is the `0.1.0beta1` record and
+is left exactly as written; this is the next strike, carried forward rather than edited in. At the
+cut face `708542de6dfe40e4a5be5787261cf8afe184044f` the generator was run again: `--check` reads rc 0
+with `would change: False` over all 105 coordinates, and `--write` reports the same face and writes
+nothing, so no digit on this page moved between the two strikes. `PINNED_AT` in
+`packages/server/tests/test_beta_terms_cite_interlock.py` now names that cut face, which is what the
+owner's ruling asked for at a cut — the numbers are re-pinned at the commit being released, not
+inherited from the last one that happened to be re-pinned. The assertion is live at this tree: the
+strict cell diffs that face against `HEAD` over the cited roots, sees the `0.1.0beta2` nameplate
+commit in them, and re-resolves every coordinate here against the tree the release will ship.
+
 **What that does and does not mean.** It means each `:N` on this page matches the tree at the
 commit `PINNED_AT` names — measured, not believed. It does **not** mean the number is true of the
 checkout you happen to be reading: any merge since that face can move a symbol, which is exactly what

@@ -61,14 +61,17 @@ _spec.loader.exec_module(gen)
 #: OWN stdout, in the same changeset. It is no longer ``None``: the generator ran at `2b90902`
 #: (`17fc21d`, 105 cites re-pinned, manifest 96 -> 93 keys), and at the face named below
 #: `--write` itself reports `105 cites already correct …; nothing written` — the coordinates are
-#: exact there BY VERIFICATION, not by inheritance. A commit cannot contain its own sha, so this
+#: exact there BY VERIFICATION, not by inheritance. Re-struck at the `v0.1.0beta2` cut against
+#: `708542de` (`--check` rc 0, `would change: False`, 105 cites, manifest 93/93 keys at that face);
+#: the beta1 strike was `4fb736eb`, the face the beta1 cut commit was written on.
+#: A commit cannot contain its own sha, so this
 #: value names the settled release face the pin was struck against (the parent of the commit that
 #: sets it) rather than the one the generator first ran at: the strict cell diffs `PINNED_AT..HEAD`
 #: over `CITED_ROOTS`, `packages/` is one of those roots, so this very file counts as moved and the
 #: cell RE-RESOLVES all 105 cites against the live tree and asserts agreement. A merge that moves a
 #: cited symbol from here forward reddens the suite instead of quietly publishing a stale line.
 PINNED_AT: str | None = (
-    "4fb736eb92e3b93547ed1f80152d79177a957323"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
+    "708542de6dfe40e4a5be5787261cf8afe184044f"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
 )
 
 #: Files whose churn invalidates the pins — the tree the cites point into.
