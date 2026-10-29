@@ -143,6 +143,24 @@ folded into the `0.1.0beta2` section below. The same emptying marked that earlie
   remote command is read in both forms the wire carries — separate elements (`sudo -S id`) and one
   quoted element (`"sudo -S id"`). No character was added to the refused set and no timeout moved.
 
+- **A core whose `roles` table is missing its product roles now repairs itself on the next start
+  (`#718`).** The two roles the product ships with, `admin` and `user`, are re-applied at every core
+  start when they are absent — a get-or-create in `server/role_seed.py`, so a normal boot writes
+  nothing and only a missing row costs a write. An operator whose table was emptied, by a hand-cleared
+  database or a restore that carried users but not roles, sees the rows come back on the next
+  `systemctl restart venya-core` with no reinstall, and the boot journal names them:
+  `Re-applied missing product roles at startup: admin, user`. Each row the start creates emits a
+  `role_created` audit event beside the operator-facing one the admin API emits, so a role written by
+  the product's own startup is on the record like a role written by a person. Two boundaries belong to
+  this behavior: **migrations never seed roles** — migration `001` creates the table and its constraint
+  and inserts no rows — and the re-apply **never changes a role that already exists**. It will not
+  re-permission, rename, overwrite or delete `admin`, `user`, or any role an operator created; it
+  creates the two named rows and stops. `docs/installation.md`, "How the two product roles get
+  created", carries the same text with the journal command beside it. Alongside the server change, the
+  installer's seed-role anchor check now reads statements instead of substrings, so a commented-out
+  call can no longer satisfy the check on a tree that never runs it; a healthy tree is matched exactly
+  as before and comes back unchanged.
+
 ## [0.1.0beta1] - 2026-10-23
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
