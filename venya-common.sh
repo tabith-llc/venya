@@ -654,7 +654,7 @@ venya_apply_code_fixes() {
     # protected is one specific thing — a db.flush() between adding the role row and
     # reading role.id for the role_created audit field table, because an id is only
     # assigned by the flush and an unflushed row audits role_id null. The add left
-    # routes/init.py for server/role_seed.py at cb64e28, so the old
+    # routes/init.py for server/role_seed.py at 7c0bf43, so the old
     # `db.add(admin_role)` anchor no longer exists; the three literals below are the
     # live form of the same invariant.
     #
