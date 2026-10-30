@@ -133,7 +133,7 @@ BEGIN
     RETURN NULL;
 END
 $trg$
-"""
+"""  # nosec B608 — DDL text; every interpolation is a module literal, no argument reaches it
 
 
 class Trigger(NamedTuple):
@@ -273,7 +273,7 @@ def upgrade() -> None:
     op.execute(
         f"INSERT INTO {TABLE_NAME} (id, epoch, updated_at) "
         f"SELECT {EPOCH_ROW_ID}, 0, CURRENT_TIMESTAMP "
-        f"WHERE NOT EXISTS (SELECT 1 FROM {TABLE_NAME} WHERE id = {EPOCH_ROW_ID})"
+        f"WHERE NOT EXISTS (SELECT 1 FROM {TABLE_NAME} WHERE id = {EPOCH_ROW_ID})"  # nosec B608 — seed-row INSERT built only from module literals; no argument reaches it
     )
 
     if not _is_postgresql():
