@@ -44,7 +44,7 @@ from typing import Any
 # NameError on the refusal path. The rendered value is the same string the executor defined
 # before the move, so the operator-facing sentence does not change.
 from venya_contract.relay import (
-    CONTAINER_SECRET_DIR,  # noqa: F401
+    CONTAINER_SECRET_DIR,  # noqa: F401, RUF100
     render_command,
 )
 from venya_contract.relay import bound_secret_paths as _bound_secret_paths
