@@ -577,7 +577,15 @@ class Executor:
             _validate_command_structure(command, allowed_redirects)
         except ValueError as exc:
             if self.audit_logger:
-                self.audit_logger.emit("command_rejected", command=shlex.join(command), reason=str(exc))
+                # #733: the refusal row carries the SAME rendered text the server stores for this
+                # run, not a second join of the argv. The gate refuses the command before
+                # `command_str` exists below, so the renderer is called here with the very
+                # `allowed_redirects` the gate was given — one vocabulary, one text, both lanes.
+                self.audit_logger.emit(
+                    "command_rejected",
+                    command=render_command(command, allowed_redirects),
+                    reason=str(exc),
+                )
             raise CommandRejected(f"Command rejected: {exc}") from None
 
         # EXECUTION POSTURE (ticket #322 ruling Q3=C3, owner 2026-10-02; fleet

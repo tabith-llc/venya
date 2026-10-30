@@ -25,7 +25,9 @@ shape #332 chose for the pair condition and #374 for the template.
 Truth table: the ruled pair reads identically on all three surfaces (positive); a
 plain argv with no pair reads identically too (the zero-drift half of #332); an
 UNBOUND ``<`` target never reaches any surface because the gate refuses it first
-(paired negative).
+(paired negative); and a REFUSED argv stores the same rendered text an accepted one
+does, on both refusal lanes of ``execute`` — the site leg 759's review found still
+joining the list, and the reason the rejection rows are in this file's scope.
 """
 
 from __future__ import annotations
@@ -104,6 +106,58 @@ def _executor_surface(argv=ARGV, secret_ids=(BOUND_SECRET_ID,)) -> str:
     rows = [c for c in audit.emit.call_args_list if c[0][0] == "command_executed"]
     assert len(rows) == 1, [c[0][0] for c in audit.emit.call_args_list]
     return rows[0][1]["command"]
+
+
+# ----------------------------------------------------------------------------------
+# Surface 1b — the REJECTION lane: the `command_rejected` row the executor writes when
+# the structural gate refuses an argv. Leg 759's review found this site still joining the
+# list while the success lane and the server both carried the rendered text.
+# ----------------------------------------------------------------------------------
+
+#: An argv carrying the ruled session-bound pair plus one metachar element, so the
+#: structural gate refuses it — the shape the reviewer's probe drives.
+REJECT_ARGV = ["cat", "<", BOUND_PATH, "a;b"]
+
+
+def _reject_row_command(argv=REJECT_ARGV, secret_ids=(BOUND_SECRET_ID,), *, bypass_structure=False) -> str:
+    """The stored `command` of the single `command_rejected` row one refused run writes.
+
+    `bypass_structure=True` lets the structural gate pass and the POLICY gate refuse
+    instead, so the two refusal lanes in `execute` can be compared on one argv.
+    """
+    from executor.command_validator import CommandValidator
+    from executor.executor import CommandRejected, Executor
+    from executor.strategies.sbx_strategy import SbxStrategy
+
+    strategy = MagicMock(spec=SbxStrategy)
+    strategy.name.return_value = "sbx"
+    audit = MagicMock()
+    ex = Executor(
+        command_validator=CommandValidator(),
+        session_id="s-733-reject",
+        injection_strategy=strategy,
+        audit_logger=audit,
+    )
+    ex.http_client = None
+    secrets = [{"secret_id": sid, "value": b"x", "wrapped_value": b""} for sid in secret_ids]
+    with (
+        patch.object(Executor, "_prepare_injections", return_value=[]),
+        patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])),
+        patch.object(
+            CommandValidator,
+            "validate",
+            return_value=(False, "dangerous pattern rejected by preset 'standard'"),
+        ),
+        patch(
+            "executor.executor._validate_command_structure",
+            side_effect=(None if bypass_structure else ValueError("shell metacharacter in an argument")),
+        ),
+    ):
+        with pytest.raises(CommandRejected):
+            ex.execute(argv, secrets)
+    rows = [c[1]["command"] for c in audit.emit.call_args_list if c[0][0] == "command_rejected"]
+    assert len(rows) == 1, [c[0][0] for c in audit.emit.call_args_list]
+    return rows[0]
 
 
 # ----------------------------------------------------------------------------------
@@ -313,6 +367,42 @@ class TestOneRunOneCommandText:
             assert f"'{BOUND_PATH}'" not in text, f"{label} quoted the bound secret path"
             assert " '<' " not in text, f"{label} quoted the '<' token — the #332 inertness class"
             assert text.endswith(f"< {BOUND_PATH}"), f"{label} did not emit the ruled pair raw: {text!r}"
+
+    def test_the_rejected_command_stores_the_rendered_text_too(self):
+        """#759's one surviving site: a REFUSAL row stores a command like any other row.
+
+        The structural gate refuses an argv before the rendered string exists further down
+        `execute`, so this row was written from a join of the list while the success lane and
+        the server's `display_command` carried `render_command` — one argv, two texts, on the
+        path an operator reads when a command is denied. The refusal must carry the ruled
+        rendering: the pair raw, the metachar element quoted.
+        """
+        import shlex
+
+        from venya_contract.relay import bound_secret_paths, render_command
+
+        stored = _reject_row_command()
+        expected = render_command(REJECT_ARGV, bound_secret_paths([BOUND_SECRET_ID]))
+        assert stored == expected, f"rejection row={stored!r} rendered={expected!r}"
+        assert stored != shlex.join(REJECT_ARGV), f"the rejection row is back on shlex.join: {stored!r}"
+        assert " '<' " not in stored, f"the rejection row quoted the '<' token: {stored!r}"
+
+    def test_one_argv_refused_by_either_lane_stores_one_text(self):
+        """The cross-lane negative: two refusal sites in `execute`, one stored text.
+
+        The structural gate (which had no rendered string in scope, and was the defect) and
+        the policy gate (which already read the rendered form) both emit `command_rejected`.
+        Driving the same argv through each is what turns 'these two happen to agree' into a
+        checked property; a regression on either lane reddens the last assertion.
+        """
+        from venya_contract.relay import bound_secret_paths, render_command
+
+        structural = _reject_row_command()
+        policy = _reject_row_command(bypass_structure=True)
+        expected = render_command(REJECT_ARGV, bound_secret_paths([BOUND_SECRET_ID]))
+        assert structural == expected, f"structural lane={structural!r} expected={expected!r}"
+        assert policy == expected, f"policy lane={policy!r} expected={expected!r}"
+        assert structural == policy, f"one argv, two refusals, two texts:\n{structural!r}\n{policy!r}"
 
     def test_mcp_line_prints_what_the_ledger_holds(self):
         """Surface 3, read from the stored value rather than re-derived: the agent-visible
