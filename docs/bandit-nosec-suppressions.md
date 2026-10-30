@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**63 suppression lines across 22 files.**
+**75 suppression lines across 25 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -29,6 +29,8 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/cli/src/venya_cli/executor_key.py` | `EXECUTOR_KEY_PASSPHRASE_ENV = "VENYA_EXECUTOR_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/cli/src/venya_cli/fido2_client.py` | `except Exception:  # noqa: S110  # nosec B110 — deliberate: parse failure keeps raw status text` |
 | `packages/cli/src/venya_cli/webauthn.py` | `except Exception:  # nosec B110  # noqa: S110` |
+| `packages/core/alembic/versions/043_revocation_epoch_597t2.py` | `"""  # nosec B608 — DDL text; every interpolation is a module literal, no argument reaches it` |
+| `packages/core/alembic/versions/043_revocation_epoch_597t2.py` | `f"WHERE NOT EXISTS (SELECT 1 FROM {TABLE_NAME} WHERE id = {EPOCH_ROW_ID})"  # nosec B608 — seed-row INSERT built only from module literals; no argument reaches it` |
 | `packages/core/scripts/gen_bandit_suppressions.py` | `import subprocess  # nosec B404 — git ls-files provides the tracked set; fixed argv, no shell` |
 | `packages/core/scripts/gen_bandit_suppressions.py` | `raw = subprocess.run(  # nosec B603 B607 — git ls-files with fixed argv list, no shell, no external input` |
 | `packages/core/src/core/engine/encryption.py` | `from Crypto.Cipher import AES as PyCryptoAES  # nosec B413 — AES-KW per RFC 5649 requires pycryptodome` |
@@ -66,6 +68,11 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec B603 B607` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/server/scripts/gen_beta_terms_pins.py` | `import subprocess  # nosec B404 — own git reads, fixed argv` |
+| `packages/server/scripts/gen_beta_terms_pins.py` | `r = subprocess.run(  # nosec B603 B607 — fixed argv, git on PATH` |
+| `packages/server/scripts/gen_beta_terms_pins.py` | `return eval(compile(ast.Expression(v), "<manifest-value>", "eval"), vars(mod))  # nosec B307 — own AST nodes` |
+| `packages/server/scripts/gen_beta_terms_pins.py` | `key = eval(compile(ast.Expression(k), "<manifest-key>", "eval"), vars(mod))  # nosec B307 — own AST nodes` |
+| `packages/server/scripts/gen_beta_terms_pins.py` | `key = eval(compile(ast.Expression(k), "<k>", "eval"), vars(mod))  # nosec B307 — own AST nodes` |
 | `packages/server/src/server/audit_lifecycle.py` | `ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit event name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/audit_lifecycle.py` | `ENROLLMENT_TOKEN_REVOKED = "enrollment_token_revoked"  # nosec B105 — audit event name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/audit_lifecycle.py` | `EXECUTOR_ENROLLMENT_TOKEN_CREATED = "executor_enrollment_token_created"  # nosec B105 — audit event name, not a password` | <!-- pragma: allowlist secret -->
@@ -73,9 +80,14 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/server/src/server/ca.py` | `self._key_passphrase_env = "VENYA_ADMIN_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/middleware/auth.py` | `ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110` |
+| `packages/server/src/server/routes/admin.py` | `"enrollment_token_created": True,  # nosec B105 — audit bool flag, not a token value` | <!-- pragma: allowlist secret -->
+| `packages/server/src/server/routes/admin.py` | `"enrollment_token_created": True,  # nosec B105 — audit bool flag, not a token value` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/routes/auth_browser.py` | `except Exception:  # nosec B110 — rollback best-effort before raising HTTPException` |
 | `packages/server/src/server/routes/executors.py` | `import subprocess  # nosec B404 — CRL capath bootstrap uses `openssl rehash`; same system-tool seam as utils/disk_encryption.py` |
 | `packages/server/src/server/routes/executors.py` | `subprocess.run(  # nosec B603 B607 — fixed argv, no shell, constant 'openssl' on PATH; same seam as utils/disk_encryption.py` |
+| `packages/server/src/server/routes/executors.py` | `token_audit_fields = {"with_token": True, "token_verified": True, "token_id": token.id}  # nosec B105 — bools` | <!-- pragma: allowlist secret -->
+| `packages/server/src/server/routes/executors.py` | `token_audit_fields = {"with_token": False, "incumbent_exempt": True}  # nosec B105 — two bools` | <!-- pragma: allowlist secret -->
+| `packages/server/src/server/routes/executors.py` | `token_audit_fields = {"with_token": False}  # nosec B105 — one bool` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/routes/secrets.py` | `SECRET_KEY_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"  # nosec B105 — charset pattern, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/utils/disk_encryption.py` | `import subprocess  # nosec B404 — disk encryption check requires subprocess for system commands` |
 | `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |

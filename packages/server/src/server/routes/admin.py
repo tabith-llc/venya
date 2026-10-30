@@ -382,7 +382,7 @@ async def admin_enroll(
             {
                 "target_user_id": req.user_id,
                 "roles": [],
-                "enrollment_token_created": True,
+                "enrollment_token_created": True,  # nosec B105 — audit bool flag, not a token value
             },
         )
         db.commit()
@@ -483,7 +483,7 @@ async def admin_create_user(
             {
                 "target_user_id": req.username,
                 "roles": list(req.roles or []),
-                "enrollment_token_created": True,
+                "enrollment_token_created": True,  # nosec B105 — audit bool flag, not a token value
             },
         )
         db.commit()

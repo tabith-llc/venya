@@ -1113,7 +1113,7 @@ async def register_executor(
                 )
 
         resolved_executor_id = token.executor_id
-        token_audit_fields = {"with_token": True, "token_verified": True, "token_id": token.id}
+        token_audit_fields = {"with_token": True, "token_verified": True, "token_id": token.id}  # nosec B105 — bools
         logger.info("Enrollment token verified for executor: %s", resolved_executor_id)
     else:
         server_config = getattr(request.app.state, "config", None)
@@ -1154,9 +1154,9 @@ async def register_executor(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Enrollment token required. Contact your administrator.",
                 )
-            token_audit_fields = {"with_token": False, "incumbent_exempt": True}
+            token_audit_fields = {"with_token": False, "incumbent_exempt": True}  # nosec B105 — two bools
         else:
-            token_audit_fields = {"with_token": False}
+            token_audit_fields = {"with_token": False}  # nosec B105 — one bool
 
     # Terminal identity check (executor-revocation-by-identity, ruling 3/condition 4):
     # a revoked identity can NEVER re-register — even with a valid fresh token,

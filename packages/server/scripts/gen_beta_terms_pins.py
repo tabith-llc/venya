@@ -34,7 +34,7 @@ import ast
 import importlib.util
 import os
 import re
-import subprocess
+import subprocess  # nosec B404 — own git reads, fixed argv
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -81,7 +81,8 @@ def _load_manifest():
     path = Path(__file__).resolve().parent / "beta_terms_cites.py"
     spec = importlib.util.spec_from_file_location("beta_terms_cites", path)
     mod = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path.name} as a module")  # survives -O, unlike an assert
     sys.modules.setdefault("beta_terms_cites", mod)
     spec.loader.exec_module(mod)
     return mod
@@ -127,7 +128,7 @@ def _tracked_files() -> dict[str, list[str]]:
 
 def _git(*args: str) -> str | None:
     try:
-        r = subprocess.run(
+        r = subprocess.run(  # nosec B603 B607 — fixed argv, git on PATH
             ["git", "-C", str(REPO_ROOT), *args],
             capture_output=True,
             text=True,
@@ -350,7 +351,7 @@ def _value_of(v: ast.expr, mod) -> object:
     "redundant" from "a meaning was lost", so it must compare values the way the interpreter does.
     """
     try:
-        return eval(compile(ast.Expression(v), "<manifest-value>", "eval"), vars(mod))
+        return eval(compile(ast.Expression(v), "<manifest-value>", "eval"), vars(mod))  # nosec B307 — own AST nodes
     except Exception:
         return ast.get_source_segment("", v) or "<unparsable>"
 
@@ -372,7 +373,7 @@ def audit_keys(module_src: str, mod=None) -> tuple[int, int, dict[str, list]]:
     keys: list[str] = []
     values: dict[str, list] = {}
     for k, v in zip(node.keys, node.values):
-        key = eval(compile(ast.Expression(k), "<manifest-key>", "eval"), vars(mod))
+        key = eval(compile(ast.Expression(k), "<manifest-key>", "eval"), vars(mod))  # nosec B307 — own AST nodes
         keys.append(key)
         values.setdefault(key, []).append(_value_of(v, mod))
     counts = Counter(keys)
@@ -418,7 +419,7 @@ def rekey_manifest(newkey: dict[str, str], values: dict[str, tuple]) -> str:
     pairs = list(zip(node.keys, node.values))
     plan = []  # (key_node, value_node, old_key, new_key)
     for k, v in pairs:
-        key = eval(compile(ast.Expression(k), "<k>", "eval"), vars(mod))
+        key = eval(compile(ast.Expression(k), "<k>", "eval"), vars(mod))  # nosec B307 — own AST nodes
         plan.append((k, v, key, newkey.get(key, key)))
     # Which new keys are shared, and whether sharing is safe (identical values) or a clobber.
     by_new: dict[str, list] = {}
