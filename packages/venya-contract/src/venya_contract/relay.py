@@ -11,6 +11,9 @@ frozen spec: both ends import them, neither re-declares them, and ``extra="forbi
 makes any one-sided field change a loud ``ValidationError`` instead of a silent drop.
 """
 
+import shlex
+from collections.abc import Iterable
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Sandbox path of the askpass helper script (ticket secret-shape-askpass-helpers).
@@ -28,6 +31,88 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # the secret VALUE stays in /run/secrets and the helper reads it at exec time
 # via VENYA_ASKPASS_SECRET.
 ASKPASS_HELPER_PATH = "/usr/local/bin/venya-askpass"
+
+
+# ---------------------------------------------------------------------------
+# The ONE rendering of a gate-validated argv (tickets #332, #374, #733)
+# ---------------------------------------------------------------------------
+#
+# Why this lives in the FROZEN CONTRACT and not in the executor: three shipped
+# surfaces of the same run store the command TEXT — the executor's own
+# `command_executed` audit row, the server's `command_executed` row, and
+# `execution_sessions.command`, which is what the MCP `get_audit` line prints.
+# While the renderer sat inside the executor package the server could not see it
+# and re-derived the text with `shlex.join`, which QUOTES the ruled session-bound
+# redirect pair — so one run stored two different commands, and the pair the
+# ruling says must reach the guest shell raw was shown to operators as inert
+# (ticket audit-record-single-rendering-for-ruled-redirect-pair #733). Neither
+# end may re-declare this: the #332 ruling states the pair condition has exactly
+# one home because two copies drifting is the second-order bug class, and #374
+# extended that discipline from the pair CONDITION to the path TEMPLATE.
+
+#: Where an injected secret appears INSIDE the sandbox. The last component is the
+#: secret's DECIMAL database primary key, never its key name — the accept set below
+#: is built from `str()` of an Integer PK, so a name-shaped target can never validate
+#: (ticket redirect-target-refusal-names-index-and-bound #732).
+CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec
+
+
+def bound_secret_paths(secret_ids: Iterable[str | int]) -> frozenset[str]:
+    """The session-bound allowed-redirect path set for a command's own secret ids.
+
+    Both structural-gate call sites in the executor and the server's audit display
+    derive their allowed set HERE, so the gate's acceptance decision and every stored
+    rendering of the same run compute no result but the identical ruled one (#374
+    ALIGN, #733).
+    """
+    return frozenset(f"{CONTAINER_SECRET_DIR}/{secret_id}" for secret_id in secret_ids)
+
+
+def redirect_pair(command: list[str], i: int, allowed_redirect_paths: frozenset[str]) -> bool:
+    """The ONE shared condition for the ruled session-bound redirect pair
+    (secret-shape-sudo-remote option (a), user ruling 2026-09-21): element i is
+    EXACTLY ``<`` and element i+1 is EXACTLY a session-bound secret path.
+
+    SINGLE SOURCE (ticket redirect-allowance-neutralized-by-quoting #332):
+    the structural gate calls this to decide acceptance, and
+    ``render_command`` calls it to re-emit accepted pairs raw — two copies
+    of this condition drifting is the second-order bug class, so there is
+    exactly one.
+    """
+    if command[i] != "<":
+        return False
+    nxt = command[i + 1] if i + 1 < len(command) else None
+    return nxt is not None and nxt in allowed_redirect_paths
+
+
+def render_command(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> str:
+    """Reconstitute a gate-validated argv list into the ``sh -c`` payload.
+
+    Every element is ``shlex.quote``'d EXCEPT a redirect pair accepted by the
+    shared ``redirect_pair`` helper: its ``<`` and bound secret path are
+    emitted RAW so the guest shell performs a real redirect
+    (hunt-wave2 FIND-1: the plain ``shlex.join`` re-quoted the ruled pair into
+    inertness, silently killing sudo-remote option (a)). Inputs that contain
+    no accepted pair render byte-identically to ``shlex.join`` — the common
+    path has zero drift.
+
+    The renderer mirrors the gate's condition, never a broader one: elements
+    reach it only after ``_validate_command_structure`` accepted them. It is
+    ALSO the audit display text on both ends of the relay (#733) — the ruled
+    rendering is what an operator must see, not a cheaper join of the same list.
+    """
+    tokens: list[str] = []
+    i = 0
+    n = len(command)
+    while i < n:
+        if redirect_pair(command, i, allowed_redirect_paths):
+            tokens.append(command[i])
+            tokens.append(command[i + 1])
+            i += 2
+        else:
+            tokens.append(shlex.quote(command[i]))
+            i += 1
+    return " ".join(tokens)
 
 
 class RelayEnvVar(BaseModel):

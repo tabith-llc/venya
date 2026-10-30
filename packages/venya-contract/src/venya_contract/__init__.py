@@ -44,6 +44,26 @@ What is NOT in this package
   between them and these models.
 """
 
-from venya_contract.relay import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
+from venya_contract.relay import (
+    ASKPASS_HELPER_PATH,
+    CONTAINER_SECRET_DIR,
+    RelayEnvVar,
+    RelayRequest,
+    RelayResponse,
+    RelaySecret,
+    bound_secret_paths,
+    redirect_pair,
+    render_command,
+)
 
-__all__ = ["ASKPASS_HELPER_PATH", "RelayEnvVar", "RelayRequest", "RelayResponse", "RelaySecret"]
+__all__ = [
+    "ASKPASS_HELPER_PATH",
+    "CONTAINER_SECRET_DIR",
+    "RelayEnvVar",
+    "RelayRequest",
+    "RelayResponse",
+    "RelaySecret",
+    "bound_secret_paths",
+    "redirect_pair",
+    "render_command",
+]

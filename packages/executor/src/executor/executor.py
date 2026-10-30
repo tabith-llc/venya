@@ -27,9 +27,18 @@ import shlex
 import subprocess  # nosec B404 — executor requires subprocess to run commands
 import time
 import uuid
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
+
+# #332 single-source discipline, relocated for a reason (#733): the pair CONDITION,
+# the secret PATH TEMPLATE and the argv RENDERER live in the frozen wire contract,
+# because the SERVER renders the same command text for the audit record. Two copies
+# that cannot see each other is the drift class those rulings name, so this module
+# imports the ONE copy rather than re-declaring it; the historical local names are
+# kept so the gate, the direct-path guard and every call site read the same code.
+from venya_contract.relay import bound_secret_paths as _bound_secret_paths
+from venya_contract.relay import redirect_pair as _redirect_pair
+from venya_contract.relay import render_command
 
 from .audit import AuditLogger
 from .bundles import SecretBundle
@@ -44,10 +53,6 @@ from .injector import (
 )
 from .strategies.base import InjectionResult, InjectionStrategy
 from .strategies.sbx_strategy import (
-    CONTAINER_SECRET_DIR,
-    # Re-exported for the direct-path bound and the existing #470 cells, which
-    # import this name from here; it was a second bare 3600 in this module until
-    # #696 collapsed the two definitions into one.
     SBX_TIMEOUT,  # noqa: F401
     SbxCreateTimeoutError,
     SbxPolicyTimeoutError,
@@ -272,40 +277,6 @@ def _metachar_classes(elem: str) -> str:
     return ", ".join(name for name, chars in METACHAR_CLASSES if any(c in elem for c in chars))
 
 
-def _redirect_pair(command: list[str], i: int, allowed_redirect_paths: frozenset[str]) -> bool:
-    """The ONE shared condition for the ruled session-bound redirect pair
-    (secret-shape-sudo-remote option (a), user ruling 2026-09-21): element i is
-    EXACTLY ``<`` and element i+1 is EXACTLY a session-bound secret path.
-
-    SINGLE SOURCE (ticket redirect-allowance-neutralized-by-quoting #332):
-    the structural gate calls this to decide acceptance, and
-    ``render_command`` calls it to re-emit accepted pairs raw — two copies
-    of this condition drifting is the second-order bug class, so there is
-    exactly one.
-    """
-    if command[i] != "<":
-        return False
-    nxt = command[i + 1] if i + 1 < len(command) else None
-    return nxt is not None and nxt in allowed_redirect_paths
-
-
-def _bound_secret_paths(secret_ids: Iterable[str]) -> frozenset[str]:
-    """The session-bound allowed-redirect path set for a command's own secret
-    ids (ticket secret-shape-sudo-remote option (a)).
-
-    Single source for the in-sandbox secret PATH TEMPLATE (the
-    ``CONTAINER_SECRET_DIR`` constant from the sbx strategy — the same
-    directory the secrets are copied into): both structural-gate call sites
-    (``execute()`` step 1a and the direct-path inner guard) derive their
-    allowed set here, from their own secrets/injections, so the two gates can
-    compute no decision but the identical ruled one (ticket
-    direct-path-inner-guard-drift-trap #374, ruling ALIGN — the #332
-    single-source discipline extended from the pair CONDITION to the path
-    TEMPLATE).
-    """
-    return frozenset(f"{CONTAINER_SECRET_DIR}/{secret_id}" for secret_id in secret_ids)
-
-
 def _sshpass_owns_the_stdin(command: list[str]) -> bool:
     """Whether a near-side `<` redirect in this argv is taken by `sshpass` instead of
     reaching the remote `sudo -S` it was written for (#695, owner reversal `R-2633`).
@@ -348,34 +319,6 @@ def _sshpass_owns_the_stdin(command: list[str]) -> bool:
         if os.path.basename(word) == "sudo" and any(later in ("-S", "--stdin") for later in remote_words[k + 1 :]):
             return True
     return False
-
-
-def render_command(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> str:
-    """Reconstitute a gate-validated argv list into the ``sh -c`` payload.
-
-    Every element is ``shlex.quote``'d EXCEPT a redirect pair accepted by the
-    shared ``_redirect_pair`` helper: its ``<`` and bound secret path are
-    emitted RAW so the guest shell performs a real redirect
-    (hunt-wave2 FIND-1: the plain ``shlex.join`` re-quoted the ruled pair into
-    inertness, silently killing sudo-remote option (a)). Inputs that contain
-    no accepted pair render byte-identically to ``shlex.join`` — the common
-    path has zero drift.
-
-    The renderer mirrors the gate's condition, never a broader one: elements
-    reach it only after ``_validate_command_structure`` accepted them.
-    """
-    tokens: list[str] = []
-    i = 0
-    n = len(command)
-    while i < n:
-        if _redirect_pair(command, i, allowed_redirect_paths):
-            tokens.append(command[i])
-            tokens.append(command[i + 1])
-            i += 2
-        else:
-            tokens.append(shlex.quote(command[i]))
-            i += 1
-    return " ".join(tokens)
 
 
 def _validate_command_structure(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> list[str]:
