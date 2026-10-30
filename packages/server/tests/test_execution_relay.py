@@ -2061,9 +2061,11 @@ class TestRelayRejectionAudit424:
         ]
 
     _REASON = (
-        "Command rejected: Redirect '<' is only permitted when immediately followed by a "
-        "SESSION-BOUND secret path (/run/secrets/venya/<id> for a secret injected in this "
-        "session). Any other redirect target is rejected."
+        "Command rejected: Argument 2 is '<' and its target is not one of the 0 "
+        "SESSION-BOUND secret path(s) of this run — a target is "
+        "/run/secrets/venya/<N>, where <N> is the decimal database primary key of a "
+        "secret injected in this session (not its key name). Any other redirect "
+        "target is rejected."
     )
 
     def test_relay_rejection_writes_command_rejected_row(self):

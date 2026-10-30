@@ -29,7 +29,7 @@ You operate infrastructure through Venya. Four MCP tools: `list_executors`,
    human who authorized you.
 2. **`list_secrets` shows a `usage` line for most secrets: a ready-to-run
    command template** with the secret's sandbox path
-   (`/run/secrets/venya/<id>`) already resolved. Copy it and fill any
+   (`/run/secrets/venya/<decimal-id>`) already resolved. Copy it and fill any
    `{host}`/`{user}` placeholders from your task and the listed metadata.
    Never construct secret paths yourself; never inline a secret value.
 3. **`[REDACTED:<id>]` in output is the system working**, not an error.

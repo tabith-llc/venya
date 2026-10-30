@@ -393,7 +393,7 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
     user ruling 2026-09-21 — corporate targets almost never grant NOPASSWD
     sudo, so a password must reach remote `sudo -S` over ssh stdin): `<` is
     permitted ONLY as a standalone element immediately followed by an element
-    EXACTLY equal to a session-bound secret path (`/run/secrets/venya/<id>`
+    EXACTLY equal to a session-bound secret path (`/run/secrets/venya/<decimal-id>`
     for an id in `allowed_redirect_paths`). Every other `<` form (fused `a<b`,
     trailing, unbound target) and every other metacharacter remains rejected.
 
@@ -443,10 +443,19 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
                     "Wrap complex commands in a script file and execute that instead."
                 )
             if not _redirect_pair(command, i, allowed_redirect_paths):
+                # #732: the target arm named NEITHER the failing element NOR how many
+                # targets this run permits, so an operator could not tell which argument
+                # died or whether the run bound any secret at all. The sibling arms in this
+                # loop already name the index (#713 form B); the count is the other half of
+                # the same teaching. The sentence still echoes no element VALUE, and it now
+                # states the one shape the accept set can hold: the DECIMAL DB primary key
+                # under `CONTAINER_SECRET_DIR` — a secret's key NAME never validates.
                 raise ValueError(
-                    "Redirect '<' is only permitted when immediately followed by a "
-                    "SESSION-BOUND secret path (/run/secrets/venya/<id> for a secret "
-                    "injected in this session). Any other redirect target is rejected."
+                    f"Argument {i} is '<' and its target is not one of the "
+                    f"{len(allowed_redirect_paths)} SESSION-BOUND secret path(s) of this "
+                    f"run — a target is {CONTAINER_SECRET_DIR}/<N>, where <N> is the decimal "
+                    "database primary key of a secret injected in this session (not its key "
+                    "name). Any other redirect target is rejected."
                 )
             # The ruled session-bound pair is the ONLY shape that reaches here, so this is the
             # same `<` arm with one more sentence (#695, owner reversal `R-2633`: "ship the
