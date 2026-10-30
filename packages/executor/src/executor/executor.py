@@ -36,9 +36,19 @@ from typing import Any
 # that cannot see each other is the drift class those rulings name, so this module
 # imports the ONE copy rather than re-declaring it; the historical local names are
 # kept so the gate, the direct-path guard and every call site read the same code.
+# Completing the move (#783): the #732 refusal sentence renders CONTAINER_SECRET_DIR
+# inside `_validate_command_structure`, and test_redirect_target_refusal_732 imports the
+# name from this module. #732 adds both uses and this branch moved the definition into the
+# frozen contract; the batch merge keeps both, so without this re-export the #732 uses sit
+# without an import — collection aborts with ImportError and the unbound-pair negative hits
+# NameError on the refusal path. The rendered value is the same string the executor defined
+# before the move, so the operator-facing sentence does not change.
+from venya_contract.relay import (
+    CONTAINER_SECRET_DIR,  # noqa: F401
+    render_command,
+)
 from venya_contract.relay import bound_secret_paths as _bound_secret_paths
 from venya_contract.relay import redirect_pair as _redirect_pair
-from venya_contract.relay import render_command
 
 from .audit import AuditLogger
 from .bundles import SecretBundle
