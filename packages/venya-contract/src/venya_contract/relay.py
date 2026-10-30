@@ -96,10 +96,13 @@ def render_command(command: list[str], allowed_redirect_paths: frozenset[str] = 
     no accepted pair render byte-identically to ``shlex.join`` — the common
     path has zero drift.
 
-    The renderer mirrors the gate's condition, never a broader one: elements
-    reach it only after ``_validate_command_structure`` accepted them. It is
-    ALSO the audit display text on both ends of the relay (#733) — the ruled
-    rendering is what an operator must see, not a cheaper join of the same list.
+    The renderer mirrors the gate's condition, never a broader one. Its normal
+    caller is a list the gate accepted; it is also called on a list the gate
+    REFUSED, to render the audit row for that refusal (#733) — the function is
+    total, raises nothing, and quotes every element it is handed, so the refused
+    view is as inert as the accepted one and no command reaches a shell from here.
+    It is the audit display text on both ends of the relay: one rendering, the
+    text an operator must see, never a cheaper join of the same list.
     """
     tokens: list[str] = []
     i = 0
