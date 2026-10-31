@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**75 suppression lines across 25 files.**
+**75 suppression lines across 26 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -46,7 +46,6 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec` | <!-- pragma: allowlist secret -->
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec` |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | `CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec` | <!-- pragma: allowlist secret -->
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
@@ -95,3 +94,4 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |
 | `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |
 | `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |
+| `packages/venya-contract/src/venya_contract/relay.py` | `CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec` | <!-- pragma: allowlist secret -->

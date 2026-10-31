@@ -23,6 +23,7 @@ from executor.executor import (
     CommandResult,
     Executor,
     SecretBundle,
+    _bound_secret_paths,
     _sshpass_owns_the_stdin,
     _validate_command_structure,
     render_command,
@@ -1520,18 +1521,36 @@ class TestRedirectReRender332:
         assert render_command(argv) == shlex.join(argv)
         assert render_command(argv, frozenset({"/run/secrets/venya/9"})) == shlex.join(argv)
 
-    def test_gate_rejects_unbound_pair_before_render(self):
-        # Cell (d): order is gate-then-render — a '<' NOT followed by a bound
-        # path raises with NO audit of execution and render never invoked.
+    def test_gate_refuses_unbound_pair_and_stores_the_rendered_text(self):
+        # Cell (d), re-amended for #733 (was `test_gate_rejects_unbound_pair_before_render`).
+        # What this cell exists to prove is UNCHANGED and still asserted below in full: the
+        # structural gate refuses an unbound '<' before anything runs — the ValueError, the
+        # no-sandbox call, the absence of a `command_executed` row and the `command_rejected`
+        # event are the guard's own properties, and removing any of them would be weakening a
+        # check, which is not this change.
+        #
+        # What is replaced is ONE assertion, `render.assert_not_called()`, that spoke about
+        # CALL ORDER rather than outcome. `render_command` is total (no `raise` in its body) and
+        # inert on a refused argv: for this argv, whose '<` is not followed by a bound path, it
+        # returns exactly what `shlex.join` returns — the case cell (c) enumerates one test
+        # above. So "never invoked" was guarding sequence, not safety, and it was the last thing
+        # standing between this file and #733's rule that the refusal row carries the one
+        # rendered text. The stored text is now asserted to BE the rendered text — the
+        # safety-relevant claim — and asserted equal to the join as well, which is what makes
+        # the ordering change provably text-neutral here.
+        argv = ["/usr/bin/sort", "<", "/etc/passwd"]
         audit = MagicMock()
         ex, strategy = self._executor(audit=audit)
-        with patch("executor.executor.render_command") as render:
-            with pytest.raises(ValueError, match="SESSION-BOUND"):
-                ex.execute(["/usr/bin/sort", "<", "/etc/passwd"], [_make_secret("1", b"x")])
-        render.assert_not_called()
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            ex.execute(argv, [_make_secret("1", b"x")])
         strategy.create_sandbox.assert_not_called()
-        args, _kwargs = audit.emit.call_args
+        events = [c[0][0] for c in audit.emit.call_args_list]
+        assert "command_executed" not in events, events
+        args, kwargs = audit.emit.call_args
         assert args == ("command_rejected",)
+        rendered = render_command(argv, _bound_secret_paths({"1"}))
+        assert kwargs["command"] == rendered, f"stored={kwargs['command']!r} rendered={rendered!r}"
+        assert kwargs["command"] == shlex.join(argv), f"unbound-pair refusal text drifted: {kwargs['command']!r}"
 
     def test_single_source_condition_drift_guard(self):
         # Cell (e): the pair condition lives ONCE — in _redirect_pair. The

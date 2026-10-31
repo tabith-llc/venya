@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import socket
 import ssl
 import subprocess  # nosec B404 — CRL capath bootstrap uses `openssl rehash`; same system-tool seam as utils/disk_encryption.py
@@ -38,6 +37,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
+from venya_contract.relay import bound_secret_paths, render_command
 
 from .. import metrics, revocation_snapshot
 from ..ca import CAManager, accepted_csr_curve_names, csr_curve_hint
@@ -353,7 +353,7 @@ class ExecuteRequest(BaseModel):
 
     ``command`` is the argv ``list[str]`` (ticket execution-command-wire-unstructured-
     string #322, ruling Q1=A1) — it relays onward as the structured list; audit
-    stores the rendered display text (``shlex.join``) plus the true argv list.
+    stores the ruled argv rendering (``render_command``) plus the true argv list.
     """
 
     model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
@@ -2067,9 +2067,9 @@ async def execute_command_on_executor(
     # Build request payload via the frozen relay contract (venya_contract) — the
     # server and executor both import these models, so a one-sided field change is
     # an import/type error here, not a runtime 500 at the executor boundary.
-    # command crosses as the structured argv list (ticket #322, ruling Q1=A1);
-    # display text is the rendered shlex.join view, generated for audit only.
-    display_command = shlex.join(req.command)
+    # command crosses as the structured argv list (#322 Q1=A1); the audit display text
+    # is the RULED rendering the executor uses too, not a join (#332 raw pair, #733).
+    display_command = render_command(req.command, bound_secret_paths(s.secret_id for s in secrets))
     payload = RelayRequest(
         session_id=session.id,
         command=req.command,

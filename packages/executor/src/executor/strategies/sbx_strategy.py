@@ -25,7 +25,13 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from venya_contract import ASKPASS_HELPER_PATH
+# `CONTAINER_SECRET_DIR` (where an injected secret appears inside the sandbox) is
+# defined ONCE in the frozen wire contract and imported here — the server wires the
+# same path text for the askpass secret, and the gate's accept set is built from it,
+# so a second literal could drift into a target the gate accepts and the audit
+# display contradicts (#733). Its full rationale, including the noexec-mount note that
+# puts the EXEC'D helper under /usr/local/bin instead, lives beside the constant.
+from venya_contract import ASKPASS_HELPER_PATH, CONTAINER_SECRET_DIR
 
 from ..egress_filter import DEFAULT_ALLOWLIST_PATH
 from .base import InjectionResult, InjectionStrategy, SecretMount
@@ -51,15 +57,6 @@ ENV_DIR_PREFIX = "env_"
 # which cannot share a tmpfs path ("workspace ... was not mounted into the
 # sandbox"). Ephemeral, non-secret, deleted per-run and swept on daemon start.
 WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec
-
-# Where secrets appear inside the sandbox. The shell agent runs as non-root
-# (uid 1000) and /run is root-owned, so the dir must live under the image's
-# 1777 /run/secrets. NOTE: the sbx runtime mounts /run/secrets rw,noexec,nosuid
-# (its own injected-mount default — we pass no mount flag), so only the
-# NON-EXECUTED secret files live here; the exec'd askpass helper is placed at
-# ASKPASS_HELPER_PATH under /usr/local/bin instead (ticket
-# askpass-helper-noexec-mount-conflict).
-CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec
 
 # How long to wait for sandbox commands.
 # Override per-deployment: `VENYA_SBX_TIMEOUT` (seconds), read AT CALL TIME by

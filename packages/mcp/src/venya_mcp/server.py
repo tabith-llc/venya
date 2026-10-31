@@ -272,7 +272,9 @@ async def list_tools() -> list[Tool]:
 # and within such a row each key appears only where that row actually holds it — `duration_ms`
 # exists on the executor forwarder alone, so inventing `duration_ms=N/A` would put a field on
 # the line that the ledger never stored. Values interpolate with `!r`, not `{}`: this block
-# joins its lines with "\n", and the stored text is `shlex.join` output, which wraps a newline
+# joins its lines with "\n", and the stored text is the ruled argv rendering
+# (`render_command` — every element quoted as `shlex.join` quotes it, except a ruled
+# session-bound redirect pair, #733), which wraps a newline
 # in quotes without escaping the character — one stored command would otherwise arrive at the
 # agent as a second forged audit record. `exit_code` keeps three visible states: no clause
 # (never stored), `=None` (stored null — the relay-timeout row's honest "unknown, the caller
