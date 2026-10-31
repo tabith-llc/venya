@@ -882,6 +882,10 @@ class APIClient:
                 error_msg = error_data.get("detail", str(e))
             except (json.JSONDecodeError, Exception):
                 error_msg = str(e)
+            # R-2701: print the HTTP status alongside the detail so a version-
+            # skewed operator reads 405/404, not a bare sentence. Advisory only —
+            # the 401 refresh path below is unchanged.
+            error_msg = f"HTTP {e.response.status_code}: {error_msg}"
 
             if e.response.status_code == 401:
                 if self.config.access_token:
