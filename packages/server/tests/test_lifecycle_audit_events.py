@@ -855,7 +855,7 @@ class TestRoleLifecycle:
         db = MagicMock()
         with patch("core.iam.role_manager.RoleManager.create_role", return_value=role):
             client = TestClient(_roles_app(db), raise_server_exceptions=False)
-            resp = client.post("/api/v1/roles", json={"name": "deploy", "permissions": "read"})
+            resp = client.post("/api/v1/admin/roles", json={"name": "deploy", "permissions": "read"})
         assert resp.status_code == 201
         rows = _by_type(_lifecycle_events(db), "role_created")
         assert len(rows) == 1
@@ -869,7 +869,7 @@ class TestRoleLifecycle:
             patch("core.iam.role_manager.RoleManager.get_role_members", return_value=[]),
         ):
             client = TestClient(_roles_app(db), raise_server_exceptions=False)
-            resp = client.put("/api/v1/roles/5", json={"description": "new desc"})
+            resp = client.put("/api/v1/admin/roles/5", json={"description": "new desc"})
         assert resp.status_code == 200
         rows = _by_type(_lifecycle_events(db), "role_updated")
         assert len(rows) == 1
@@ -887,7 +887,7 @@ class TestRoleLifecycle:
             patch("core.iam.role_manager.RoleManager.get_role_members", return_value=members),
         ):
             client = TestClient(_roles_app(db), raise_server_exceptions=False)
-            resp = client.delete("/api/v1/roles/5")
+            resp = client.delete("/api/v1/admin/roles/5")
         assert resp.status_code == 200
         rows = _by_type(_lifecycle_events(db), "role_deleted")
         assert len(rows) == 1
@@ -898,7 +898,7 @@ class TestRoleLifecycle:
         membership = SimpleNamespace(user_id="carol", role_id=5)
         with patch("core.iam.role_manager.RoleManager.add_member", return_value=membership):
             client = TestClient(_roles_app(db), raise_server_exceptions=False)
-            resp = client.post("/api/v1/roles/5/members", json={"user_id": "carol"})
+            resp = client.post("/api/v1/admin/roles/5/members", json={"user_id": "carol"})
         assert resp.status_code == 201
         rows = _by_type(_lifecycle_events(db), "member_added")
         assert len(rows) == 1
@@ -907,7 +907,7 @@ class TestRoleLifecycle:
         db2 = MagicMock()
         with patch("core.iam.role_manager.RoleManager.remove_member", return_value=True):
             client = TestClient(_roles_app(db2), raise_server_exceptions=False)
-            resp = client.delete("/api/v1/roles/5/members/carol")
+            resp = client.delete("/api/v1/admin/roles/5/members/carol")
         assert resp.status_code == 200
         rows = _by_type(_lifecycle_events(db2), "member_removed")
         assert len(rows) == 1
@@ -921,7 +921,7 @@ class TestRoleLifecycle:
         err = SeparationOfDutiesError("mixed", user_id="carol", role_id=5, tiers={"auditor", "read"})
         with patch("core.iam.role_manager.RoleManager.update_role", side_effect=err):
             client = TestClient(_roles_app(db), raise_server_exceptions=False)
-            resp = client.put("/api/v1/roles/5", json={"permissions": "auditor"})
+            resp = client.put("/api/v1/admin/roles/5", json={"permissions": "auditor"})
         assert resp.status_code == 409
         events = _lifecycle_events(db)
         assert not _by_type(events, "role_updated")
@@ -1072,7 +1072,7 @@ class TestSameTxnPosture:
         db = MagicMock()
         with patch("core.iam.role_manager.RoleManager.create_role", return_value=role):
             client = TestClient(_roles_app(db), raise_server_exceptions=False)
-            assert client.post("/api/v1/roles", json={"name": "ops", "permissions": "read"}).status_code == 201
+            assert client.post("/api/v1/admin/roles", json={"name": "ops", "permissions": "read"}).status_code == 201
         commits = [i for i, c in enumerate(db.method_calls) if c[0] == "commit"]
         event_add_idx = next(i for i, c in enumerate(db.method_calls) if c[0] == "add" and "AuditEvent" in repr(c))
         assert commits and event_add_idx < min(commits)  # added BEFORE the single commit

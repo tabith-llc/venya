@@ -1422,7 +1422,7 @@ def cmd_role_create(client: APIClient, args: Any) -> int:
     """Create a role."""
     try:
         client.post(
-            "/api/v1/roles",
+            "/api/v1/admin/roles",
             json={
                 "name": args.name,
                 "permissions": args.permissions,
@@ -1506,7 +1506,7 @@ def cmd_role_delete(client: APIClient, args: Any) -> int:
     """Delete a role."""
     try:
         role_id = _resolve_role_id(client, args.role_id)
-        client.delete(f"/api/v1/roles/{role_id}")
+        client.delete(f"/api/v1/admin/roles/{role_id}")
         print(f"Role '{args.role_id}' deleted.")
         return 0
     except APIClientError as e:
@@ -1548,7 +1548,7 @@ def cmd_role_add_member(client: APIClient, args: Any) -> int:
     try:
         role_id = _resolve_role_id(client, args.role_id)
         client.post(
-            f"/api/v1/roles/{role_id}/members",
+            f"/api/v1/admin/roles/{role_id}/members",
             json={"user_id": args.user_id},
         )
         print(f"User '{args.user_id}' added to role '{args.role_id}'.")
@@ -1565,7 +1565,7 @@ def cmd_role_remove_member(client: APIClient, args: Any) -> int:
     """Remove user from role."""
     try:
         role_id = _resolve_role_id(client, args.role_id)
-        client.delete(f"/api/v1/roles/{quote(role_id, safe='')}/members/{quote(args.user_id, safe='')}")
+        client.delete(f"/api/v1/admin/roles/{quote(role_id, safe='')}/members/{quote(args.user_id, safe='')}")
         print(f"User '{args.user_id}' removed from role '{args.role_id}'.")
         return 0
     except APIClientError as e:

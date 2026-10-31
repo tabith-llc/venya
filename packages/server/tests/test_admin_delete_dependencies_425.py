@@ -210,7 +210,7 @@ class TestRoleDeleteDependencyMessage:
         generic 'Role deletion failed' assertion wrapper."""
         rid = _seed_credentialed_member(session)
 
-        resp = client.delete(f"/api/v1/roles/{rid}")
+        resp = client.delete(f"/api/v1/admin/roles/{rid}")
 
         assert resp.status_code == 400
         detail = resp.json()["detail"]
@@ -223,7 +223,7 @@ class TestRoleDeleteDependencyMessage:
         session.add(role)
         session.commit()
 
-        resp = client.delete(f"/api/v1/roles/{role.id}")
+        resp = client.delete(f"/api/v1/admin/roles/{role.id}")
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] is True
