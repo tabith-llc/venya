@@ -952,7 +952,7 @@ the line; whether AC1 **holds** is unmeasured — see the stdin note below.)
 an `ssh` hop in the same command — the shape that reads naturally, and the shape that does not work.
 
 **What the limitation is:** `sshpass` reads its **own** stdin, and it runs `ssh` on a dedicated terminal
-it owns, so a `< /run/secrets/venya/<id>` redirect feeds `sshpass`, not `ssh`, and the remote `sudo -S`
+it owns, so a `< /run/secrets/venya/<decimal-id>` redirect feeds `sshpass`, not `ssh`, and the remote `sudo -S`
 prompt is answered by nothing. **A control was added for the worse consequence of that shape; this entry
 claims the control and not its effect.** The sandbox exec call now passes `stdin=subprocess.DEVNULL`
 beyond `timeout=SBX_TIMEOUT` (`#695` AC1), which is verified at the host side by

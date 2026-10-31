@@ -269,7 +269,7 @@ that work without ever holding the keys to do it themselves.**
 CLI and its outputs, failover IDs, and timestamps are illustrative fiction.
 The tool names and call signatures, output renderings, `[REDACTED:<id>]`
 marker format, masked-count line, secret-file mechanism
-(`/run/secrets/venya/<id>`, 0400, zeroed after run), audit attribution, and
+(`/run/secrets/venya/<decimal-id>`, 0400, zeroed after run), audit attribution, and
 session/TTL rules are real and source-matched. The diagrams and the
 animation carry the same split: their lanes and mechanisms come from
 [architecture.md](architecture.md), while the host names, addresses and NAS

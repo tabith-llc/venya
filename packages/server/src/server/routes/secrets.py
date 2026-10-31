@@ -104,7 +104,7 @@ class SecretMetadata(BaseModel):
 # (SecretMetadata extra="allow") — zero schema change. The taxonomy below is
 # the blessed set; unknown names are CUSTOM shapes (warn-not-fail, forward
 # compatible). Usage templates reference the injected sandbox file via
-# {secret_path} (= /run/secrets/venya/<id>) and NEVER the value: a value in
+# {secret_path} (= /run/secrets/venya/<decimal-id>) and NEVER the value: a value in
 # command text persists UNMASKED in the audit log and /proc (the operator
 # rule from architecture.md §Secret lifecycle, enforced here at authoring
 # time — institutionalization rule: never bless a bypass shape).
@@ -172,7 +172,7 @@ def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
             warnings.append(
                 f"shape '{shape}' is DECLARATIVE-ONLY in this release — its consumption mechanism"
                 " has not shipped yet (sudo-stdin awaits the secret-shape-sudo-remote work)."
-                " The secret IS still injected as a file at /run/secrets/venya/<id>, and any tool"
+                " The secret IS still injected as a file at /run/secrets/venya/<decimal-id>, and any tool"
                 " that reads it from a file works today."
             )
 
@@ -191,7 +191,7 @@ def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
                 detail=(
                     f"usage template interpolates the secret value ('{m.group(0)}') — rejected."
                     " Reference the secret only by path: {secret_path} (the injected sandbox"
-                    " file /run/secrets/venya/<id>). A value in command text persists UNMASKED"
+                    " file /run/secrets/venya/<decimal-id>). A value in command text persists UNMASKED"
                     f" in the audit log and /proc. Allowed placeholders: {allowed}."
                 ),
             )
@@ -199,7 +199,7 @@ def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
             if name not in USAGE_PLACEHOLDERS:
                 warnings.append(
                     f"usage template has unknown placeholder '{{{name}}}' — agents may not know"
-                    " how to substitute it. Canonical: {secret_path} = /run/secrets/venya/<id>."
+                    " how to substitute it. Canonical: {secret_path} = /run/secrets/venya/<decimal-id>."
                 )
 
     return warnings

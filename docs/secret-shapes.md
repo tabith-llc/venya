@@ -26,7 +26,7 @@ NOT customizable (Venya guarantees, all shapes):
 
 | Control | Why |
 |---|---|
-| Injection primitives + path | FIXED: 0400 tmpfs file `/run/secrets/venya/<secret_id>` (`packages/executor/src/executor/strategies/sbx_strategy.py`: `CONTAINER_SECRET_DIR`, `SbxStrategy.prepare`, `extra_fds=[]`). The env primitive arrives ONLY via the env-injection mechanism (contract bump + argv ruling). A shape choosing its own injection target (workspace-writable paths etc.) is a security regression — REJECTED. |
+| Injection primitives + path | FIXED: 0400 tmpfs file `/run/secrets/venya/<decimal-id>` (`packages/executor/src/executor/strategies/sbx_strategy.py`: `CONTAINER_SECRET_DIR`, `SbxStrategy.prepare`, `extra_fds=[]`). The env primitive arrives ONLY via the env-injection mechanism (contract bump + argv ruling). A shape choosing its own injection target (workspace-writable paths etc.) is a security regression — REJECTED. |
 | Output filtering (Stage 1 + Stage 2) | core disclosure guarantee; no opt-out, ever |
 | Audit (who / which secret / which command) | attribution requirement; not disableable |
 | Egress deny-by-default | executor-level (`/etc/venya/egress-allowlist.txt`), not shape-level |
@@ -44,7 +44,7 @@ The blessed taxonomy is `BUILTIN_SHAPES` in
 (`ENV_SHAPE_PREFIX`). Everything else is a CUSTOM shape (allowed; see §4).
 `MECHANISM_PENDING_SHAPES` is currently EMPTY: every listed mechanism ships.
 
-| Shape | Consumption | Example command (path canon only — `{secret_path}` = the injected file `/run/secrets/venya/<secret_id>`) |
+| Shape | Consumption | Example command (path canon only — `{secret_path}` = the injected file `/run/secrets/venya/<decimal-id>`) |
 |---|---|---|
 | `ssh-password` | sshpass reads the password file. Available in **balanced** and **permissive** policy; refused under **strict**, and by the empty allowlist (`STRICT_DEFAULT_COMMANDS`), not by a named pattern. Not supported in the same command as a remote `sudo -S` — see [beta-known-limitations.md](beta-known-limitations.md) | `sshpass -f {secret_path} ssh -o StrictHostKeyChecking=accept-new bot@web-server-3 uptime` |
 | `ssh-key` | key material presented to ssh from the file. **If the key is passphrase-protected, the `askpass` secret holding that passphrase must be bound in the SAME call** — the pairing is by what you bind, not by any name convention, and a passphrase-protected key bound alone does not work; see note 1 below the table | `ssh -i {secret_path} -o StrictHostKeyChecking=accept-new bot@web-server-3 uptime` (see the operator note in architecture.md: ssh-carried commands must avoid space-bearing argument traps) |
@@ -52,7 +52,7 @@ The blessed taxonomy is `BUILTIN_SHAPES` in
 | `http-header-file` | header lives INSIDE the file; curl reads the config | `curl -K {secret_path} https://api.example.com/data` — the file carries the `header = …` line |
 | `mysql-defaults` | client option file | `mysql --defaults-file={secret_path} -e "status"` |
 | `ipmi-passfile` | password from file | `ipmitool -H 192.0.2.10 -U admin -f {secret_path} chassis power status` |
-| `askpass` | sudo/git/ssh passphrase prompts answered via the static helper. **Usable alone, and REQUIRED alongside any passphrase-protected `ssh-key` — both secrets in one call**, note 1 below the table | stored value = the passphrase; at execute time the relay wires `GIT_ASKPASS`/`SSH_ASKPASS` to the helper (`routes/executors.py` askpass branch, `venya_contract.relay.ASKPASS_HELPER_PATH`). The command itself needs no shape-specific syntax. Example with a protected key (two secrets, one call): `venya run --secret deploy_key --secret deploy_key_passphrase --executor-id <executor-id> -- ssh -i /run/secrets/venya/deploy_key bot@web-server-3 uptime` |
+| `askpass` | sudo/git/ssh passphrase prompts answered via the static helper. **Usable alone, and REQUIRED alongside any passphrase-protected `ssh-key` — both secrets in one call**, note 1 below the table | stored value = the passphrase; at execute time the relay wires `GIT_ASKPASS`/`SSH_ASKPASS` to the helper (`routes/executors.py` askpass branch, `venya_contract.relay.ASKPASS_HELPER_PATH`). The command itself needs no shape-specific syntax. Example with a protected key (two secrets, one call): `venya run --secret deploy_key --secret deploy_key_passphrase --executor-id <executor-id> -- ssh -i /run/secrets/venya/<decimal-id> bot@web-server-3 uptime` |
 | `sudo-stdin` | sudo's `-S` reads the password from stdin; the session-bound `<` redirect pair is the ruled delivery. Aimed at a **local** `sudo -S` it delivers. Carried through `sshpass`, the same pair feeds `sshpass`'s own stdin instead of `ssh`'s, so a remote `sudo -S` is answered by nothing and the run does not get a password (the sandbox exec call now passes `stdin=subprocess.DEVNULL` — `#695` AC1, a host-side control; whether that EOF reaches the guest's own stdin is not established, so no outcome, timing, or error text is claimed here). Without `sshpass` (key authentication) the redirect does reach the remote `sudo -S`, and that is the ruled delivery for an unattended remote `sudo` | `sudo -S < {secret_path} systemctl restart httpd` (the `<` must be its own argument followed exactly by the bound secret path — `executor.py:_redirect_pair`; do NOT add `-p ''` to remote ssh commands, see architecture.md) |
 | `env:NAME` | value is written into the sandbox env file as `NAME=<value>` before the run (`routes/executors.py` env-shape branch; `RelayEnvVar` contract) | store the key as `env:KUBECONFIG`; then plain `kubectl get pods` works — see the `$` constraint in §5 |
 
@@ -113,7 +113,7 @@ repeatable `--secret`, `--executor-id`, command after `--`):
 
 ```
 venya run --secret my_api_key --executor-id venya-exec-1 -- \
-  curl -K /run/secrets/venya/<id> https://api.example.com
+  curl -K /run/secrets/venya/<decimal-id> https://api.example.com
 ```
 
 The server enforces at store time (`routes/secrets.py:_validate_shape_metadata`):
@@ -128,7 +128,7 @@ The server enforces at store time (`routes/secrets.py:_validate_shape_metadata`)
 ## 4. Template rules (gate-cited)
 
 - **Path references only.** A template may reference `{secret_path}`
-  (= `/run/secrets/venya/<secret_id>`), never the value. The placeholder set
+  (= `/run/secrets/venya/<decimal-id>`), never the value. The placeholder set
   the server currently recognizes is `USAGE_PLACEHOLDERS`
   (`{secret_path}`, `{secret_id}`, `{host}`, `{user}`); anything else warns.
   A value inside command text persists UNMASKED in the audit log and `/proc`

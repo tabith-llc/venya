@@ -26,7 +26,7 @@ to that human.
 
 1. **Never attempt to read, echo, encode, or exfiltrate secret values.**
    They are unreachable by design: injection happens inside the sandbox
-   (`/run/secrets/venya/<secret-id>`), output passes a redaction filter,
+   (`/run/secrets/venya/<decimal-id>`), output passes a redaction filter,
    and network egress is deny-by-default. Attempts are logged and
    attributed to your human.
 2. `[REDACTED:<id>]` markers in output are the system working, not an
@@ -79,7 +79,7 @@ rediscover them:
   carriage return, a lone surrogate, or a newline is refused even when it is buried inside one word
   (the carriage return is named here because the refusal classifies it; ticket
   #722 owns the shipped lists that omitted it). No pipes, no `&&`, no redirects. The single exception: a standalone `<` token
-  immediately followed by `/run/secrets/venya/<id>` for a secret injected in the
+  immediately followed by `/run/secrets/venya/<decimal-id>` for a secret injected in the
   same run — and that exception has a condition of its own: it is refused when
   `sshpass` is the first token, the pair is session-bound, and the remote command behind `ssh` carries
   a `sudo -S` or `sudo --stdin`. The guest shell binds the `<` to the first process it starts, so in

@@ -26,7 +26,7 @@ per-command attribution. See the README's "Who Is Venya For?".
 The agent never receives plaintext: wrapped material routes server →
 executor, is unwrapped host-side by the executor daemon into a per-session
 tmpfs file, and is exposed inside the sbx sandbox at
-`/run/secrets/venya/<id>`; all stdout/stderr pass a Rust redaction
+`/run/secrets/venya/<decimal-id>`; all stdout/stderr pass a Rust redaction
 filter that replaces secret material with `[REDACTED:...]` before it
 returns. A command that `cat`s the secret demonstrates the filter, not a
 bypass (see the [alpha demo](alpha-demo.md)). Exfiltration over the network

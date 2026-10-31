@@ -47,12 +47,12 @@ sees via the `list_secrets` MCP tool.
 ## 3. Run a command that consumes the secret (~1 min)
 
 The executor exposes each injected secret as a file inside the sandbox at
-`/run/secrets/venya/<secret-id>` (tmpfs, zeroed after the run). Use the id
+`/run/secrets/venya/<decimal-id>` (tmpfs, zeroed after the run). Use the id
 from step 1/2:
 
 ```bash
 venya run --secret demo-pass --executor-id <executor-id> -- \
-  /bin/cat /run/secrets/venya/<secret-id>
+  /bin/cat /run/secrets/venya/<decimal-id>
 ```
 
 **Expected output: `[REDACTED:...]`** — the command genuinely read the
@@ -83,7 +83,7 @@ without the operator or the LLM ever touching the target's credentials:
    credential."*
 3. The agent lists executors + secrets (metadata), constructs the command,
    and calls `run_command`. The executor injects the credential inside the
-   sandbox (e.g. `/usr/bin/sshpass -f /run/secrets/venya/<id>
+   sandbox (e.g. `/usr/bin/sshpass -f /run/secrets/venya/<decimal-id>
    /usr/bin/ssh <user>@<target> …`) and the filter scrubs the output.
 4. Watch the agent's context: it contains the package-manager log lines and
    `[REDACTED:...]` where the credential appeared — never the credential.
@@ -99,7 +99,7 @@ builtin table, so the rule is RESOLUTION, not shell-ness (`echo`, `true`,
 invoke (`sshpass` etc.).
 
 **Secret-handling rule for agents and operators:** reference secrets ONLY
-via the injected file (`sshpass -f /run/secrets/venya/<id> …`), NEVER
+via the injected file (`sshpass -f /run/secrets/venya/<decimal-id> …`), NEVER
 inline in the command text (`sshpass -p …`, `--password=…`). Command lines
 persist UNMASKED in audit sinks (output masking does not cover them) and
 leak via `/proc/<pid>/cmdline` + shell history on the target — see

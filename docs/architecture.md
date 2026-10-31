@@ -112,7 +112,7 @@ unauthenticated transport.
    server → executor, never through the caller.
  3. **Inject.** The executor daemon unwraps **host-side**, writes the
     plaintext to a per-session tmpfs staging file (0400, zeroed after the
-    run), and exposes it inside the sbx sandbox at `/run/secrets/venya/<id>`.
+    run), and exposes it inside the sbx sandbox at `/run/secrets/venya/<decimal-id>`.
     Execution sessions are ephemeral. File injection is the default
     consumption shape; a secret's `usage` metadata selects alternatives
     (`ssh-password`, `ssh-key`, `http-netrc`, `http-header-file`,
@@ -141,7 +141,7 @@ audit events, the executor spool, server journals, and the
 text** (`sshpass -p <pw>`, `--password=…`, `echo <token> | …`): it lands in
 those sinks, and on the target it is exposed via `/proc/<pid>/cmdline` and
 shell history. The blessed shape is file injection —
-`sshpass -f /run/secrets/venya/<id> ssh …` — which keeps the secret off
+`sshpass -f /run/secrets/venya/<decimal-id> ssh …` — which keeps the secret off
 every command-line surface. When authoring usage templates for ssh-carried
 commands, mind a second trap: ssh re-joins the remote command's arguments
 with spaces **without re-quoting**, so an empty or space-bearing argument

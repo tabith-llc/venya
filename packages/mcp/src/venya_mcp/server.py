@@ -126,7 +126,7 @@ async def list_tools() -> list[Tool]:
                 "to find secrets for a specific host. When a secret carries a "
                 "'usage' entry, it is the command template for that secret with "
                 "{secret_path} and {secret_id} ALREADY RESOLVED to the injected "
-                "sandbox file (/run/secrets/venya/<id>) — follow it as written; "
+                "sandbox file (/run/secrets/venya/<decimal-id>) — follow it as written; "
                 "fill any {host}/{user} placeholders from your task and the "
                 "secret's metadata. Never inline a secret value."
             ),
@@ -170,7 +170,7 @@ async def list_tools() -> list[Tool]:
                 "the command can access them, but secret values are NEVER returned "
                 "in the output. Output containing secret values is automatically "
                 "redacted with [REDACTED:<id>] markers.\n\n"
-                "Each injected secret is a FILE at /run/secrets/venya/<id> inside "
+                "Each injected secret is a FILE at /run/secrets/venya/<decimal-id> inside "
                 "the sandbox — reference it by path, never inline a value. If the "
                 "secret's metadata carries a 'usage' template, follow it.\n\n"
                 "IMPORTANT: The command runs in a sandbox with restricted network "
