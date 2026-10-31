@@ -110,7 +110,7 @@ class TestRolesCreate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles",
+                "/api/v1/admin/roles",
                 json={
                     "name": "dev",
                     "permissions": "read-write",
@@ -157,7 +157,7 @@ class TestRolesCreate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles",
+                "/api/v1/admin/roles",
                 json={"name": "dev", "permissions": "read"},
             )
             assert resp.status_code == 400
@@ -272,7 +272,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/1",
+                "/api/v1/admin/roles/1",
                 json={
                     "name": "senior-dev",
                     "permissions": "read-write",
@@ -299,7 +299,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/999",
+                "/api/v1/admin/roles/999",
                 json={"name": "new-name"},
             )
             assert resp.status_code == 400
@@ -319,7 +319,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/1",
+                "/api/v1/admin/roles/1",
                 json={"name": "new-name"},
             )
             assert resp.status_code == 400
@@ -341,7 +341,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/1",
+                "/api/v1/admin/roles/1",
                 json={"name": "dev"},
             )
             assert resp.status_code == 400
@@ -372,7 +372,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/1",
+                "/api/v1/admin/roles/1",
                 json={"description": "Updated description"},
             )
             assert resp.status_code == 200
@@ -645,7 +645,7 @@ class TestRoleMemberAdd:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles/1/members",
+                "/api/v1/admin/roles/1/members",
                 json={"user_id": "user1"},
             )
             assert resp.status_code == 201
@@ -668,7 +668,7 @@ class TestRoleMemberAdd:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles/1/members",
+                "/api/v1/admin/roles/1/members",
                 json={"user_id": "user1"},
             )
             assert resp.status_code == 400
@@ -688,7 +688,7 @@ class TestRoleMemberAdd:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles/1/members",
+                "/api/v1/admin/roles/1/members",
                 json={"user_id": "nonexistent"},
             )
             assert resp.status_code == 400

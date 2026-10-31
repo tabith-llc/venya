@@ -188,7 +188,7 @@ class TestSiblingParity:
         admin_event = _events(env.factory, "auditor_sod_denied")[0]
 
         sibling_resp = env.client.post(
-            f"/api/v1/roles/{env.ops_id}/members",
+            f"/api/v1/admin/roles/{env.ops_id}/members",
             json={"user_id": "carol"},  # carol is already auditor-tier
         )
         assert sibling_resp.status_code == 409
