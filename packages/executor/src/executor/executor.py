@@ -676,8 +676,17 @@ class Executor:
             # _prepare_injections.
             env_final = _resolve_env_vars(env_vars, injections, env_override)
 
-            # Audit: credential_injected (env var NAMES only — never values)
-            if self.audit_logger:
+            # Audit: credential_injected (env var NAMES only — never values).
+            # Emitted only when something WAS injected, which is the same emptiness
+            # guard the sibling call in this method's `finally` block already applies
+            # (`revoke_tokens`: `if not secret_ids: return`). An event whose NAME
+            # asserts an injection must not be written for a run that injected nothing:
+            # the payload carried `fd_count: 0` and `secret_ids: []`, and those are the
+            # two fields the MCP audit renderer drops (#709), so the operator-visible
+            # face showed an injection event with no evidence behind it (#731). A run
+            # with no bound secrets still gets its `command_executed` row — that record
+            # makes no injection claim.
+            if self.audit_logger and injections:
                 audit_data = {
                     "command": command_str,
                     "strategy": self.injection_strategy.name(),
