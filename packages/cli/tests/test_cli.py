@@ -540,7 +540,7 @@ class TestAPIClient:
             mock_http.request.return_value = mock_response
             client._http = mock_http
 
-            result = client.put("/api/v1/roles/1", json={"name": "new-name"})
+            result = client.put("/api/v1/admin/roles/1", json={"name": "new-name"})
             assert result == {"updated": True}
             call_args = mock_http.request.call_args
             assert call_args[0][0] == "PUT"

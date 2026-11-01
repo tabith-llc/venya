@@ -139,7 +139,7 @@ class TestRoleMemberRemoveLockoutGuard:
         _join(session, "admin1")
         client = _client(session, caller_id=SECOND_ADMIN)
 
-        resp = client.delete(f"/api/v1/roles/{_admin_role_id(session)}/members/admin1")
+        resp = client.delete(f"/api/v1/admin/roles/{_admin_role_id(session)}/members/admin1")
 
         assert resp.status_code == 409, resp.text
         assert "last admin" in resp.json()["detail"]
@@ -152,7 +152,7 @@ class TestRoleMemberRemoveLockoutGuard:
         _join(session, SECOND_ADMIN)
         client = _client(session, caller_id="admin1")
 
-        resp = client.delete(f"/api/v1/roles/{_admin_role_id(session)}/members/{SECOND_ADMIN}")
+        resp = client.delete(f"/api/v1/admin/roles/{_admin_role_id(session)}/members/{SECOND_ADMIN}")
 
         assert resp.status_code == 200, resp.text
         assert resp.json()["removed"] is True
@@ -167,7 +167,7 @@ class TestRoleMemberRemoveLockoutGuard:
         _join(session, SECOND_ADMIN)
         client = _client(session, caller_id="admin1")
 
-        resp = client.delete(f"/api/v1/roles/{_admin_role_id(session)}/members/admin1")
+        resp = client.delete(f"/api/v1/admin/roles/{_admin_role_id(session)}/members/admin1")
 
         assert resp.status_code == 409, resp.text
         assert "your own admin membership" in resp.json()["detail"]
@@ -180,7 +180,7 @@ class TestRoleMemberRemoveLockoutGuard:
         _join(session, "admin1", role_name="operator")
         client = _client(session, caller_id="admin1")
 
-        resp = client.delete(f"/api/v1/roles/{_role_id(session, 'operator')}/members/admin1")
+        resp = client.delete(f"/api/v1/admin/roles/{_role_id(session, 'operator')}/members/admin1")
 
         assert resp.status_code == 200, resp.text
         assert not _holds(session, "admin1", role_name="operator")
@@ -191,7 +191,7 @@ class TestRoleMemberRemoveLockoutGuard:
         _join(session, "admin1")
         client = _client(session, caller_id="admin1")
 
-        resp = client.delete(f"/api/v1/roles/{_admin_role_id(session)}/members/plainjane")
+        resp = client.delete(f"/api/v1/admin/roles/{_admin_role_id(session)}/members/plainjane")
 
         assert resp.status_code == 404, resp.text
 
@@ -302,7 +302,7 @@ class TestRefusalAuditAndDisclosurePosture:
         _join(session, "admin1")
         client = _client(session, caller_id=SECOND_ADMIN)
 
-        resp = client.delete(f"/api/v1/roles/{_admin_role_id(session)}/members/admin1")
+        resp = client.delete(f"/api/v1/admin/roles/{_admin_role_id(session)}/members/admin1")
 
         assert resp.status_code == 409, resp.text
         rows = _denials(session)
@@ -320,7 +320,7 @@ class TestRefusalAuditAndDisclosurePosture:
 
         bodies = [
             client.delete("/api/v1/admin/users/admin1").json()["detail"],
-            client.delete(f"/api/v1/roles/{_admin_role_id(session)}/members/admin1").json()["detail"],
+            client.delete(f"/api/v1/admin/roles/{_admin_role_id(session)}/members/admin1").json()["detail"],
             client.delete("/api/v1/admin/users/carol").json()["detail"],
         ]
 

@@ -4,17 +4,45 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Route-coverage net: every mounted endpoint must be guard-tagged or allowlisted.
+"""Route-coverage net: every mounted endpoint must be guard-tagged or allowlisted,
+AND every guard-tagged admin route must be REACHABLE to a caller the middleware can
+actually produce.
 
 This is the permanent control that replaced the retired RBACMiddleware path
 matching. A privileged route that neither carries a _venya_guard
 (require_admin / require_role / get_current_user) nor appears in NO_ROLE_ROUTES
 fails the test — "did we forget a route?" can no longer ship silently.
+
+The first assertion class answers "is a guard attached?". It cannot answer the
+question #729 was filed on: a route can carry the real ``require_admin`` and still
+be one the shipped ``SessionMiddleware`` can never hand an admin caller to, because
+the middleware's own reach test is a prefix test plus a named bootstrap set. #730
+AC4 therefore adds the second assertion class below (``TestAdminGuardedRoutesAreReachable``):
+for every mounted route whose dependency tree carries the ``admin`` marker, state
+whether the middleware can produce a caller that satisfies it — ``prefix-reachable``,
+``bootstrap-reachable by name``, or ``neither`` — derived from the shipped objects
+(``SessionMiddleware._is_admin_route``, ``SessionMiddleware.BOOTSTRAP_PATHS`` and the
+paths ``server.app.create_app`` actually mounts), never from a hand-kept list. A route
+in ``neither`` is a guard that can only ever answer for a caller who cannot arrive, and
+that is the shape #729 shipped.
+
+Each of the four new cells has a single-mutation red face, and leg 838 ran all four against a
+throwaway copy of this file (`cp packages/server/tests/test_route_authorization.py
+packages/server/tests/zz838b.py`, mutate one object, `uv run -p 3.14 --directory packages/server
+pytest tests/zz838b.py -q -k <cell>`, then remove the copy and its `.pyc`): point `app` at an app
+that mounts the real `require_admin` at `/api/v1/roles/{role_id}/members` and the census cell is red;
+make `_reachability` skip the `BOOTSTRAP_PATHS` branch and the control cell is red (`init/reset`
+reads `neither`); move that control writer under `/api/v1/admin/` and the sensitivity cell is red (the
+predicate goes silent); name a route in the middleware's path sets that nothing mounts and the drift
+cell is red. Logs: `/tabith/wave44-specs-20261101/838-logs/w4_*.txt` … `w7_*.txt`.
 """
 
+from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 from server.app import create_app
 from server.config import ServerConfig
+from server.dependencies import require_admin
+from server.middleware.auth import SessionMiddleware
 
 
 def _norm(path: str) -> str:
@@ -103,6 +131,113 @@ def _endpoints(app):
             for er in list(r.original_router.routes):
                 if isinstance(er, APIRoute):
                     yield prefix + er.path, er.dependant, include_deps
+
+
+# --- #730 AC4: the reachability class -------------------------------------------------
+
+PREFIX_REACHABLE = "prefix-reachable"
+BOOTSTRAP_REACHABLE = "bootstrap-reachable by name"
+UNREACHABLE = "neither"
+
+
+def _reachability(path: str) -> str:
+    """What the shipped middleware can hand a request at this path, read off the shipped objects.
+
+    ``_is_admin_route`` is called on the class with no instance: its body is
+    ``path.startswith("/api/v1/admin/")`` and touches nothing but its argument, so an
+    instance would add app state this predicate does not have and should not borrow.
+    The bootstrap set is consulted BY NAME first, because that is the order
+    ``dispatch`` enters them (the ``BOOTSTRAP_PATHS`` branch precedes the admin-mTLS
+    branch) and a path in both sets is served by the bootstrap treatment.
+    """
+    if path in SessionMiddleware.BOOTSTRAP_PATHS:
+        return BOOTSTRAP_REACHABLE
+    if SessionMiddleware._is_admin_route(None, path):
+        return PREFIX_REACHABLE
+    return UNREACHABLE
+
+
+def _admin_guarded(app) -> list[str]:
+    """Every mounted path whose dependency tree carries the shipped ``admin`` marker."""
+    out: list[str] = []
+    for path, dependant, include_deps in _endpoints(app):
+        if "admin" in _guards(include_deps + list(dependant.dependencies)):
+            out.append(path)
+    return out
+
+
+def _mounted(app) -> list[str]:
+    return [path for path, _dependant, _deps in _endpoints(app)]
+
+
+def _unreachable_admin_routes(app) -> list[str]:
+    return sorted({p for p in _admin_guarded(app) if _reachability(p) == UNREACHABLE})
+
+
+def _declared_paths_with_no_route(app) -> list[str]:
+    """Paths the middleware's own sets name but the app does not mount — a rename drift
+    guard for the sets AC2's cells drive, derived from the same two objects."""
+    mounted = set(_mounted(app))
+    declared = set(SessionMiddleware.BOOTSTRAP_PATHS) | set(SessionMiddleware.SESSION_REQUIRED_ADMIN_PATHS)
+    return sorted(declared - mounted)
+
+
+class TestAdminGuardedRoutesAreReachable:
+    """#730 AC4 — reachability, not marker presence."""
+
+    def test_no_admin_guarded_route_is_unreachable(self):
+        app = create_app(ServerConfig(recovery_code_pepper="test-pepper-unused")).app
+        guarded = _admin_guarded(app)
+        # Never pass vacuously: an empty census is a traversal failure, not a clean bill.
+        assert guarded, "No admin-guarded route found — the census traversal is broken"
+        violations = _unreachable_admin_routes(app)
+        assert not violations, (
+            f"{len(guarded)} admin-guarded routes censused; these carry require_admin where the "
+            f"middleware can never produce an admin caller:\n" + "\n".join(violations)
+        )
+
+    def test_the_census_reports_the_roles_writers_and_init_reset_differently(self):
+        """AC4's named control, and the proof the predicate is not one bucket: #729 moved the role
+        WRITERS under the admin prefix, and ``/api/v1/init/reset`` was exempted there by NAME. Same
+        marker, two different answers, and a census that returned one value for both would be blind.
+        """
+        assert _reachability("/api/v1/admin/roles/{role_id}/members") == PREFIX_REACHABLE
+        assert _reachability("/api/v1/init/reset") == BOOTSTRAP_REACHABLE
+        assert _reachability("/api/v1/init/reset") != _reachability("/api/v1/admin/roles")
+        # init/reset is reachable ONLY because it is named: the prefix test says no.
+        assert SessionMiddleware._is_admin_route(None, "/api/v1/init/reset") is False
+        assert "/api/v1/init/reset" in SessionMiddleware.BOOTSTRAP_PATHS
+        # And the pre-#729 writer shape is the UNREACHABLE one — the role readers still live here, so
+        # the census has to be able to name it (asserted live in the next cell).
+        assert _reachability("/api/v1/roles/{role_id}/members") == UNREACHABLE
+
+    def test_the_census_fires_on_a_require_admin_writer_outside_the_admin_prefix(self):
+        """Positive control for the cell above: this predicate can return nonzero, and it returns it on
+        exactly the shape #729 shipped — the real ``require_admin`` mounted at a path that is neither
+        under the admin prefix nor named in ``BOOTSTRAP_PATHS``.
+        """
+        app = FastAPI()
+
+        @app.post("/api/v1/roles/{role_id}/members", dependencies=[Depends(require_admin)])
+        def _writer(role_id: int) -> dict:
+            return {"role_id": role_id}
+
+        assert _admin_guarded(app) == ["/api/v1/roles/{role_id}/members"]
+        assert _unreachable_admin_routes(app) == ["/api/v1/roles/{role_id}/members"]
+
+    def test_the_app_mounts_every_path_the_middleware_sets_name(self):
+        """The drift guard for AC2's two mint paths: ``BOOTSTRAP_PATHS`` and
+        ``SESSION_REQUIRED_ADMIN_PATHS`` are consulted as exact strings, so a route rename that leaves
+        a set entry behind turns a session-demanding path into an ordinary admin path with no cell
+        failing anywhere else in this net.
+        """
+        app = create_app(ServerConfig(recovery_code_pepper="test-pepper-unused")).app
+        orphans = _declared_paths_with_no_route(app)
+        assert not orphans, f"middleware path sets name routes the app does not mount: {orphans}"
+        # Positive control on that zero: the same helper flags a name that is not mounted.
+        mounted = set(_mounted(app))
+        assert "/api/v1/admin/recovery-code/reissue" in mounted
+        assert "/api/v1/admin/not-a-real-route-730" not in mounted
 
 
 def test_every_route_is_guarded_or_allowlisted():

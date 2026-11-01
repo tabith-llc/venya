@@ -73,7 +73,7 @@ class TestPathEncoding354:
     def test_role_member_path_encodes_user_id(self):
         client = MagicMock()
         cmd_role_remove_member(client, _args(role_id="5", user_id="a/b"))
-        assert client.delete.call_args[0][0] == "/api/v1/roles/5/members/a%2Fb"
+        assert client.delete.call_args[0][0] == "/api/v1/admin/roles/5/members/a%2Fb"
 
     def test_normal_ids_byte_identical(self):
         # paired negative: the common path has ZERO drift

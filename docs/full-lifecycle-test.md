@@ -105,6 +105,34 @@ provisioning. (Absolute reference counts deliberately do not live in this
 plan: they rot with every merge and nothing enforces their sync; the
 results-file lineage carries them.)
 
+**Guard-crossing rule for middleware and auth-routing cells (ticket #730):** a green suite can be
+silent about the gate. A cell that builds its own `FastAPI()` app and sets
+`app.dependency_overrides[require_admin] = …` — or adds a small middleware class defined inside the
+test file — has replaced the thing it claims to test: the shipped
+`server.middleware.auth.SessionMiddleware` was never in the request path, so no change to it can
+redden that cell. **The rule a cold reader can apply:** any cell that asserts middleware or
+auth-routing behavior MUST `app.add_middleware(SessionMiddleware)` and mount the REAL product
+router. Where an override stays for speed or isolation, it is permitted only if the cell names — in
+its own docstring, and in the shipped string it asserts — which half it is not crossing, and it must
+not credit the middleware with a denial it never performed. Overriding a guard means the cell tests
+the **handler** only, never the gate. `get_db` and identity plumbing are plumbing and say so; a guard
+is not.
+
+Two facts make this more than style. The middleware builds **different identity shapes** for
+different callers (a verified certificate arrives as `{"caller": "admin", …}`, a bearer session as
+`{"user_id": …}`), and the mint handlers read that shape to decide — so a stand-in that hands the
+handler whatever it likes makes a refusal unobservable. And a route can carry the real guard and still
+be one the middleware can never hand an admin caller to: the middleware's reach test is
+`_is_admin_route`, a prefix test, plus `BOOTSTRAP_PATHS`, an exemption by name. That second question
+is reachability, and marker presence does not answer it — the two are separate assertion classes in
+`packages/server/tests/test_route_authorization.py`. The live-face cells this rule produced are
+`test_roles_surface_real_gate_730.py` (the roles writers and readers),
+`test_session_required_mint_paths_730.py` (the two `SESSION_REQUIRED_ADMIN_PATHS` mints) and
+`test_plane_marker_middleware_rf7.py` (the certificate plane markers). Every refusal there is paired
+with the cell that shows the same request LANDS when the missing credential is added — a check that
+passes only the positive case is untested — and each file states the one-object mutation that makes
+its own refusals go red.
+
 **Executor-suite bed authority (ticket #466):** the executor suite runs on two
 beds and neither one is complete on its own. Record which bed produced every
 executor count in the run's results file.

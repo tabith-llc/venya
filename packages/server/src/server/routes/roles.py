@@ -168,7 +168,7 @@ class RoleMemberRemoveResponse(BaseModel):
 
 
 @router.post(
-    "/roles",
+    "/admin/roles",
     response_model=RoleCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
@@ -275,7 +275,7 @@ async def roles_get(
 
 
 @router.put(
-    "/roles/{role_id}",
+    "/admin/roles/{role_id}",
     response_model=RoleGetResponse,
 )
 async def roles_update(
@@ -339,7 +339,7 @@ async def roles_update(
 
 
 @router.delete(
-    "/roles/{role_id}",
+    "/admin/roles/{role_id}",
     response_model=RoleDeleteResponse,
     status_code=status.HTTP_200_OK,
 )
@@ -457,7 +457,7 @@ async def role_members_list(
 
 
 @router.post(
-    "/roles/{role_id}/members",
+    "/admin/roles/{role_id}/members",
     response_model=RoleMemberAddResponse,
     status_code=status.HTTP_201_CREATED,
 )
@@ -513,7 +513,7 @@ async def role_member_add(
 
 
 @router.delete(
-    "/roles/{role_id}/members/{user_id}",
+    "/admin/roles/{role_id}/members/{user_id}",
     response_model=RoleMemberRemoveResponse,
     status_code=status.HTTP_200_OK,
 )

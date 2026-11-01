@@ -110,7 +110,7 @@ class TestRolesCreate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles",
+                "/api/v1/admin/roles",
                 json={
                     "name": "dev",
                     "permissions": "read-write",
@@ -139,7 +139,7 @@ class TestRolesCreate:
             "server.dependencies.RoleManager", return_value=rm
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            resp = client.post("/api/v1/roles", json={"name": "auditor", "permissions": "auditor"})
+            resp = client.post("/api/v1/admin/roles", json={"name": "auditor", "permissions": "auditor"})
             assert resp.status_code == 201
             assert resp.json()["permissions"] == "auditor"
         assert rm.create_role.call_args.kwargs["permissions"] == "auditor"
@@ -157,7 +157,7 @@ class TestRolesCreate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles",
+                "/api/v1/admin/roles",
                 json={"name": "dev", "permissions": "read"},
             )
             assert resp.status_code == 400
@@ -168,7 +168,7 @@ class TestRolesCreate:
         app = _create_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/roles", json={"name": "", "permissions": "read"})
+        resp = client.post("/api/v1/admin/roles", json={"name": "", "permissions": "read"})
         assert resp.status_code == 422
 
     def test_create_special_chars_name(self):
@@ -176,7 +176,7 @@ class TestRolesCreate:
         app = _create_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/roles", json={"name": "my role!", "permissions": "read"})
+        resp = client.post("/api/v1/admin/roles", json={"name": "my role!", "permissions": "read"})
         assert resp.status_code == 422
 
     def test_create_invalid_permissions(self):
@@ -184,7 +184,7 @@ class TestRolesCreate:
         app = _create_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/roles", json={"name": "admin", "permissions": "superadmin"})
+        resp = client.post("/api/v1/admin/roles", json={"name": "admin", "permissions": "superadmin"})
         assert resp.status_code == 422
 
 
@@ -272,7 +272,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/1",
+                "/api/v1/admin/roles/1",
                 json={
                     "name": "senior-dev",
                     "permissions": "read-write",
@@ -299,7 +299,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/999",
+                "/api/v1/admin/roles/999",
                 json={"name": "new-name"},
             )
             assert resp.status_code == 400
@@ -319,7 +319,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/1",
+                "/api/v1/admin/roles/1",
                 json={"name": "new-name"},
             )
             assert resp.status_code == 400
@@ -341,7 +341,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/1",
+                "/api/v1/admin/roles/1",
                 json={"name": "dev"},
             )
             assert resp.status_code == 400
@@ -352,7 +352,7 @@ class TestRolesUpdate:
         app = _create_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.put("/api/v1/roles/1", json={"permissions": "superadmin"})
+        resp = client.put("/api/v1/admin/roles/1", json={"permissions": "superadmin"})
         assert resp.status_code == 422
 
     def test_update_partial(self):
@@ -372,7 +372,7 @@ class TestRolesUpdate:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
-                "/api/v1/roles/1",
+                "/api/v1/admin/roles/1",
                 json={"description": "Updated description"},
             )
             assert resp.status_code == 200
@@ -395,7 +395,7 @@ class TestRolesDelete:
             "server.dependencies.RoleManager", return_value=rm
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            resp = client.delete("/api/v1/roles/1")
+            resp = client.delete("/api/v1/admin/roles/1")
             assert resp.status_code == 200
             data = resp.json()
             assert data["deleted"] is True
@@ -413,7 +413,7 @@ class TestRolesDelete:
             "server.dependencies.RoleManager", return_value=rm
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            resp = client.delete("/api/v1/roles/999")
+            resp = client.delete("/api/v1/admin/roles/999")
             assert resp.status_code == 404
             assert "not found" in resp.json()["detail"]
 
@@ -645,7 +645,7 @@ class TestRoleMemberAdd:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles/1/members",
+                "/api/v1/admin/roles/1/members",
                 json={"user_id": "user1"},
             )
             assert resp.status_code == 201
@@ -668,7 +668,7 @@ class TestRoleMemberAdd:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles/1/members",
+                "/api/v1/admin/roles/1/members",
                 json={"user_id": "user1"},
             )
             assert resp.status_code == 400
@@ -688,7 +688,7 @@ class TestRoleMemberAdd:
         ):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
-                "/api/v1/roles/1/members",
+                "/api/v1/admin/roles/1/members",
                 json={"user_id": "nonexistent"},
             )
             assert resp.status_code == 400
@@ -710,7 +710,7 @@ class TestRoleMemberRemove:
             "server.dependencies.RoleManager", return_value=rm
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            resp = client.delete("/api/v1/roles/1/members/user1")
+            resp = client.delete("/api/v1/admin/roles/1/members/user1")
             assert resp.status_code == 200
             data = resp.json()
             assert data["removed"] is True
@@ -729,7 +729,7 @@ class TestRoleMemberRemove:
             "server.dependencies.RoleManager", return_value=rm
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            resp = client.delete("/api/v1/roles/1/members/nonexistent")
+            resp = client.delete("/api/v1/admin/roles/1/members/nonexistent")
             assert resp.status_code == 404
             assert "not found" in resp.json()["detail"]
 
@@ -765,7 +765,7 @@ class TestAuditorSeparationOfDuties:
             patch("server.dependencies.RoleManager", return_value=rm),
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            return client.post("/api/v1/roles/1/members", json={"user_id": "target"})
+            return client.post("/api/v1/admin/roles/1/members", json={"user_id": "target"})
 
     def _put_role(self, app, rm, body):
         with (
@@ -773,7 +773,7 @@ class TestAuditorSeparationOfDuties:
             patch("server.dependencies.RoleManager", return_value=rm),
         ):
             client = TestClient(app, raise_server_exceptions=False)
-            return client.put("/api/v1/roles/1", json=body)
+            return client.put("/api/v1/admin/roles/1", json=body)
 
     @staticmethod
     def _sod_events(session):
