@@ -205,8 +205,10 @@ left* and never reads as a clean run. The full audit rows (via `venya audit` or
 the admin API) additionally carry the secret ids used; no face, this one
 included, ever carries secret values. Command text is printed escaped, so a
 newline stored inside a command stays data inside one line instead of becoming
-a second record. That `command='…'` is the stored **display** copy
-(`execution_sessions.command`, rendered by `render_command`); the authoritative
+a second record. That `command='…'` is the stored **display** copy on the audit
+row the response returns (`audit_events.fields.command`, rendered by
+`render_command`, which also writes the same text into
+`execution_sessions.command` when the run completes); the authoritative
 argument list is the sibling column `execution_sessions.command_argv`, the argv
 exactly as submitted, and it is not part of this response. The two come from one
 list and agree on the common path — where they can disagree, `command_argv` is
