@@ -235,7 +235,9 @@ async def list_tools() -> list[Tool]:
                 "recent activity or investigate a specific event. Callers with "
                 "admin or an auditor-tier role see the full log; other "
                 "read-write callers see only their own events; plain-read "
-                "callers are denied (403)."
+                "callers are denied (403). The command= text is the stored display copy; "
+                "the authoritative argument list is execution_sessions.command_argv, which "
+                "this response does not carry."
             ),
             inputSchema={
                 "type": "object",

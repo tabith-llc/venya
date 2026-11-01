@@ -167,7 +167,13 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # audit
-    audit_parser = subparsers.add_parser("audit", help="Query audit log")
+    # #733 AC5: this face renders the stored DISPLAY text, so the help names that and points at
+    # the authoritative column instead of leaving the reader to guess which of two texts it got.
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Query audit log (command text is the stored display copy; "
+        "execution_sessions.command_argv is the authoritative argument list)",
+    )
     audit_parser.add_argument("--user", help="Filter by user ID")
     audit_parser.add_argument("--key", help="Filter by secret key")
     audit_parser.add_argument("--start-date", help="Start date (ISO format)")

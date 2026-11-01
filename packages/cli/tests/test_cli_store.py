@@ -336,6 +336,83 @@ class TestCmdStoreReplacedMessage:
             config_file.unlink()
 
 
+class TestCmdStoreFreshId:
+    """#732 AC7: the fresh-store line must show the number the guard accepts at
+    /run/secrets/venya/<id>, on the same face the replace line already did. The
+    response has carried `id` on both paths all along (`SecretCreateResponse`)."""
+
+    def _fresh(self, client, mock_http_response):
+        mock_http = MagicMock()
+        mock_http.request.side_effect = [
+            _make_mock_response(200, {"key_version_id": "v1"}),
+            mock_http_response,
+        ]
+        client._http = mock_http
+        return mock_http
+
+    def test_fresh_store_prints_the_id(self, capsys):
+        """The defect half: replaced=False used to print no number at all."""
+        client, config_file = _make_client()
+        try:
+            self._fresh(
+                client,
+                _make_mock_response(201, {"id": 3, "key": "mykey", "role_names": ["user"], "replaced": False}),
+            )
+            assert cmd_store(client, _make_args()) == 0
+            out = capsys.readouterr().out
+            assert "stored successfully" in out
+            assert "id 3" in out, out
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_id_and_shape_suffix_both_survive(self, capsys):
+        """The new token must not displace the existing (shape: ...) suffix."""
+        client, config_file = _make_client()
+        try:
+            self._fresh(
+                client,
+                _make_mock_response(201, {"id": 12, "key": "mykey", "role_names": ["user"], "replaced": False}),
+            )
+            assert cmd_store(client, _make_args(shape="ssh-key")) == 0
+            out = capsys.readouterr().out
+            assert "(id 12) (shape: ssh-key)" in out, out
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_new_print_carries_the_id_and_not_the_value(self, capsys):
+        """Paired negative on the new print (the iid 713 AC3 / R-2631 no-echo bar):
+        the added token is the row id, never the element value."""
+        client, config_file = _make_client()
+        try:
+            self._fresh(
+                client,
+                _make_mock_response(201, {"id": 3, "key": "mykey", "role_names": ["user"], "replaced": False}),
+            )
+            assert cmd_store(client, _make_args(value="hunter2-demo-only")) == 0
+            captured = capsys.readouterr()
+            assert "id 3" in captured.out
+            assert "hunter2-demo-only" not in captured.out + captured.err
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_refused_store_prints_no_value(self, capsys):
+        """Paired negative, the refusal arm: a refused POST still reaches no value
+        onto either stream, whatever the accepted arm now prints."""
+        client, config_file = _make_client()
+        try:
+            self._fresh(client, _make_error_response(403, "role not in scope for this key"))
+            assert cmd_store(client, _make_args(value="hunter2-demo-only")) == 1
+            captured = capsys.readouterr()
+            assert "hunter2-demo-only" not in captured.out + captured.err
+            assert "id " not in captured.out, "a refused store must not print an id it was never given"
+        finally:
+            client.close()
+            config_file.unlink()
+
+
 class TestStoreShapeFlags:
     """--shape/--usage sugar + server warning surfacing (ticket secret-shape-metadata)."""
 

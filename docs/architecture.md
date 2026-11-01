@@ -132,7 +132,17 @@ unauthenticated transport.
 5. **Audit.** Every step records actor, command string, executor id,
    secret ids (never values), and timestamps. Callers with admin or an
    auditor-tier role querying `get_audit` see the full log; all others
-   see only their own events (enforced server-side).
+   see only their own events (enforced server-side). The **command string**
+   a reader sees is the stored *display* copy: `execution_sessions.command`,
+   rendered by `render_command` from the argv (every element quoted, except a
+   session-bound redirect pair, which is emitted raw so the guest shell can
+   act on it). The **authoritative** text is the sibling column
+   `execution_sessions.command_argv` — the argument list exactly as submitted.
+   The two are derived from one list and agree on the common path; where they
+   can disagree, `command_argv` is the record and the display copy is for
+   reading only. A NULL `command_argv` marks a row written before that column
+   existed, whose arguments are not recoverable. Audit readers receive the
+   display copy; `command_argv` is not part of that response.
 
 **Operator rule (load-bearing).** Step 4's masking covers **stdout/stderr
 only** — the command string itself persists UNMASKED by design (step 5:
