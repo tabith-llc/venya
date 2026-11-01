@@ -33,7 +33,8 @@ response carries `"replaced": true` and the CLI prints "replaced existing".
 A key that exists but is scoped out for you inserts a second row — you can
 neither see nor clobber other roles' secrets.
 
-Note the response: key, roles — **the value is never echoed back**.
+Note the response: key, roles and the numeric id — **the value is never
+echoed back**, and the CLI prints the same id on its success line.
 
 ## 2. Discovery sees metadata only (~30 s)
 
@@ -42,13 +43,18 @@ venya list
 ```
 
 Key names, roles, metadata. No values — this is exactly what an LLM client
-sees via the `list_secrets` MCP tool.
+sees via the `list_secrets` MCP tool. The plain face above shows no id; add
+`--json` for the machine-readable envelope, which carries each secret's `id`.
 
 ## 3. Run a command that consumes the secret (~1 min)
 
 The executor exposes each injected secret as a file inside the sandbox at
-`/run/secrets/venya/<decimal-id>` (tmpfs, zeroed after the run). Use the id
-from step 1/2:
+`/run/secrets/venya/<decimal-id>` (tmpfs, zeroed after the run). The number is
+the `id` printed by step 1 — `venya store` ends its line with `(id 3)` on a
+first store as well as on a replace — and for a secret stored earlier it is the
+`id` field of `venya list --json`. It is the database primary key, never the
+key name: a path built from the name instead of the number is refused. From
+step 1:
 
 ```bash
 venya run --secret demo-pass --executor-id <executor-id> -- \

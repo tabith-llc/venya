@@ -180,6 +180,24 @@ def test_list_secrets_description_pins_resolved_usage() -> None:
     assert "/run/secrets/venya/" in desc
 
 
+def test_get_audit_description_names_the_authoritative_column() -> None:
+    """#733 AC5: this renderer prints the stored DISPLAY text, so an agent reading it
+    cannot tell whether it holds the arguments that ran. The tool description now says
+    which column is authoritative and that this response does not carry it. Rejects a
+    description that reverts to promising "what commands have been executed" with no
+    qualifier — the state where the truthful column was undocumented on every face."""
+    import asyncio
+
+    from venya_mcp.server import list_tools
+
+    tools = asyncio.run(list_tools())
+    by_name = {t.name: t for t in tools}
+    desc = by_name["get_audit"].description
+    assert "command_argv" in desc
+    assert "display" in desc
+    assert "does not carry" in desc
+
+
 # --- list_executors tests ---
 
 

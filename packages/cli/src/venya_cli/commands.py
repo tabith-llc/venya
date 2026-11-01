@@ -512,7 +512,11 @@ def cmd_store(client: APIClient, args: Any) -> int:
                 print(f"Secret '{args.key}' replaced existing (id {resp.get('id')}).")
             else:
                 shape_suffix = f" (shape: {meta_dict['shape']})" if "shape" in meta_dict else ""
-                print(f"Secret '{args.key}' stored successfully{shape_suffix}.")
+                # #732 AC7: the fresh branch carries the id too, the way the replace branch
+                # already did. The number is what the guard accepts at
+                # /run/secrets/venya/<id>, so the operator has it from the first store;
+                # the response already returned it. The id is a key, never a value.
+                print(f"Secret '{args.key}' stored successfully (id {resp.get('id')}){shape_suffix}.")
         return 0
     except APIClientError as e:
         print(f"Failed to store secret: {e}", file=sys.stderr)

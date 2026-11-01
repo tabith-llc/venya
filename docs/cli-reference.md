@@ -237,7 +237,7 @@ venya update-metadata db/password -m purpose=ci -m owner=team-a  # replace metad
 
 ## `venya audit`
 
-Query audit log
+Query audit log (command text is the stored display copy; execution_sessions.command_argv is the authoritative argument list, which is not part of this response)
 
 ```
 venya audit [OPTIONS]
