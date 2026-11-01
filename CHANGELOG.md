@@ -4,8 +4,20 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
-Nothing is pending here at the `v0.1.0beta2` cut: the rows that had landed since `v0.1.0beta1` are
-folded into the `0.1.0beta2` section below. The same emptying marked that earlier cut (`4f6339f`).
+The row below is a change that is not part of `v0.1.0beta2`. It was read against the source face that
+carries it — the behavior it describes is on `dev` today — and a row describes behavior an operator can
+read, never a plan. The section is emptied and re-dated at the cut commit, which is a release act and
+not a documentation act. The rows that had landed since `v0.1.0beta1` are folded into the `0.1.0beta2`
+section below, and the same emptying marked that earlier cut (`4f6339f`).
+
+- **A failed API call from the CLI names the HTTP status it received (`#729`).** The error path built
+  its sentence from the response's `detail` and threw the status number away, so an operator running an
+  older CLI against a newer core read `Method Not Allowed` — or `Unknown error` when the body carried no
+  detail — with nothing to say whether that was a path that moved, a path that never existed, or a
+  caller who is not an admin. The line on stderr now reads `HTTP <status>: <detail>`: the same detail
+  text the caller already got, with the number in front of it. Advisory only. The 401 token-refresh path
+  is unchanged, a caller without a valid session is refused exactly as before, and nothing about what a
+  caller has to send moves.
 
 ## [0.1.0beta2] - 2026-10-28
 
