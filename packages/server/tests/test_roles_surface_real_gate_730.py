@@ -6,7 +6,7 @@
 
 """#730 — the roles surface crossed by the REAL gate, with its paired negatives.
 
-Why this file exists. The cells that exercised ``/api/v1/roles`` replaced the thing they were
+Why this file exists. The role-writer cells in ``test_roles.py`` replaced the thing they were
 supposed to test: ``test_roles.py::_create_test_app`` set ``dependency_overrides[require_admin]`` and
 mounted its own local middleware class, so a change to the shipped gate could land with that whole
 suite green and no cell ever reaching the code that actually refuses. Those cells do useful work —
@@ -23,22 +23,56 @@ a file-backed SQLite, the real ``RoleManager``, the real ``require_admin`` / ``r
 over a real ``sessions`` row.
 
 LAYER, stated per negative (root AGENTS §2 asks for the paired check; #730 asks for the honest one).
-``/api/v1/roles`` is not an admin route — ``SessionMiddleware._is_admin_route`` is
-``path.startswith("/api/v1/admin/")`` — and it matches none of the middleware's executor-identity
-grants (``/api/v1/heartbeat``, ``/api/v1/audit/ingest``, and the
-``^/api/v1/sessions/[^/]+/(secrets/revoke|filter)$`` shape). So each refusal says who refused it:
+#729 moved the five WRITERS to ``/api/v1/admin/roles…`` and left the three READERS where they were, so
+the two halves now sit on opposite sides of one predicate: ``SessionMiddleware._is_admin_route`` is
+``path.startswith("/api/v1/admin/")``, TRUE for the writers and FALSE for the readers. What that
+predicate actually does is posture-dependent, and this stack runs the shipped library default —
+``AdminMTLSConfig.enabled`` is False unless the deployment writes ``VENYA_ADMIN_MTLS__ENABLED=true``,
+and the middleware's admin-certificate branch is entered only when it is True. So each refusal here
+names who refused it, and at which posture:
 
-  MIDDLEWARE   an unauthenticated request dies before any dependency runs, and the ``require_admin``
-               body never executes — proven by a write that stays unwritten.
-  GATE         the five writers refuse a session caller who holds no admin role, and an executor-class
-               caller is refused by the shipped ``require_admin`` / ``require_role`` branches. The
-               executor rows inject identity the way the middleware's own executor grant builds it,
-               because the middleware cannot deliver that identity to this path — crediting the
-               middleware with that denial would claim a check it never performed.
+  MIDDLEWARE   an unauthenticated request dies before any dependency runs — the session branch
+               answers 401, the ``require_admin`` body never executes, proven by a write that stays
+               unwritten. This half holds whatever the path and whatever the posture.
+  GATE         with the certificate branch inert at this posture, the five writers refuse a session
+               caller who holds no admin role, from ``require_admin``'s human-plane lookup, and an
+               executor-class caller is refused by the shipped ``require_admin`` / ``require_role``
+               branches. The executor rows inject identity the way the middleware's own executor
+               grant builds it, because the middleware attaches NO executor identity on a roles path
+               at any posture — its executor grants name ``/api/v1/heartbeat``,
+               ``/api/v1/audit/ingest`` and the
+               ``^/api/v1/sessions/[^/]+/(secrets/revoke|filter)$`` shape only. Crediting the
+               middleware with either denial would claim a check it never performed.
   ROUTE        the three readers answer a caller who holds any membership.
 
-Not covered here: the machine-plane admin certificate (an owner-present physical cell) and anything
-on a VM.
+The other posture — ``admin_mtls`` enabled, a BEARER caller refused on ``/api/v1/admin/roles`` at the
+middleware's own certificate gate with 403 ``Admin access requires valid client certificate`` before
+any dependency runs — is pinned at this face by ``test_roles_writer_admin_prefix_729.py``,
+``TestRealMiddlewareDenials``. It is not re-pinned here: that file's cells replace ``require_admin``
+with an entry marker, so what they observe is the middleware refusing and not the real gate, and this
+file's stack leaves the flag at its default, so it could not observe it at all. Combining the enabled
+posture with the unaltered gate needs certificate material and a served core — #730's AC7, the
+owner-present physical cell.
+
+Not covered here: the machine-plane admin certificate at the ENABLED posture with the real gate
+behind it (an owner-present physical cell, see #730 AC7) and anything on a VM.
+
+RED FACE, stated as a command a stranger can copy (#730 AC3). Put the replaced gate back into a
+scratch copy of THIS file and six of the sixteen cells go red — the five refusals and the other-403
+cell — because a laundered ``require_admin`` admits the non-admin caller and the write lands:
+
+    cp packages/server/tests/test_roles_surface_real_gate_730.py packages/server/tests/zz_ctl.py
+    # insert one line into _stack, before app.add_middleware(SessionMiddleware):
+    #   app.dependency_overrides[server_deps.require_admin] = lambda: {"user_id": "x", "caller": "admin"}
+    uv run -p 3.14 --directory packages/server pytest tests/zz_ctl.py -q
+    rm -f packages/server/tests/zz_ctl.py packages/server/tests/__pycache__/zz_ctl*.pyc
+
+Observed at this leg's re-pathed face (the tip named in the leg-823 report, base `6ea54e81`): **6
+failed, 10 passed**, the six named in
+`/tabith/wave44-specs-20261101/823-logs/redface-control-override-put-back.txt`. The runnable
+pre-change face for this file is `f1eb83d4…` (leg 819's AC3 line); this file is absent from `6ea54e81`
+and its cells there drove ``/api/v1/roles``, so the control above — not a checkout — is what a reader
+of this face can run.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -136,8 +170,10 @@ def _stack(tmp_path, *, with_admin: bool):
     caller holds a real membership, and nobody holds admin. ``with_admin=True`` adds the admin
     membership through the real ``RoleManager``, the way a grant happens in production.
 
-    No ``dependency_overrides`` and no ``RoleManager`` patch appears anywhere in this file: the gate
-    runs as shipped and answers from real rows.
+    No ``dependency_overrides`` and no ``RoleManager`` patch appears in THIS stack: the gate runs as
+    shipped and answers from real rows. (``TestExecutorCallerIsRefusedAtTheGate`` is the file's one
+    override, of ``get_current_user`` alone, and it says so on its own docstring — that stack mounts
+    no middleware because the identity it drives is one no middleware produces on these paths.)
     """
     _sqlite_utc_loader()
     db_path = tmp_path / "surface730.db"
@@ -212,13 +248,30 @@ def _member_pairs(factory) -> set[tuple[str, int]]:
         s.close()
 
 
-# The five writers, each gated by ``require_admin`` (routes/roles.py, pinned by @router decorator).
+# The five writers, each gated by ``require_admin`` (routes/roles.py, pinned by @router decorator),
+# at the ``/api/v1/admin/roles…`` paths #729 moved them to. The ids name that surface on purpose: a
+# cell id reading "roles" while the request goes to "admin/roles" is how a stale path hides.
 WRITERS = [
-    pytest.param("post", "/api/v1/roles", ROLE_BODY, id="POST-roles-create"),
-    pytest.param("put", "/api/v1/roles/{user_role}", {"description": "refused rewrite"}, id="PUT-roles-update"),
-    pytest.param("delete", "/api/v1/roles/{user_role}", None, id="DELETE-roles-delete"),
-    pytest.param("post", "/api/v1/roles/{user_role}/members", {"user_id": TARGET}, id="POST-members-add"),
-    pytest.param("delete", "/api/v1/roles/{user_role}/members/" + TARGET, None, id="DELETE-members-remove"),
+    pytest.param("post", "/api/v1/admin/roles", ROLE_BODY, id="POST-admin-roles-create"),
+    pytest.param(
+        "put",
+        "/api/v1/admin/roles/{user_role}",
+        {"description": "refused rewrite"},
+        id="PUT-admin-roles-update",
+    ),
+    pytest.param("delete", "/api/v1/admin/roles/{user_role}", None, id="DELETE-admin-roles-delete"),
+    pytest.param(
+        "post",
+        "/api/v1/admin/roles/{user_role}/members",
+        {"user_id": TARGET},
+        id="POST-admin-members-add",
+    ),
+    pytest.param(
+        "delete",
+        "/api/v1/admin/roles/{user_role}/members/" + TARGET,
+        None,
+        id="DELETE-admin-members-remove",
+    ),
 ]
 
 
@@ -265,23 +318,23 @@ class TestWritersRefuseANonAdminSessionCaller:
         user_role = _role_id(factory, "user")
         hdr = _as(ADMIN)
 
-        created = client.post("/api/v1/roles", json=ROLE_BODY, headers=hdr)
+        created = client.post("/api/v1/admin/roles", json=ROLE_BODY, headers=hdr)
         assert created.status_code == 201, created.text
         assert created.json()["name"] == "730-new-role"
 
-        renamed = client.put(f"/api/v1/roles/{user_role}", json={"description": "admin rewrite"}, headers=hdr)
+        renamed = client.put(f"/api/v1/admin/roles/{user_role}", json={"description": "admin rewrite"}, headers=hdr)
         assert renamed.status_code == 200, renamed.text
         assert renamed.json()["description"] == "admin rewrite"
 
-        added = client.post(f"/api/v1/roles/{user_role}/members", json={"user_id": ADMIN}, headers=hdr)
+        added = client.post(f"/api/v1/admin/roles/{user_role}/members", json={"user_id": ADMIN}, headers=hdr)
         assert added.status_code == 201, added.text
         assert (ADMIN, user_role) in _member_pairs(factory)
 
-        removed = client.delete(f"/api/v1/roles/{user_role}/members/{TARGET}", headers=hdr)
+        removed = client.delete(f"/api/v1/admin/roles/{user_role}/members/{TARGET}", headers=hdr)
         assert removed.status_code == 200, removed.text
         assert (TARGET, user_role) not in _member_pairs(factory)
 
-        deleted = client.delete(f"/api/v1/roles/{created.json()['id']}", headers=hdr)
+        deleted = client.delete(f"/api/v1/admin/roles/{created.json()['id']}", headers=hdr)
         assert deleted.status_code == 200, deleted.text
         assert "730-new-role" not in _role_names(factory)
 
@@ -289,15 +342,16 @@ class TestWritersRefuseANonAdminSessionCaller:
 class TestMiddlewareRefusesBeforeTheGateRuns:
     """MIDDLEWARE layer. A request with no bearer token never reaches ``require_admin``: the shipped
     ``SessionMiddleware`` answers 401 with its own string, and the write the request asked for stays
-    unwritten. This is also the shape that shows WHY an executor certificate cannot be refused by the
-    middleware on this path — a caller the middleware does not identify is refused here, whatever
-    certificate it presented, because the roles paths are outside its identity grants."""
+    unwritten. The request below is the GATE half of the surface — a writer, now an admin route — and
+    it still dies here because the identity check comes first at every posture; the certificate gate
+    this path now also sits behind is #729's cell, named in the module docstring, and it answers 403
+    with a different sentence."""
 
     def test_unauthenticated_writer_dies_at_401_with_the_write_unlanded(self, tmp_path):
         client, factory, _backend = _stack(tmp_path, with_admin=True)
         before = _role_names(factory)
 
-        resp = client.post("/api/v1/roles", json=ROLE_BODY)
+        resp = client.post("/api/v1/admin/roles", json=ROLE_BODY)
 
         assert resp.status_code == 401, resp.text
         assert resp.json()["detail"] == MISSING_TOKEN
@@ -314,9 +368,10 @@ class TestMiddlewareRefusesBeforeTheGateRuns:
 
 
 class TestExecutorCallerIsRefusedAtTheGate:
-    """GATE layer, and labelled as such on purpose. The middleware grants executor identity on three
-    path families and ``/api/v1/roles`` is not one of them, so no executor request can be driven here
-    end to end without changing product code — which #730 does not do. Identity is therefore injected
+    """GATE layer, and labelled as such on purpose. The middleware's three executor grants name
+    neither roles prefix — not ``/api/v1/roles``, which #729 left to the readers, and not
+    ``/api/v1/admin/roles``, where it moved the writers — so no executor request can be driven here
+    end to end without changing product code, which #730 does not do. Identity is therefore injected
     in exactly the dict shape the middleware's executor branch builds (``caller``/``executor_id``/
     ``presented_serial``/``revoked``, NO ``user_id``) and the REAL gate dependency answers. Overriding
     the identity lookup is not laundering: the cell is about the gate's decision, and ``require_admin``
@@ -432,7 +487,7 @@ class TestGateStringsAreTheShippedOnes:
         finally:
             s.close()
 
-        resp = client.post("/api/v1/roles", json=ROLE_BODY, headers=_as(MEMBER))
+        resp = client.post("/api/v1/admin/roles", json=ROLE_BODY, headers=_as(MEMBER))
         assert resp.status_code == 403, resp.text
         assert resp.json()["detail"] == ADMIN_ROLE_NOT_FOUND
         assert user_role is not None  # the caller's own membership survived; only the admin row went
