@@ -52,8 +52,9 @@ The executor exposes each injected secret as a file inside the sandbox at
 `/run/secrets/venya/<decimal-id>` (tmpfs, zeroed after the run). The number is
 the `id` printed by step 1 — `venya store` ends its line with `(id 3)` on a
 first store as well as on a replace — and for a secret stored earlier it is the
-`id` field of `venya list --json`. It is the database primary key, not the key
-name: `/run/secrets/venya/demo-pass` is refused. From step 1:
+`id` field of `venya list --json`. It is the database primary key, never the
+key name: a path built from the name instead of the number is refused. From
+step 1:
 
 ```bash
 venya run --secret demo-pass --executor-id <executor-id> -- \
