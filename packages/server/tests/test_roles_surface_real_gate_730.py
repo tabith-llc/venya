@@ -31,9 +31,12 @@ predicate actually does is posture-dependent, and this stack runs the shipped li
 and the middleware's admin-certificate branch is entered only when it is True. So each refusal here
 names who refused it, and at which posture:
 
-  MIDDLEWARE   an unauthenticated request dies before any dependency runs — the session branch
-               answers 401, the ``require_admin`` body never executes, proven by a write that stays
-               unwritten. This half holds whatever the path and whatever the posture.
+  MIDDLEWARE   an unauthenticated request dies before any dependency runs, at either posture — the
+               ``require_admin`` body never executes, proven by a write that stays unwritten. Which
+               branch says so is posture-dependent: this stack leaves ``AdminMTLSConfig.enabled`` at
+               its shipped default of False, so the session branch answers 401 ``Missing
+               authentication token``; at the enabled posture the certificate branch is entered
+               first and answers 403 on these writers. The dying is invariant, the 401 is not.
   GATE         with the certificate branch inert at this posture, the five writers refuse a session
                caller who holds no admin role, from ``require_admin``'s human-plane lookup, and an
                executor-class caller is refused by the shipped ``require_admin`` / ``require_role``
@@ -341,11 +344,16 @@ class TestWritersRefuseANonAdminSessionCaller:
 
 class TestMiddlewareRefusesBeforeTheGateRuns:
     """MIDDLEWARE layer. A request with no bearer token never reaches ``require_admin``: the shipped
-    ``SessionMiddleware`` answers 401 with its own string, and the write the request asked for stays
-    unwritten. The request below is the GATE half of the surface — a writer, now an admin route — and
-    it still dies here because the identity check comes first at every posture; the certificate gate
-    this path now also sits behind is #729's cell, named in the module docstring, and it answers 403
-    with a different sentence."""
+    ``SessionMiddleware`` answers for it, and the write the request asked for stays unwritten. The
+    request below is the GATE half of the surface — a writer, now an admin route — and it dies before
+    any dependency runs at either posture, because the identity check is entered first in both. The
+    ANSWER it dies on is posture-specific: this stack leaves ``admin_mtls.enabled`` at its shipped
+    default of False, so the session branch speaks 401 ``Missing authentication token``, and it is
+    that sentence the cell below asserts. At the enabled posture the certificate branch is entered
+    first — ``SessionMiddleware.dispatch`` runs the ``admin_mtls.enabled`` block ahead of its own
+    ``Extract token`` line — so the answer is 403 ``Admin access requires valid client certificate``
+    whatever the bearer header claims, which is ``test_roles_writer_admin_prefix_729.py``'s
+    ``TestRealMiddlewareDenials`` on this same path, not a cell here."""
 
     def test_unauthenticated_writer_dies_at_401_with_the_write_unlanded(self, tmp_path):
         client, factory, _backend = _stack(tmp_path, with_admin=True)
