@@ -166,9 +166,22 @@ proves otherwise.**
   `app.py:241-243`):
   - pinned:   `kek cache: pin=active (mlock <n> bytes, page-rounded to <p> KiB, budget <b> KiB)`
   - unpinned: `kek cache: pin=inactive (mlock failed errno=<e> <text>) -- key material is
-    erased on release but NOT pinned; grant CAP_IPC_LOCK or raise the locked-memory limit`
+    erased on release but NOT pinned; <the action that answer names>`
   The failure branch must be the actionable one: an operator reading the journal can tell which
-  protection they have and what to change.
+  protection they have and what to change. Since #739 the action is read off the kernel's answer:
+  `EPERM` and `EACCES` name `CAP_IPC_LOCK`, `ENOMEM` names the locked-memory limit and the
+  possibility that the range is not mapped, and any other answer says plainly that it is not a
+  permission one. One sentence covering all three sent readers to a capability grant for a refusal
+  that had nothing to do with privileges.
+- The argument shape is part of this policy, because it decides whether the attempt means anything.
+  Both calls go through a ctypes handle that declares `argtypes` and `restype` --
+  `(c_void_p, c_size_t) -> c_int` -- where it is loaded (`_load_system_lib` here, `_load_libc` in
+  the CLI). With no declaration ctypes marshals an integer argument as a C `int`, which on a 64-bit
+  host is the low 32 bits of the buffer address, so the kernel was handed an address that was never
+  the key and refused it (`ENOMEM` at a `0x7f...` buffer on this box). A buffer that happens to sit
+  below 2 GiB passes on either shape, which is why the cells in
+  `packages/core/tests/test_mlock_typed_pointer_739.py` map their buffer above that ceiling, assert
+  it is above it, and read `Locked:` from `/proc/self/smaps` rather than only a return code.
 - Sizing constraint, and it is a real constraint. A served core runs with
   `Max locked memory 8388608 8388608 bytes` (8 MiB, live `/proc/<pid>/limits`, section 10).
   mlock cost is page-rounded: pinning the 32-byte KEK pins a full 4 KiB page. Measurement [I]:
@@ -399,7 +412,11 @@ Consequences the code leg must honour:
    returns nothing).
 3. The "erased, not pinned" under-claim is about PROOF, not about the grant: the grant is there,
    the pinning has never been observed on a served VM, and the runtime test that would have
-   observed it silently skips (section 6.5). Ruling item 5 still binds.
+   observed it silently skips (section 6.5). Ruling item 5 still binds. **#739 added a third half to
+   the same sentence, and it came before both of these:** until the calls declared their argument
+   types, the buffer address reached the kernel as the low 32 bits of it, so no served VM could have
+   reported a pin however the unit file was written. The grant is necessary, the typed argument is
+   necessary, and the served-VM observation is still the missing proof (#739 AC6).
 4. Ruling item 2's authorisation of a core-only grant therefore needs no action -- it is already
    the shipped state.
 
