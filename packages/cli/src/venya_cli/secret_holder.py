@@ -92,15 +92,27 @@ def _round_to_page(size: int) -> int:
 
 
 def _load_libc() -> ctypes.CDLL | None:
-    """Locate the system C library, or ``None`` when it cannot be found."""
+    """Locate the system C library, or ``None`` when it cannot be found.
+
+    The handle declares the argument and return types of both pin calls. With
+    no declaration ctypes marshals the buffer address as a C ``int``, which on
+    a 64-bit host is the low half of the real address, so the kernel was
+    refusing an address that was never the buffer's (#739). Every handle
+    returned here carries ``use_errno=True``, so ``ctypes.get_errno()`` answers
+    for the call that just happened.
+    """
     global _LIB_NAME
-    if _LIB_NAME is not None:
-        return ctypes.CDLL(_LIB_NAME, use_errno=True)
-    found = ctypes.util.find_library("c")
-    if not found:
-        return None
-    _LIB_NAME = found
-    return ctypes.CDLL(_LIB_NAME, use_errno=True)
+    if _LIB_NAME is None:
+        found = ctypes.util.find_library("c")
+        if not found:
+            return None
+        _LIB_NAME = found
+    lib = ctypes.CDLL(_LIB_NAME, use_errno=True)
+    lib.mlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
+    lib.mlock.restype = ctypes.c_int
+    lib.munlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
+    lib.munlock.restype = ctypes.c_int
+    return lib
 
 
 def _pin(data: bytearray) -> None:

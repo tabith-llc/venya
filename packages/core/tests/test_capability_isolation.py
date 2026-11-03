@@ -166,13 +166,20 @@ class TestCapabilityIsolation:
 
     @pytest.fixture(autouse=True)
     def _reset_secure_memory_state(self):
-        """Reset _SYSTEM_LIB cache before each test to avoid test pollution."""
+        """Reset the system-library cache before each test to avoid test pollution.
+
+        #739 moved the cache from the library NAME to the loaded HANDLE, so both
+        faces are reset now: clearing only the name would let a handle built by
+        an earlier test answer for a later one, and the loader would stop
+        exercising the path the cell names.
+        """
         import core.engine.secure_memory as sm
 
-        original = sm._SYSTEM_LIB
+        original = (sm._SYSTEM_LIB, sm._SYSTEM_LIB_HANDLE)
         sm._SYSTEM_LIB = None
+        sm._SYSTEM_LIB_HANDLE = None
         yield
-        sm._SYSTEM_LIB = original
+        sm._SYSTEM_LIB, sm._SYSTEM_LIB_HANDLE = original
 
     def test_secure_memory_requires_linux(self):
         """mlock should fail on non-Linux platforms."""

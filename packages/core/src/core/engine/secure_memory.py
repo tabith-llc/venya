@@ -17,6 +17,7 @@ of a core dump or a hibernation image.
 
 import ctypes
 import ctypes.util
+import errno
 import logging
 import os
 import platform
@@ -32,6 +33,26 @@ logger = logging.getLogger(__name__)
 _PAGE_SIZE_FALLBACK: Final[int] = 4096
 
 _SYSTEM_LIB: str | None = None
+
+#: The loaded handle, cached by HANDLE. Caching only the name made every
+#: second and later call build a fresh ``CDLL`` without ``use_errno=True``,
+#: and ``ctypes.get_errno()`` then answered for whichever handle last wrote
+#: the thread's errno slot -- a refusal reported as ``[Errno 0] Success`` (#739).
+_SYSTEM_LIB_HANDLE: ctypes.CDLL | None = None
+
+#: Which operator action each refusal answer calls for. The permission hint is
+#: printed for a permission answer only: the same sentence sent readers to
+#: ``CAP_IPC_LOCK`` for a refusal that had nothing to grant them (#739).
+_PIN_FIX_HINT: Final[dict[int, str]] = {
+    errno.EPERM: "grant CAP_IPC_LOCK to the service process",
+    errno.EACCES: "grant CAP_IPC_LOCK to the service process",
+    #: Linux reports an unmapped or corrupted range as ENOMEM too, so the
+    #: budget is one of two readings rather than the whole answer.
+    errno.ENOMEM: "raise the locked-memory limit, or check the buffer address is mapped",
+}
+
+#: What the line says when the kernel answered something else, or nothing.
+_PIN_FIX_UNCLAIMED: Final[str] = "this is not a permission answer; the refusal is the call itself"
 
 
 def _page_size() -> int:
@@ -57,15 +78,30 @@ def _locked_memory_budget_kib() -> int | None:
 
 
 def _load_system_lib() -> ctypes.CDLL | None:
-    """Load the system C library for mlock access."""
-    global _SYSTEM_LIB
-    if _SYSTEM_LIB is not None:
-        return ctypes.CDLL(_SYSTEM_LIB)
-    lib_name = ctypes.util.find_library("c")
-    if lib_name:
+    """Load the system C library for mlock access, once per process.
+
+    The handle declares ``argtypes`` and ``restype`` for both calls. With no
+    declaration ctypes marshals the buffer address as a C ``int``, and on a
+    64-bit host that is the low half of the real address: the kernel refuses
+    the range and the pin never engages (#739). Declaring it here means every
+    call site keeps passing the plain ``addressof`` integer and still gets a
+    pointer, and a new call site cannot forget it.
+    """
+    global _SYSTEM_LIB, _SYSTEM_LIB_HANDLE
+    if _SYSTEM_LIB_HANDLE is not None:
+        return _SYSTEM_LIB_HANDLE
+    if _SYSTEM_LIB is None:
+        lib_name = ctypes.util.find_library("c")
+        if not lib_name:
+            return None
         _SYSTEM_LIB = lib_name
-        return ctypes.CDLL(_SYSTEM_LIB, use_errno=True)
-    return None
+    lib = ctypes.CDLL(_SYSTEM_LIB, use_errno=True)
+    lib.mlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
+    lib.mlock.restype = ctypes.c_int
+    lib.munlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
+    lib.munlock.restype = ctypes.c_int
+    _SYSTEM_LIB_HANDLE = lib
+    return lib
 
 
 def secure_mlock(data: bytearray) -> None:
@@ -375,12 +411,15 @@ class KekCache:
                 f"{budget} KiB" if budget is not None else "unlimited",
             )
         else:
+            hint = _PIN_FIX_UNCLAIMED
+            if self.pin_errno is not None:
+                hint = _PIN_FIX_HINT.get(self.pin_errno, _PIN_FIX_UNCLAIMED)
             logger.info(
                 "kek cache: pin=inactive (mlock failed errno=%s %s) -- key material is "
-                "erased on release but NOT pinned; grant CAP_IPC_LOCK or raise the "
-                "locked-memory limit",
+                "erased on release but NOT pinned; %s",
                 self.pin_errno,
                 self.pin_reason,
+                hint,
             )
 
     @property
