@@ -231,6 +231,54 @@ class TestResolutionOrderFollowsRuling496:
         probes.clusters(_row("14", "offline"), _row("16", "online"))
         assert str(_get_pg_data_directory(SHIPPED_SOCKET_DSN)) == "/var/lib/postgresql/16/main"
 
+    def test_the_manager_beats_an_installed_cluster_at_the_same_time(self, probes, tmp_path):
+        """Precedence itself, not sort order: all three sources answer at once, and the
+        cluster manager's answer is the one the resolver returns.
+
+        Every other cell here offers the resolver one source at a time — the cells that plant
+        installed directories stub both probes absent, and the cells with a probe answer run
+        against an empty root — so ``_from_derived_glob()`` returned None precisely whenever
+        another source had something to say, and the ORDER between the sources was unobservable.
+        This fixture gives each of the three a different path simultaneously: the manager's
+        ``17``, the running server's ``19``, and an installed ``14/main`` under the root that the
+        glob would hand back first. A resolver that consulted the glob before the probes answers
+        ``14/main`` here, and that is the whole point of the cell.
+        """
+        probes.install()
+        installed = _cluster(tmp_path / "pgdata", "14")
+        probes.clusters(_row("17", "online", "/srv/cluster/17/main"))
+        probes.show_answer("/srv/running-server/19/main")
+        answer = _get_pg_data_directory(SHIPPED_SOCKET_DSN)
+        assert str(answer) == "/srv/cluster/17/main", (
+            f"the manager must win when the glob and the server also answer; got {answer}, "
+            f"glob would say {installed}, server would say /srv/running-server/19/main"
+        )
+
+    def test_that_same_fixture_offers_the_glob_a_different_path(self, probes, tmp_path):
+        """The discriminator for the cell above: each source, asked alone on this same
+        fixture, names a DIFFERENT path.
+
+        Without it the precedence cell could be made green by a fixture in which only one source
+        ever had an answer — the exact hole the cells above have — because "the manager won" and
+        "the manager was the only candidate" print identically. So assert the glob answers here at
+        all, and assert it disagrees with the manager and with the resolver's final choice.
+        """
+        probes.install()
+        installed = _cluster(tmp_path / "pgdata", "14")
+        probes.clusters(_row("17", "online", "/srv/cluster/17/main"))
+        probes.show_answer("/srv/running-server/19/main")
+        from_glob = de._from_derived_glob()
+        from_manager = de._from_cluster_manager()
+        from_server = de._from_running_server(SHIPPED_SOCKET_DSN)
+        assert from_glob == installed, "the fixture must give the glob source a real answer"
+        assert from_manager == Path("/srv/cluster/17/main"), "and the manager a different one"
+        assert from_server == Path("/srv/running-server/19/main"), "and the server a third"
+        assert (
+            len({from_glob, from_manager, from_server}) == 3
+        ), f"three sources, three distinct paths expected, got {from_glob} / {from_manager} / {from_server}"
+        assert _get_pg_data_directory(SHIPPED_SOCKET_DSN) == from_manager
+        assert _get_pg_data_directory(SHIPPED_SOCKET_DSN) != from_glob
+
     def test_two_online_clusters_are_not_resolved_by_guessing(self, probes):
         """R2 applied to a read: an ambiguous manager answer is no answer."""
         probes.install()
