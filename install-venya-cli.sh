@@ -97,6 +97,10 @@ fi
 info "Installing Venya CLI for $(id -un)..."
 
 # --- uv (per-user) ---
+# #744: keep the PATH this script was handed, before the export below. The
+# login-shell probe in the verify section answers with it, so the check reads
+# the operator's shell and not this process's own edit.
+VENYA_PATH_INHERITED="$PATH"
 export PATH="$HOME/.local/bin:$PATH"
 venya_install_uv
 
@@ -130,17 +134,60 @@ if [ "$INSTALL_MCP" != "no" ]; then
 fi
 rm -rf "$EXTRACT_DIR"
 
+# --- Login-shell probe (#744) ---
+# The export above puts ~/.local/bin on THIS process's PATH, so a bare
+# `command -v` measures the installer, not the operator: it answers "found"
+# even in a shell that can never resolve the name. This probe re-runs bash as a
+# LOGIN shell with the PATH this script inherited, so the answer is what a new
+# terminal sees. A non-bash operator shell reads its own startup file; the
+# remedy text below names the line for that case too.
+# Prints the resolved path; prints nothing when the login shell resolves none.
+venya_login_shell_path() {
+    local _name="$1" _found
+    _found="$(PATH="$VENYA_PATH_INHERITED" bash -lc 'command -v -- "$1"' _ "$_name" 2>/dev/null | tail -n 1 || true)"
+    # A startup file that prints can land anything in _found: only an executable
+    # path counts as a resolution.
+    if [ -n "$_found" ] && [ -x "$_found" ]; then
+        printf '%s' "$_found"
+    fi
+}
+
+# Reachable remedy: this sits on the branch the PATH export cannot mask.
+# uv tool update-shell edits the operator's login files, so it is named for them
+# to run and is never run here.
+venya_print_path_remedy() {
+    warn "Shims installed, but a new login shell does not resolve:$1"
+    warn "Add this line to your shell startup file (~/.profile or ~/.bashrc for bash,"
+    warn "~/.zshrc for zsh, ~/.config/fish/config.fish for fish):"
+    warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    warn "Then open a new terminal. Or run this, which edits those files for you:"
+    warn "  uv tool update-shell"
+}
+
 # --- Verify ---
-if ! command -v venya > /dev/null 2>&1; then
-    error "venya shim not found on PATH after install."
+# Two distinct facts: the shim exists (install worked), and a fresh login shell
+# resolves the name (the operator can type it). Only the second one is reported
+# as "installed:".
+LOGIN_UNRESOLVED=""
+VENYA_SHIM="$(command -v venya 2>/dev/null || true)"
+if [ -z "$VENYA_SHIM" ]; then
+    error "venya shim not found on PATH after install — uv tool install created no shim."
     error "Ensure $HOME/.local/bin is on your PATH (run: uv tool update-shell)"
     exit 1
 fi
-venya --help > /dev/null
-info "venya CLI installed: $(command -v venya)"
+"$VENYA_SHIM" --help > /dev/null
+VENYA_LOGIN_SHIM="$(venya_login_shell_path venya)"
+if [ -n "$VENYA_LOGIN_SHIM" ]; then
+    info "venya CLI installed: $VENYA_LOGIN_SHIM (proven in a login shell)"
+else
+    LOGIN_UNRESOLVED="$LOGIN_UNRESOLVED venya"
+    info "venya CLI shim installed at $VENYA_SHIM — a login shell does NOT resolve 'venya' yet."
+fi
 if [ "$INSTALL_MCP" != "no" ]; then
-    if ! command -v venya-mcp > /dev/null 2>&1; then
-        error "venya-mcp shim not found on PATH after install."
+    MCP_SHIM="$(command -v venya-mcp 2>/dev/null || true)"
+    if [ -z "$MCP_SHIM" ]; then
+        error "venya-mcp shim not found on PATH after install — uv tool install created no shim."
+        error "Ensure $HOME/.local/bin is on your PATH (run: uv tool update-shell)"
         exit 1
     fi
     # No --help probe: venya-mcp is a stdio server (would block). Import check instead.
@@ -153,11 +200,21 @@ if [ "$INSTALL_MCP" != "no" ]; then
         # #396 contract: claims gate on verification — the installed claim
         # prints only after the import check actually ran (and passed; the
         # error + exit path above fails loud otherwise).
-        info "venya-mcp installed: $(command -v venya-mcp)"
+        MCP_LOGIN_SHIM="$(venya_login_shell_path venya-mcp)"
+        if [ -n "$MCP_LOGIN_SHIM" ]; then
+            info "venya-mcp installed: $MCP_LOGIN_SHIM (proven in a login shell)"
+        else
+            LOGIN_UNRESOLVED="$LOGIN_UNRESOLVED venya-mcp"
+            info "venya-mcp shim installed at $MCP_SHIM — a login shell does NOT resolve 'venya-mcp' yet."
+        fi
     else
         # Absent interpreter = NOT verified: disclose degraded, no claim.
         warn "venya-mcp import check SKIPPED - interpreter missing at $MCP_PY; venya-mcp install is UNVERIFIED."
     fi
+fi
+
+if [ -n "$LOGIN_UNRESOLVED" ]; then
+    venya_print_path_remedy "$LOGIN_UNRESOLVED"
 fi
 
 # --- FIDO2 access check (Linux: /dev/hidraw perms; macOS: IOKit HID, no setup) ---
@@ -194,6 +251,13 @@ echo "============================================"
 echo "  Venya CLI installed for $(id -un)"
 echo "============================================"
 echo ""
+if [ -n "$LOGIN_UNRESOLVED" ]; then
+    # Stated before the commands, not after: an operator whose shell cannot
+    # resolve the name would meet "command not found" on the first line below.
+    echo "The day-one commands need a shell that resolves 'venya' — add the PATH line above,"
+    echo "then open a new terminal before typing any of them."
+    echo ""
+fi
 echo "Day-one commands:"
 echo "  venya setup <core-host>    # save the server URL + install the core CA cert (fingerprint printed for verification)"
 echo "  venya init <user-id>       # create the first admin account (FIDO2 key required)"
