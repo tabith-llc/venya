@@ -200,6 +200,11 @@ def parse_cites(text: str, files: dict[str, list[str]] | None = None) -> list[Ci
     docstring for why inference measured 10/105 here and why guessing was worse than refusing.
     A token absent from the manifest is returned with ``symbol=None`` and ``kind='unmanifested'``,
     which the guard turns RED: a new cite on a signed page must be a decided cite.
+
+    Region decides the role. A manifest pin printed at or below ``DATED_BLOCK_FIRST_PAGE_LINE`` is
+    re-kinded ``dated`` here, once, at the point every consumer already reads: ``resolve()`` and the
+    ``--write`` plan both skip anything that is not ``pin``, so the digits of a record are never
+    rewritten anywhere, while ``check_symbols`` still holds it to the symbol rule.
     """
     manifest = _load_manifest()
     DATED_BLOCK_FIRST_PAGE_LINE = manifest.DATED_BLOCK_FIRST_PAGE_LINE
@@ -209,6 +214,7 @@ def parse_cites(text: str, files: dict[str, list[str]] | None = None) -> list[Ci
     files = files if files is not None else _tracked_files()
     out: list[Cite] = []
     for lineno, line in enumerate(text.split("\n"), 1):
+        in_dated_block = lineno >= DATED_BLOCK_FIRST_PAGE_LINE
         for m in CITE.finditer(line):
             token = m.group(0)
             path = m.group("path")
@@ -218,6 +224,15 @@ def parse_cites(text: str, files: dict[str, list[str]] | None = None) -> list[Ci
             entry = MANIFEST.get(token)
             if entry is not None:
                 cpath, symbol, occ, kind = entry
+                if in_dated_block and kind == "pin":
+                    # A coordinate printed below the dated boundary is a RECORD of what a named past
+                    # pass measured, not a claim about today's lines. One token can hold both roles —
+                    # `install-venya-executor.sh:558` is a live entry at page 247 and part of a "did
+                    # not move" roster at page 1209 — so the region decides, not the token. Rewriting
+                    # the roster's digit would assert that past pass measured the current tree. The
+                    # boundary is the constant the manifest already declares and the ambiguous-path
+                    # guard already honours; it is not written a second time anywhere.
+                    kind = "dated"
                 out.append(Cite(cpath, start, end, symbol, lineno, occ, kind, printed=token))
                 continue
             if token in DATED_OVERRIDES:
@@ -225,7 +240,7 @@ def parse_cites(text: str, files: dict[str, list[str]] | None = None) -> list[Ci
                     Cite(matched[0] if len(matched) == 1 else path, start, end, None, lineno, 1, "dated", printed=token)
                 )
                 continue
-            dated = lineno >= DATED_BLOCK_FIRST_PAGE_LINE
+            dated = in_dated_block
             out.append(
                 Cite(
                     matched[0] if len(matched) == 1 else path,
@@ -284,7 +299,11 @@ def check_symbols(cites: list[Cite], files: dict[str, list[str]]) -> list[str]:
 
 
 def generate(text: str | None = None) -> str:
-    """Rewrite every coordinate to the line its symbol names. Prose is untouched.
+    """Rewrite every PINNABLE coordinate to the line its symbol names. Prose is untouched.
+
+    A cite inside the dated block keeps its digits by design (``parse_cites`` re-kinds it and
+    ``resolve`` answers None for anything that is not a pin): those numbers record what a named past
+    pass measured, and re-pinning them would attribute today's line numbers to that pass.
 
     Raises ``ValueError`` when a cite cannot be resolved — a pin is never guessed, and a
     generator that silently leaves a stale number is the defect this replaced.
