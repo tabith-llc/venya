@@ -34,6 +34,20 @@ suite could see it, because nothing read the page: `git grep -l 'beta-known-limi
 
 Provenance law binds the pin block: if `HEAD` has moved past the pinned sha in an affected file, the
 pins read UNVERIFIED, not green. That is `test_pinned_sha_is_not_yet_current_is_honest`, below.
+
+**Co-landing procedure (learned the expensive way at #675/#745, leg 918).** A suite run at one branch tip proves
+that tip alone. Sibling branches here must be run TOGETHER, because the machinery in this file reads generated
+state that another branch legitimately rewrites. `merge-tree` rc 0 is a text splice, not a test. The check, from a
+venue whose venv matches the tree it is running:
+
+    git fetch --force origin refs/heads/<sibling-branch>:refs/remotes/origin/<sibling-branch>
+    git checkout -B tmp-coface-<leg> <this-tip> && git merge --no-edit origin/<sibling-branch>
+    uv run -p 3.14 --directory packages/server pytest tests/test_beta_terms_cite_interlock.py -q   # both orders
+    git switch <this-branch> && git branch -D tmp-coface-<leg>          # explicit names, never --prune
+
+Measured at `5cf9cf86` against `7a804334`: 19 passed forward, 19 passed in reverse, and the whole `server` suite at
+the joint face 3158 passed / 0 failed / 30 skipped door OFF. The in-suite carrier for the class is
+`test_a_shipped_manifest_rekey_cannot_break_these_cells`, which needs no second branch to prove its point.
 """
 
 from __future__ import annotations
