@@ -99,16 +99,28 @@ class TestGetPgDataDirectory:
         result = _get_pg_data_directory("postgresql://user@203.0.113.5:5432/venya")
         assert result is None
 
-    def test_returns_none_for_localhost_no_existing_path(self):
-        """Returns last fallback path even if it doesn't exist (fresh install)."""
-        # Patch all candidates to not exist
-        with patch("server.utils.disk_encryption.Path") as mock_path_cls:
-            mock = MagicMock()
-            mock.exists.return_value = False
-            mock_path_cls.side_effect = lambda p: mock
-            result = _get_pg_data_directory("postgresql://user@localhost/venya")
-            # Returns the last fallback (/var/lib/postgresql)
-            assert result == mock
+    def test_returns_the_root_when_no_cluster_can_be_resolved(self, tmp_path, monkeypatch):
+        """A local DSN with nothing installed to find still answers the cluster root.
+
+        Re-anchored for #740, same intent, different mechanism. This cell used to
+        fake the whole ``Path`` class so every candidate read as missing; the
+        resolver now consults the cluster manager and the running server BEFORE it
+        looks at any path, so faking ``Path`` alone left the answer to whatever
+        this host happens to be running — a live-host read inside a unit cell
+        (measured here: the box carries one online cluster, 17/main, so the old
+        fake passed on the machine's answer rather than on its own fixture).
+        The probes are now silenced the way #740's cells silence them — an empty
+        PATH — and the cluster root is a tmp dir with nothing under it, so the
+        assertion is about the fallback.
+        """
+        emptybin = tmp_path / "emptybin"
+        emptybin.mkdir()
+        root = tmp_path / "pgdata"
+        root.mkdir()
+        monkeypatch.setenv("PATH", str(emptybin))
+        monkeypatch.setattr(disk_encryption_module, "_PG_CLUSTER_ROOT", root)
+        result = _get_pg_data_directory("postgresql://user@localhost/venya")
+        assert result == root, "the last resort is the cluster root, never a guessed version directory"
 
 
 class TestFindMountPoint:
