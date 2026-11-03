@@ -243,7 +243,14 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
 #: measured at a named past commit — re-pinning it would assert that commit had today's lines.
 #: ``dated`` means: the guard checks the SYMBOL still exists (so the record stays about a real
 #: thing), but the number is never rewritten.
-DATED_BLOCK_FIRST_PAGE_LINE = 660
+#:
+#: The value is the first line of the page's own maintenance heading, `## How to read an entry, and
+#: how this list is maintained`, and the interlock's boundary cell re-derives it from the page on
+#: every run — so a re-flow that moves the heading reddens a cell instead of silently mis-scoping
+#: the region. It read 660 until the #675 scope leg: that line sits inside a live entry, and the
+#: only coordinate in the 414 lines between there and here was a live carrier whose digits the old
+#: value exempted from re-pinning. The exemption started too early, in the file's own ordering.
+DATED_BLOCK_FIRST_PAGE_LINE = 1074
 
 #: Tokens deliberately outside the pin set, with the reason. Anything else that is neither
 #: manifest nor dated makes the guard RED rather than being quietly skipped.

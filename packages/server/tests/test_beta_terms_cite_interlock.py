@@ -23,7 +23,9 @@ suite could see it, because nothing read the page: `git grep -l 'beta-known-limi
   *"claim-truth now, numbers re-pinned at the cut commit with a checked assertion"*
   (2026-10-18), and `dev` moved twice while the page was being corrected — so a hand-pinned number is
   a number re-dug at every merge. The **generator** (`packages/server/scripts/gen_beta_terms_pins.py`)
-  is what re-pins them, and it runs **at the cut commit**. When it has run, the pinned-at sha below is
+  is what re-pins them — the **live** coordinates, never the digits inside the dated pass-record block
+  below `DATED_BLOCK_FIRST_PAGE_LINE`, which are a history a named commit was measured at and are held
+  to the symbol rule only — and it runs **at the cut commit**. When it has run, the pinned-at sha below is
   the current one and the strict cell becomes live; until then that cell reports the pins as
   UNVERIFIED rather than dressing a stale number up as green.
 - **Never asserted:** the page's prose. Whether a limitation still describes the shipped tree is a
@@ -347,7 +349,12 @@ def test_pins_match_the_tree_they_claim_at_when_pinned() -> None:
     """Strict assertion: live ONLY when PINNED_AT names a real run of the generator.
 
     This is the cell that becomes the cut-commit gate. It reddens if a merge moved a cited symbol
-    after the pin, because then the page's numbers describe a commit that is no longer HEAD.
+    after the pin, because then the page's numbers describe a commit that is no longer HEAD — and it
+    is held to the same boundary the generator is. A cite at or below ``DATED_BLOCK_FIRST_PAGE_LINE``
+    is a record of what a named past pass measured, so its digits are not a claim about today's tree
+    and are not compared against it; its SYMBOL is still asserted, by
+    ``test_every_cite_is_manifested_and_its_symbol_exists``, which is the symbol rule the dated block
+    has always been under.
     """
     if PINNED_AT is None:
         print("strict pin check deferred: generator has not run (see PINNED_AT)")
@@ -360,6 +367,8 @@ def test_pins_match_the_tree_they_claim_at_when_pinned() -> None:
     for c in gen.parse_cites(_text(), files):
         if not c.symbol or c.path not in files:
             continue
+        if c.kind != "pin":
+            continue  # a dated record's digits are history; its symbol is checked, its line is not
         lines = files[c.path]
         # #684-class resolver defect: this took the FIRST line containing the symbol, while the
         # generator takes the c.occurrence-th one. Three pin rows declare occurrence >= 2, so the
@@ -441,3 +450,151 @@ def test_occurrence_2_pin_resolves_to_the_second_line_and_first_line_pin_reddens
     first_match = next((i for i, ln in enumerate(lines, 1) if cite.symbol in ln), None)
     assert first_match == 2, "the old resolver's answer is what makes this a real paired negative"
     assert first_match != cite.start
+
+
+# --------------------------------------------------------------------------------------
+# The dated block is a record, not a claim (#675 machinery defect, found at #745's gate).
+#
+# One token can hold two roles on this page: `install-venya-executor.sh:558` is a LIVE entry at
+# page 247 ("the executor installer rewrites this key on every run") and part of a dated
+# "did not move" roster at page 1209. The manifest keys by token, so it cannot tell them apart,
+# and a blanket re-pin rewrites history: turning the roster's `558` into today's line asserts that
+# a named past pass measured the current tree. The boundary is not a new class —
+# `DATED_BLOCK_FIRST_PAGE_LINE` is declared in the manifest and already honoured by the
+# ambiguous-path cell above; the pin machinery alone ignored it. These cells scope it by that one
+# constant and prove the scope has bounds: the same token, above the boundary, is still re-pinned.
+# --------------------------------------------------------------------------------------
+
+_MOVED_TOKEN = "install-venya-executor.sh:558"
+_MOVED_SYMBOL = "printf 'relay_client_ids = "
+_LIVE_PAGE_LINE = 247
+_RECORD_PAGE_LINE = 1209
+_SYMBOL_LINE_IN_FAKE_TREE = 609
+
+
+def _files_with_symbol_at(line: int) -> dict[str, list[str]]:
+    """A tracked-file map where the cited symbol sits on ``line`` and nowhere else."""
+    lines = [f"    filler line {i}" for i in range(1, line)]
+    lines.insert(line - 1, f'    {_MOVED_SYMBOL}"%s-relay"]\\n\' "$CORE_HOSTNAME"')
+    lines.append("    trailer")
+    return {"install-venya-executor.sh": lines}
+
+
+def _one_token_two_roles_page() -> str:
+    """A page carrying the SAME coordinate once as a live entry and once inside the record."""
+    lines = ["plain prose"] * 1300
+    lines[_LIVE_PAGE_LINE - 1] = f"- the installer rewrites this key on every run (`{_MOVED_TOKEN}`)"
+    lines[_RECORD_PAGE_LINE - 1] = f"- the cites that were re-read and did not move: … and `{_MOVED_TOKEN}`"
+    return "\n".join(lines)
+
+
+def _change_report(before: str, after: str) -> list[int]:
+    return [i for i, (a, b) in enumerate(zip(before.split("\n"), after.split("\n")), 1) if a != b]
+
+
+def test_the_classifier_is_where_the_region_decides(monkeypatch) -> None:
+    """parse_cites gives the two roles different kinds; that single decision is the whole fix."""
+    files = _files_with_symbol_at(_SYMBOL_LINE_IN_FAKE_TREE)
+    cites = {c.line: c for c in gen.parse_cites(_one_token_two_roles_page(), files)}
+    assert cites[_LIVE_PAGE_LINE].kind == "pin", "the live row lost its pin role — the scope is over-broad"
+    assert cites[_RECORD_PAGE_LINE].kind == "dated", "the record row is still pinnable — history gets rewritten"
+    # and the record is still a citation about a real thing, not a skipped row
+    assert cites[_RECORD_PAGE_LINE].symbol == _MOVED_SYMBOL, "a dated row lost its symbol, so the symbol rule is gone"
+    assert gen.resolve([cites[_RECORD_PAGE_LINE]], files)[0][1] is None, "resolve() would still answer a line for it"
+    assert gen.resolve([cites[_LIVE_PAGE_LINE]], files)[0][1] == _SYMBOL_LINE_IN_FAKE_TREE
+
+
+def test_generate_repins_the_live_row_and_leaves_the_record_digits_alone(monkeypatch) -> None:
+    """The paired negative, end to end: same token, opposite treatment, decided by region."""
+    monkeypatch.setattr(gen, "_tracked_files", lambda: _files_with_symbol_at(_SYMBOL_LINE_IN_FAKE_TREE))
+    page = _one_token_two_roles_page()
+    out = gen.generate(page)
+    changed = _change_report(page, out)
+    assert changed == [_LIVE_PAGE_LINE], f"expected one live row to move, got pages {changed}"
+    assert f"{_MOVED_TOKEN.split(':')[0]}:{_SYMBOL_LINE_IN_FAKE_TREE}" in out.split("\n")[_LIVE_PAGE_LINE - 1]
+    assert (
+        out.split("\n")[_RECORD_PAGE_LINE - 1] == page.split("\n")[_RECORD_PAGE_LINE - 1]
+    ), "the dated roster's digits moved — a record was edited"
+
+
+def test_the_older_machinery_rewrote_the_record_too(tmp_path) -> None:
+    """RED BEFORE GREEN, on a real run of the pre-fix code — not an emulation of it.
+
+    The generator resolves its manifest as a sibling of ``__file__`` and REPO_ROOT three parents up,
+    so both files are laid down in a nested directory and imported by path, the same way the module
+    header of this file loads the current one. Same fixture, same fake tree, one difference: the
+    classifier had no region test. If this cell ever goes green without failing, the fixture no
+    longer discriminates and the scoping above is decoration.
+    """
+    pre_dir = tmp_path / "repo" / "packages" / "server" / "scripts"
+    pre_dir.mkdir(parents=True)
+    (pre_dir / "gen_beta_terms_pins.py").write_text(
+        _git("show", "a788ece3:packages/server/scripts/gen_beta_terms_pins.py"), encoding="utf-8"
+    )
+    (pre_dir / "beta_terms_cites.py").write_text(_MANIFEST_PY.read_text(encoding="utf-8"), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("gen_beta_terms_pins_prefix", pre_dir / "gen_beta_terms_pins.py")
+    assert spec and spec.loader
+    old = importlib.util.module_from_spec(spec)
+    sys.modules["gen_beta_terms_pins_prefix"] = old
+    spec.loader.exec_module(old)
+
+    files = _files_with_symbol_at(_SYMBOL_LINE_IN_FAKE_TREE)
+    old_cites = {c.line: c for c in old.parse_cites(_one_token_two_roles_page(), files)}
+    assert old_cites[_RECORD_PAGE_LINE].kind == "pin", "the fixture no longer distinguishes old from new classification"
+    old._tracked_files = lambda: files
+    old_out = old.generate(_one_token_two_roles_page())
+    assert _change_report(_one_token_two_roles_page(), old_out) == [
+        _LIVE_PAGE_LINE,
+        _RECORD_PAGE_LINE,
+    ], "the pre-fix generator did not touch the record line either — this defect is not what the scoping fixes"
+
+
+def test_a_dated_row_whose_symbol_is_gone_still_goes_red() -> None:
+    """Scoping narrows the POSITION rule only; the symbol rule stays armed on the record."""
+    files = {"install-venya-executor.sh": ["    something else entirely"]}
+    cites = gen.parse_cites(_one_token_two_roles_page(), files)
+    red = gen.check_symbols(cites, files)
+    assert any(
+        f"page:{_RECORD_PAGE_LINE}" in line for line in red
+    ), f"a dated record citing a symbol that is not in the file passed unnoticed: {red}"
+
+
+def test_the_boundary_is_declared_once() -> None:
+    """No second copy of the number: the manifest's constant is the only definition of where the
+    dated record starts, and the two consumers read it, they do not restate it."""
+    boundary = str(gen._load_manifest().DATED_BLOCK_FIRST_PAGE_LINE)
+    for path in (_PKG / "scripts" / "gen_beta_terms_pins.py", _PKG / "tests" / "test_beta_terms_cite_interlock.py"):
+        body = path.read_text(encoding="utf-8")
+        offenders = [ln.strip() for ln in body.splitlines() if re.search(rf"\b{boundary}\b", ln)]
+        assert not offenders, f"{path.name} hardcodes the dated boundary instead of the constant: {offenders}"
+    # and the fixture in this file sits on the right sides of it, or the paired negative proves nothing
+    assert (
+        _LIVE_PAGE_LINE < int(boundary) <= _RECORD_PAGE_LINE
+    ), f"fixture pages {[_LIVE_PAGE_LINE, _RECORD_PAGE_LINE]} no longer straddle the boundary {boundary}"
+
+
+_MAINTENANCE_HEADING = "## How to read an entry, and how this list is maintained"
+
+
+def test_the_dated_boundary_still_lands_on_the_maintenance_heading() -> None:
+    """The number is a claim about the page's shape, so the page checks it back.
+
+    A boundary that drifts is worse than no boundary: too early and live coordinates stop being
+    re-pinned (the state #675 found — 660 sat inside a live entry and exempted a live carrier at
+    page 772), too late and a dated record's digits get rewritten. Pinning the boundary to the
+    heading the page itself uses for its maintenance block means a re-flow reddens this cell on the
+    next merge instead of quietly changing what the guard exempts.
+    """
+    boundary = gen._load_manifest().DATED_BLOCK_FIRST_PAGE_LINE
+    page_lines = _text().split("\n")
+    assert page_lines[boundary - 1].strip() == _MAINTENANCE_HEADING, (
+        f"line {boundary} is {page_lines[boundary - 1].strip()[:60]!r}, not the maintenance heading — "
+        "re-derive DATED_BLOCK_FIRST_PAGE_LINE from the page, never from this message"
+    )
+    # the entries above it are the live disclosure body, and the roster below it is history
+    assert any(line.startswith("## ") for line in page_lines[: boundary - 1]), "no live section above the boundary"
+    assert _MAINTENANCE_HEADING not in "\n".join(page_lines[: boundary - 1]), "the heading appears twice"
+    roster = [c for c in gen.parse_cites(_text(), gen._tracked_files()) if c.line >= boundary]
+    assert roster and all(
+        c.kind == "dated" or not c.symbol for c in roster
+    ), "a coordinate inside the maintenance block is still classified pinnable"
