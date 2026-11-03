@@ -81,7 +81,7 @@ run it from an interactive session so the key is entered at the hidden prompt
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
 | `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-executor-install.tar.gz` | Tarball URL |
 | `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed. Required (no sidecar fallback, abort before any fetch/write) when the tarball source is NOT https — file:// or plain http:// (#375, extending #327) |
-| `VENYA_EXECUTOR_ID` | `venya-exec-1` | Executor identifier — CONTRACT: used as the relay dial hostname + client-cert SAN; must be resolvable from every core |
+| `VENYA_EXECUTOR_ID` | this host's own name (`hostname`; `venya-exec-1` only if that answers nothing) | Executor identifier — CONTRACT: used as the relay dial hostname + client-cert SAN; must be resolvable from every core. Unset on a TTY the installer confirms the derived name; unset unattended it prints what it chose and why (#745). The local resolvability look runs in the parameter region — before the toolchain install, the venv and the Rust build — and stays non-fatal by ruling, because a core-side-only `/etc/hosts` entry is a valid strategy |
 | `VENYA_SERVER_URL` | (required — no default) | Core server URL; unset aborts with an actionable error (the server hostname cannot be guessed) |
 | `VENYA_EXECUTOR_ENROLLMENT_TOKEN` | (empty) | Bootstrap enrollment token — enables mTLS cert registration and heartbeat bootstrap at install time |
 | `VENYA_DOCKER_USERNAME` | (prompt if TTY) | Docker account for sbx agent-template pulls |

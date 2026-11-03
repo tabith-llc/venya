@@ -50,7 +50,15 @@ def _run_guard(tmp_path: Path, token, cert_bytes) -> subprocess.CompletedProcess
     body = (
         "set -euo pipefail\n"
         "EXECUTOR_ID=venya-exec-cell\n"
-        'error() { echo "[ERROR] $*"; }\n' + fragment.replace(CERT_SENTINEL, f'"{cert_path}"')
+        # info()/warn() join error(): the span this cell executes is delimited by two
+        # section headers, and #745 added the executor-id default confirmation inside it,
+        # which reports through the same helpers the real script sources from
+        # venya-common.sh. Prefixes mirror that library (and the #496 harness), so the
+        # fragment runs as written. What the cell asserts is unchanged: rc, and the ERROR
+        # lines — a printed INFO cannot satisfy or defeat either.
+        'error() { echo "[ERROR] $*"; }\n'
+        'info()  { echo "[INFO] $*"; }\n'
+        'warn()  { echo "[WARN] $*"; }\n' + fragment.replace(CERT_SENTINEL, f'"{cert_path}"')
     )
     script.write_text(body, encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "VENYA_EXECUTOR_ENROLLMENT_TOKEN"}

@@ -32,7 +32,9 @@ umask 077
 #                         same origin as a corruption guardrail and fail-closes on error.
 #                         REQUIRED (no sidecar fallback) when the tarball source is NOT
 #                         https (file:// or plain http://) — #375/#327.
-#   VENYA_EXECUTOR_ID              - Executor ID (default: venya-exec-1). CONTRACT: the ID
+#   VENYA_EXECUTOR_ID              - Executor ID (default: this host's own name, `hostname`;
+#                                    fall back to venya-exec-1 only if the name query answers
+#                                    nothing). CONTRACT: the ID
 #                                    is the relay dial hostname + client-cert SAN — it MUST
 #                                    be resolvable from every core (e.g. via /etc/hosts or DNS).
 #   VENYA_SERVER_URL               - Core server URL (required)
@@ -69,7 +71,16 @@ umask 077
 
 # --- Defaults ---
 TARBALL_URL="${VENYA_TARBALL:-https://github.com/tabith-llc/venya/releases/latest/download/venya-executor-install.tar.gz}"
-EXECUTOR_ID="${VENYA_EXECUTOR_ID:-venya-exec-1}"
+# The ID is the relay dial hostname and the client-cert SAN, so a default can only be
+# a name the rest of the fleet is able to resolve: this host's own name (#745, the same
+# idiom install-venya-core.sh uses for CORE_HOSTNAME). The old default 'venya-exec-1'
+# was the one value guaranteed to violate the contract on a host carrying no such
+# entry, and it was chosen in silence. It stays as the last resort for a host whose
+# name query answers nothing at all. An explicit VENYA_EXECUTOR_ID still wins.
+EXECUTOR_ID="${VENYA_EXECUTOR_ID:-$(hostname)}"
+if [ -z "$EXECUTOR_ID" ]; then
+    EXECUTOR_ID="venya-exec-1"
+fi
 
 # --- Source common library ---
 # Direct execution: the library sits next to the script. Piped execution
@@ -155,6 +166,24 @@ if [ ! -s /etc/venya/executor/executor.crt ] && [ -z "${VENYA_EXECUTOR_ENROLLMEN
     exit 1
 fi
 
+# --- Confirm a defaulted executor ID (#745) ---
+# Only the DERIVED value is asked about: an operator who named one is never asked
+# to approve their own words. The read is TTY-gated because a piped install
+# (curl | sudo bash — the shape this script's own library lookup supports) carries
+# the remainder of the script on stdin, so an unguarded read would consume
+# installer lines. Unattended: print what was chosen and why, and carry on.
+if [ -z "${VENYA_EXECUTOR_ID:-}" ]; then
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        read -r -p "Executor ID defaults to this host's own name: '$EXECUTOR_ID' (relay dial hostname + client-cert SAN; every core must resolve it). Press Enter to keep it, or type another: " _executor_id_reply
+        if [ -n "$_executor_id_reply" ]; then
+            EXECUTOR_ID="$_executor_id_reply"
+            info "Executor ID for this run: '$EXECUTOR_ID'."
+        fi
+    else
+        info "Unattended install: executor ID defaults to this host's own name '$EXECUTOR_ID' (#745) — set VENYA_EXECUTOR_ID to choose another."
+    fi
+fi
+
 # --- Fail-closed config-injection gate (ticket #326, F-2) ---
 # These values interpolate raw into installer-written config files:
 # /etc/venya/executor.toml (TOML basic strings) below. Newline/CR splits a
@@ -168,6 +197,28 @@ fi
 # a single-quoted printf and never interpolated.
 venya_guard_injection "SERVER_URL" "$SERVER_URL" '"' '\'
 venya_guard_injection "EXECUTOR_ID" "$EXECUTOR_ID" '"' '\'
+
+# --- Executor-id dial contract: checked while the install is still cheap (#745) ---
+# This block used to sit at the foot of the script, after the toolchain install,
+# the venv, and the Rust release build. The contract it states has not changed and
+# neither has its NON-FATAL ruling — local getent is a weak proxy, authoritative
+# resolvability is core-side, an Ubuntu '127.0.1.1 <hostname>' entry makes an ID
+# equal to the own-hostname pass trivially here, and a core-side-only /etc/hosts
+# entry is a valid strategy, so aborting on the proxy would false-positive a
+# working install. What changed is WHEN the look happens: the operator learns it
+# before paying for a build, and a re-install whose name stopped resolving is
+# caught here rather than at registration.
+if getent hosts "$EXECUTOR_ID" > /dev/null 2>&1; then
+    info "Executor ID '$EXECUTOR_ID' resolves locally."
+    info "CONTRACT: every CORE must also resolve '$EXECUTOR_ID' (relay dial hostname + cert SAN) —"
+    info "local resolution does not prove core-side resolution (127.0.1.1 own-hostname trap)."
+else
+    warn "Executor ID '$EXECUTOR_ID' does NOT resolve locally."
+    warn "CONTRACT: the ID is the relay dial hostname + client-cert SAN — it must resolve FROM EVERY CORE,"
+    warn "or the core rejects registration (400) and relay calls cannot dial this executor."
+    warn "A rejected attempt does NOT burn the enrollment token — retry is free."
+    warn "Remedy — on EACH core host: add one '<executor-ip> $EXECUTOR_ID' line to /etc/hosts — address first, the name as the SECOND field (the shape this installer writes and matches; #490) — or add a DNS record"
+fi
 
 venya_resolve_dns_resolver
 
@@ -590,28 +641,10 @@ chmod 0640 /etc/venya/venya-executor.env
 info "Executor key passphrase delivered via /etc/venya/venya-executor.env (0640 root:venya)."
 info "Sandbox DNS resolver: $DNS_RESOLVER"
 
-# --- Executor-id dial-contract pre-check (ticket installer-executor-id-precheck-guidance) ---
-# EXECUTOR_ID is the relay dial hostname + client-cert SAN: EVERY core must
-# resolve it (DNS or core-side /etc/hosts), or the core rejects registration
-# 400 BEFORE the token gate — a rejected attempt does NOT burn the token.
-# Local getent is a WEAK PROXY: authoritative resolvability is core-side, and
-# Ubuntu's '127.0.1.1 <hostname>' entry makes ID == own-hostname pass trivially
-# here. Hence NON-FATAL by ruling — this check must never abort the install
-# (core-side-only /etc/hosts entries are a valid strategy; aborting on the
-# local proxy would false-positive them).
-if getent hosts "$EXECUTOR_ID" > /dev/null 2>&1; then
-    info "Executor ID '$EXECUTOR_ID' resolves locally."
-    info "CONTRACT: every CORE must also resolve '$EXECUTOR_ID' (relay dial hostname + cert SAN) —"
-    info "local resolution does not prove core-side resolution (127.0.1.1 own-hostname trap)."
-else
-    warn "Executor ID '$EXECUTOR_ID' does NOT resolve locally."
-    warn "CONTRACT: the ID is the relay dial hostname + client-cert SAN — it must resolve FROM EVERY CORE,"
-    warn "or the core rejects registration (400) and relay calls cannot dial this executor."
-    warn "A rejected attempt does NOT burn the enrollment token — retry is free."
-    warn "Remedy — on EACH core host: add one '<executor-ip> $EXECUTOR_ID' line to /etc/hosts — address first, the name as the SECOND field (the shape this installer writes and matches; #490) — or add a DNS record"
-fi
-
 # --- Register mTLS certificate (if enrollment token provided) ---
+# The dial-contract look moved up to the parameter region with its own guidance
+# (#745); the 400 this section can still get from a core is answered by the same
+# remedy text printed there, and by the failure branch below.
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     # TTL timing guidance (ticket installer-enrollment-token-expiry-guidance):
     # what burns on a failed install is the WALL CLOCK, not the token.
