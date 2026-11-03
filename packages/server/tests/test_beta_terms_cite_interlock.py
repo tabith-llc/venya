@@ -44,6 +44,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 _PKG = Path(__file__).resolve().parents[1]
 REPO_ROOT = _PKG.parents[1]
@@ -466,10 +467,44 @@ def test_occurrence_2_pin_resolves_to_the_second_line_and_first_line_pin_reddens
 # --------------------------------------------------------------------------------------
 
 _MOVED_TOKEN = "install-venya-executor.sh:558"
+_MOVED_PATH = "install-venya-executor.sh"
 _MOVED_SYMBOL = "printf 'relay_client_ids = "
 _LIVE_PAGE_LINE = 247
 _RECORD_PAGE_LINE = 1209
 _SYMBOL_LINE_IN_FAKE_TREE = 609
+
+
+def _planted_manifest(boundary: int) -> SimpleNamespace:
+    """The manifest the paired-negative cells classify against, declared here rather than borrowed.
+
+    Why this exists: the fixture's token is a LIVE coordinate, and moving live coordinates is what
+    the generator is for. Leg 904's legitimate ``--write`` re-keyed ``install-venya-executor.sh:558``
+    to ``:609`` and left ``:558`` only in ``DATED_OVERRIDES`` — so at the 913+904 face the shipped data
+    answered "dated" for BOTH fixture rows, ``generate()`` moved nothing, and four cells in this file
+    went red (measured at the co-landed face in both merge orders: 4 failed / 14 passed). A fixture
+    whose premise is a value the machinery rewrites is a snapshot, not a test.
+
+    So the token's ROLE is stated here. What stays production: the classifier, ``resolve()``,
+    ``check_symbols()`` and ``generate()`` under test are the shipped code, and the region boundary is
+    read from the shipped manifest by the caller and never copied into this file, so the number still
+    has exactly one definition.
+    """
+    return SimpleNamespace(
+        MANIFEST={_MOVED_TOKEN: (_MOVED_PATH, _MOVED_SYMBOL, 1, "pin")},
+        DATED_OVERRIDES={},
+        DATED_BLOCK_FIRST_PAGE_LINE=boundary,
+    )
+
+
+def _plant_manifest_in(module, monkeypatch=None) -> None:
+    """Point one generator module at the planted manifest, keeping its shipped boundary."""
+    boundary = module._load_manifest().DATED_BLOCK_FIRST_PAGE_LINE
+    planted = _planted_manifest(boundary)
+    if monkeypatch is not None:
+        monkeypatch.setattr(module, "_load_manifest", lambda: planted)
+    else:
+        # a generator imported by path inside a cell has no monkeypatch to borrow
+        module._load_manifest = lambda: planted  # type: ignore[attr-defined]
 
 
 def _files_with_symbol_at(line: int) -> dict[str, list[str]]:
@@ -494,6 +529,7 @@ def _change_report(before: str, after: str) -> list[int]:
 
 def test_the_classifier_is_where_the_region_decides(monkeypatch) -> None:
     """parse_cites gives the two roles different kinds; that single decision is the whole fix."""
+    _plant_manifest_in(gen, monkeypatch)
     files = _files_with_symbol_at(_SYMBOL_LINE_IN_FAKE_TREE)
     cites = {c.line: c for c in gen.parse_cites(_one_token_two_roles_page(), files)}
     assert cites[_LIVE_PAGE_LINE].kind == "pin", "the live row lost its pin role — the scope is over-broad"
@@ -506,6 +542,7 @@ def test_the_classifier_is_where_the_region_decides(monkeypatch) -> None:
 
 def test_generate_repins_the_live_row_and_leaves_the_record_digits_alone(monkeypatch) -> None:
     """The paired negative, end to end: same token, opposite treatment, decided by region."""
+    _plant_manifest_in(gen, monkeypatch)
     monkeypatch.setattr(gen, "_tracked_files", lambda: _files_with_symbol_at(_SYMBOL_LINE_IN_FAKE_TREE))
     page = _one_token_two_roles_page()
     out = gen.generate(page)
@@ -539,6 +576,7 @@ def test_the_older_machinery_rewrote_the_record_too(tmp_path) -> None:
     spec.loader.exec_module(old)
 
     files = _files_with_symbol_at(_SYMBOL_LINE_IN_FAKE_TREE)
+    _plant_manifest_in(old)
     old_cites = {c.line: c for c in old.parse_cites(_one_token_two_roles_page(), files)}
     assert old_cites[_RECORD_PAGE_LINE].kind == "pin", "the fixture no longer distinguishes old from new classification"
     old._tracked_files = lambda: files
@@ -549,8 +587,9 @@ def test_the_older_machinery_rewrote_the_record_too(tmp_path) -> None:
     ], "the pre-fix generator did not touch the record line either — this defect is not what the scoping fixes"
 
 
-def test_a_dated_row_whose_symbol_is_gone_still_goes_red() -> None:
+def test_a_dated_row_whose_symbol_is_gone_still_goes_red(monkeypatch) -> None:
     """Scoping narrows the POSITION rule only; the symbol rule stays armed on the record."""
+    _plant_manifest_in(gen, monkeypatch)
     files = {"install-venya-executor.sh": ["    something else entirely"]}
     cites = gen.parse_cites(_one_token_two_roles_page(), files)
     red = gen.check_symbols(cites, files)
@@ -598,3 +637,46 @@ def test_the_dated_boundary_still_lands_on_the_maintenance_heading() -> None:
     assert roster and all(
         c.kind == "dated" or not c.symbol for c in roster
     ), "a coordinate inside the maintenance block is still classified pinnable"
+
+
+def test_a_shipped_manifest_rekey_cannot_break_these_cells(monkeypatch) -> None:
+    """The face leg 913 lacked, written as a check instead of a lesson.
+
+    Both halves run in one cell, so this is not a claim about a fixture nobody can break.
+
+    Half 1 reproduces the defect on purpose: take the shipped manifest and drop the fixture's token,
+    which is exactly what a legitimate ``--write`` does to a LIVE coordinate when it re-keys it, and
+    show that a fixture borrowing that answer collapses — both rows come back ``dated`` because the
+    token survives only in the dated-note dict. That collapse is the 913+904 co-landing red (4 failed
+    / 14 passed, both merge orders) this leg exists to remove.
+
+    Half 2 is the same page, the same fake tree and the same shipped classifier/resolve/generate code
+    with the premise planted: the live row is a pin, the record row is dated, and exactly one line
+    moves. A cell that reads production data as its own fixture breaks at the next cut; a cell that
+    reads a planted premise and still calls the production code does not.
+    """
+    shipped = gen._load_manifest()
+    rekeyed = SimpleNamespace(
+        MANIFEST={k: v for k, v in shipped.MANIFEST.items() if k != _MOVED_TOKEN},
+        DATED_OVERRIDES=dict(shipped.DATED_OVERRIDES),
+        DATED_BLOCK_FIRST_PAGE_LINE=shipped.DATED_BLOCK_FIRST_PAGE_LINE,
+    )
+    assert _MOVED_TOKEN in dict(
+        shipped.DATED_OVERRIDES
+    ), "half 1 needs the dated-note entry for this token or the reproduction proves nothing"
+    files = _files_with_symbol_at(_SYMBOL_LINE_IN_FAKE_TREE)
+    page = _one_token_two_roles_page()
+
+    monkeypatch.setattr(gen, "_load_manifest", lambda: rekeyed)
+    monkeypatch.setattr(gen, "_tracked_files", lambda: files)
+    borrowed = {c.line: c.kind for c in gen.parse_cites(page, files)}
+    assert borrowed[_LIVE_PAGE_LINE] != "pin", (
+        f"the re-key no longer collapses a borrowed premise ({borrowed[_LIVE_PAGE_LINE]!r}); "
+        "this cell's second half would then be proving nothing"
+    )
+    assert gen.generate(page) == page, "the borrowed-premise face moved something after all"
+
+    _plant_manifest_in(gen, monkeypatch)
+    planted = {c.line: c for c in gen.parse_cites(page, files)}
+    assert planted[_LIVE_PAGE_LINE].kind == "pin" and planted[_RECORD_PAGE_LINE].kind == "dated", planted
+    assert _change_report(page, gen.generate(page)) == [_LIVE_PAGE_LINE]
