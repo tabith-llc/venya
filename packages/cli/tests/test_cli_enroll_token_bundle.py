@@ -92,9 +92,12 @@ class TestEnrollTokenBundle:
 
             out = capsys.readouterr().out
             assert rc == 0
-            assert "bot@venya-exec-9:" in out
-            assert "VENYA_SERVER_URL=https://test-core.example" in out
-            assert "bot@venya-exec-1:" not in out
+            # #752: the account is no longer hard-coded to one fleet's provisioning, so
+            # this cell asserts the id it exists to prove is interpolated, on the id.
+            assert "<executor-ssh-user>@venya-exec-9" in out
+            assert "venya-exec-9:.venya-enroll/" in out
+            assert 'VENYA_SERVER_URL="https://test-core.example"' in out
+            assert "venya-exec-1" not in out
             assert "venya-core-1" not in out
         finally:
             client.close()
@@ -142,7 +145,10 @@ class TestEnrollTokenBundle:
             bundle = Path(_args(tmp_path).output_dir)
             assert rc == 0
             assert (bundle / "core-server-ca.crt").read_bytes() == fake_ca.read_bytes()
-            assert f"VENYA_VENYA_CA_FILE={bundle / 'core-server-ca.crt'}" in out
+            # #752: the CA the installer reads is the STAGED copy on the executor, not a
+            # path that only exists on the mint host, and every interpolated path is quoted.
+            assert 'VENYA_VENYA_CA_FILE="$ENROLL_DIR/core-server-ca.crt"' in out
+            assert str(bundle / "core-server-ca.crt") in out  # source path still named, for scp
         finally:
             client.close()
             config_file.unlink()
