@@ -21,7 +21,9 @@ set -euo pipefail
 #   VENYA_SKIP_PROMPT  - Set to "yes" to skip the confirmation prompt
 #   VENYA_PURGE_CONFIG - Set to "yes" to also delete the platform config
 #                        dir (~/.config/venya on Linux, ~/Library/Application Support/venya
-#                        on macOS)
+#                        on macOS). A config dir that is a symlink is refused (#758):
+#                        the run stops there and touches neither the link nor its
+#                        target.
 #                        (default: ask; without a TTY, config is KEPT)
 ###############################################################################
 
@@ -103,8 +105,38 @@ if [ "$PURGE" = "yes" ]; then
         Darwin) VENYA_CONFIG_DIR="$HOME/Library/Application Support/venya" ;;
         *)      VENYA_CONFIG_DIR="$HOME/.config/venya" ;;
     esac
+
+    # #758 (a): a config dir that is a symlink is not this user's config. `rm -rf`
+    # on a symlink unlinks the NAME and succeeds, so the run printed "Removed …"
+    # while the server URL and stored access token at the target stood untouched.
+    # Same -L test venya-common.sh ships for a symlinked file:// tarball (#327) and
+    # the one #755 put on the core uninstaller's state paths; -L is an lstat, so a
+    # dangling link is caught where -e would read "gone".
+    if [ -L "$VENYA_CONFIG_DIR" ]; then
+        link_target="$(readlink -f -- "$VENYA_CONFIG_DIR" 2> /dev/null || true)"
+        error "Config dir is a symlink: $VENYA_CONFIG_DIR${link_target:+ -> $link_target} — refusing to follow it (#758)."
+        error "That path and what it points at were NOT touched; the tool and shim removals above already ran. Repoint it at a real directory, or remove what it points at yourself."
+        exit 1
+    fi
+
+    # #758 (b): prove the removal instead of asserting it. `rm -f` semantics report
+    # success for an operand that was never there, and the only later checks in this
+    # script are PATH tests (`command -v`), not a directory test — so the old line
+    # printed for a directory that did not exist. Absence is read after the removal,
+    # on -e and -L together, and the success line is conditional on that proof.
+    CONFIG_DIR_PRESENT="no"
+    if [ -e "$VENYA_CONFIG_DIR" ] || [ -L "$VENYA_CONFIG_DIR" ]; then
+        CONFIG_DIR_PRESENT="yes"
+    fi
     rm -rf "$VENYA_CONFIG_DIR"
-    info "Removed $VENYA_CONFIG_DIR."
+    if [ "$CONFIG_DIR_PRESENT" != "yes" ]; then
+        info "No config dir at $VENYA_CONFIG_DIR — nothing to remove."
+    elif [ -e "$VENYA_CONFIG_DIR" ] || [ -L "$VENYA_CONFIG_DIR" ]; then
+        error "$VENYA_CONFIG_DIR still present after removal — inspect manually."
+        exit 1
+    else
+        info "Removed $VENYA_CONFIG_DIR."
+    fi
 fi
 
 if command -v venya > /dev/null 2>&1; then
