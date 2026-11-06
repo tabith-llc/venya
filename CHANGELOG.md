@@ -536,7 +536,7 @@ Notable changes to Venya will be documented in this file.
   states what is mounted instead of what was disabled in August (#312, documentation).
 
 
-- **Backfilled from the release completeness audit (leg 389, applied here).** Every row below is one merged change that had no entry in this file. The wording is the merge's own subject where the merge wrote one; where a merge landed with only a branch name, the row is the ticket's title, marked "Addressed:" so it cannot be read as shipped behaviour. Each row names the ticket ids it carries, the count of operative files, and the merge sha. One row per merge: several tickets rode a single merge, and those ids are listed together rather than repeated as separate changes.
+- **Backfilled from the release completeness audit.** Every row below is one merged change that had no entry in this file. The wording is the merge's own subject where the merge wrote one; where a merge landed with only a branch name, the row is the ticket's title, marked "Addressed:" so it cannot be read as shipped behaviour. Each row names the ticket ids it carries, the count of operative files, and the merge sha. One row per merge: several tickets rode a single merge, and those ids are listed together rather than repeated as separate changes.
 - **touch cue prints once per operation, re-shown on PIN retry** (`#10`; 2 operative files; merge `77827714b`).
 - **Stage-1 filter contract tightening** (`#20`; 5 operative files; merge `ec256cb64`).
 - **register retries back off, permanent rejections stop loud** (`#24`; 4 operative files; merge `8750d1103`).
