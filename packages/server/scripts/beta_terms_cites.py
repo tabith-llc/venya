@@ -139,8 +139,8 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     ":1007": (HC, 'chmod 600 "$RELAY_DIR/relay-client.key"', 1, "pin"),
     ":1063": (HC, '-out "$INNER_DIR/inner.key"', 1, "pin"),
     ":1065": (HC, 'chmod 600 "$INNER_DIR/inner.key"', 1, "pin"),
-    "install-venya-executor.sh:609": (HE, "printf 'relay_client_ids = ", 1, "pin"),
-    "install-venya-executor.sh:624": (HE, "} > /etc/venya/executor.toml", 1, "pin"),
+    "install-venya-executor.sh:653": (HE, "printf 'relay_client_ids = ", 1, "pin"),
+    "install-venya-executor.sh:668": (HE, "} > /etc/venya/executor.toml", 1, "pin"),
     ":586-587": (HE, "rm -f /etc/venya/venya-executor.env", 1, "pin"),
     "packages/server/src/server/ca.py:395": (C, 'self.ca_cert_path = self.ca_dir / "ca.crt"', 1, "pin"),
     "packages/server/src/server/ca.py:622": (

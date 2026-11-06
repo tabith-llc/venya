@@ -244,7 +244,7 @@ assumption is not:
   `ExecutorDaemon.start` at `packages/executor/src/executor/daemon.py:1947`). Caveat that
   matters: the executor installer
   **rewrites** this key on every run (`relay_client_ids = ["${CORE_HOSTNAME}-relay"]`,
-  `install-venya-executor.sh:609`), so a hand-edit there is not durable across a re-run — the
+  `install-venya-executor.sh:653`), so a hand-edit there is not durable across a re-run — the
   rewrite is documented in its own entry below (#598).
 - **Re-mint the core's relay pair, and know what that does NOT do.** A completing run of
   `install-venya-core.sh` regenerates the relay key and re-signs the credential with no
@@ -769,7 +769,7 @@ entry is **deleted**, not softened, when it does.
 Status: known limitation in beta · Target: no date set · Tracked as: #598 (row closed on the API
 label face 2026-10-16, `status/merged`, with the precedence contract; **its AC6, the installer
 half, did not ship**, and this entry is the live carrier for that half — the whole-file rewrite is
-still shipped bytes at `install-venya-executor.sh:624` and the environment-file rewrite at
+still shipped bytes at `install-venya-executor.sh:668` and the environment-file rewrite at
 `:586-587`)
 
 **Who is affected:** an operator who tunes an executor by editing
