@@ -776,14 +776,16 @@ you to do — and later re-runs `install-venya-executor.sh` on that host. Re-run
 upgrade path.
 
 **What you get today:** both files keep what you added. Before the installer rebuilds
-`/etc/venya/executor.toml` it reads back every table and every top-level key it does not own, and
-re-appends them after its own block, so `[executor] max_concurrent_commands = 4` is still 4 on the
-next boot; `/etc/venya/venya-executor.env` does the same for any `VENYA_` line except the
-installer's own `VENYA_EXECUTOR_KEY_PASSPHRASE`. Each carried setting is named in the run's output,
+`/etc/venya/executor.toml` it reads back every table and every top-level key it does not own, and writes them again
+where the parser still reads them at that level — a top-level key ahead of the first table header, a table of your
+own after the installer's — so `[executor] max_concurrent_commands = 4` and a top-level `sandbox_memory_mb` are both
+still there on the next boot. `/etc/venya/venya-executor.env` does the same for any `VENYA_` line except the
+installer's own `VENYA_EXECUTOR_KEY_PASSPHRASE`, and that file is a flat list, so no line can be swallowed by
+another. Each carried setting is named in the run's output,
 so you never have to re-read the file to find out what survived:
 
 ```
-Preserved 2 operator-added executor.toml key(s) across regeneration: [executor] [network]
+Preserved 2 operator-added executor.toml key(s) across regeneration: sandbox_memory_mb [executor]
 ```
 
 The installer's own keys still take the installer's value, on purpose: `server_url`, `executor_id`,

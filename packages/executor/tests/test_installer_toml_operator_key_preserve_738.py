@@ -27,14 +27,25 @@ through the shipped ``ExecutorConfig.from_file``, then reads the admission cap t
 relay listener does, which is the boot-line number the guest showed.
 
 Truth table: incumbent with an operator table -> carried, named, and reloaded as 4;
-installer-owned keys in the incumbent -> the installer's value wins, no stale survivor;
-operator key inside ``[mtls]`` -> dropped and named; second re-run -> byte-identical (no
-accumulation); no incumbent file (fresh install) -> nothing carried, nothing claimed;
-EnvironmentFile carrier -> operator ``VENYA_`` line survives, ``VENYA_EXECUTOR_KEY_PASSPHRASE``
-does not, and the run says so.
+incumbent with a documented top-level key (``sandbox_memory_mb``) -> parsed at top level,
+not inside ``[mtls]`` or ``[audit]``, and the name the run printed agrees with where the
+shipped loader parses it; installer-owned keys in the incumbent -> the installer's value
+wins, no stale survivor; operator key inside ``[mtls]`` -> dropped and named; second re-run
+-> byte-identical (no accumulation); no incumbent file (fresh install) -> nothing carried,
+nothing claimed; EnvironmentFile carrier -> operator ``VENYA_`` line survives,
+``VENYA_EXECUTOR_KEY_PASSPHRASE`` does not, and the run says so.
+
+**Leg 1060 rework.** The first shape computed the carried lines early and appended them all
+at the end, and a non-author peer re-run (leg 1058) caught what TOML then does: a file whose
+last line opens a table has no end-of-table, so an appended top-level key parses as a member
+of that table, ``extra="ignore"`` drops it, and the run still printed ``Preserved …``. Every
+placement cell below therefore joins two things that version kept apart — the label the run
+PRINTED and where the shipped LOADER PARSES that label — and one control moves the emission
+back to the pre-fix position to prove the join is what catches it.
 """
 
 import subprocess
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -88,6 +99,62 @@ operator_stray = true
 
 def _source() -> str:
     return INSTALLER.read_text(encoding="utf-8")
+
+
+# The carried top-level emission and the table header it must precede, as the shipped bytes
+# write them. Both anchors are used to move the emission to the pre-fix position, so a
+# break that does not apply cannot silently 'prove' nothing.
+TOP_EMIT = (
+    '    if [ -n "${PRESERVED_TOML_TOP:-}" ]; then\n'
+    "        printf '\\n'\n"
+    "        echo '# --- operator-added top-level keys preserved across re-run (installer, #738) ---'\n"
+    "        printf '%s\\n' \"$PRESERVED_TOML_TOP\"\n"
+    "    fi\n"
+)
+MTLS_OPEN = "    printf '\\n'\n    printf '[mtls]\\n'\n"
+
+# `sandbox_memory_mb` because docs/deployment-config.md names it as a TOP-LEVEL field whose
+# file value wins — the exact promise the append-after-a-table shape falsified.
+INCUMBENT_TOP_KEY = """\
+server_url = "https://stale-core:9999"
+sandbox_memory_mb = 2048
+
+[executor]
+max_concurrent_commands = 4
+
+[mtls]
+ca_cert = "/etc/venya/stale/ca.crt"
+cert = "/etc/venya/stale/executor.crt"
+key = "/etc/venya/stale/executor.key"
+"""
+
+
+def _carried_labels(stdout: str) -> list[str]:
+    """The names the run promised, read out of its own `Preserved …` line."""
+    line = [ln for ln in stdout.splitlines() if ln.startswith("[INFO] Preserved")]
+    assert len(line) == 1, stdout
+    return line[0].split(":", 1)[1].split()
+
+
+def _disagreements(stdout: str, data: dict) -> list[str]:
+    """Every place the run's promise and the parsed file disagree.
+
+    A bracketed label must be a table in the document; a bare label must sit at top level
+    and inside no table. An empty list is what makes the line the operator read trustworthy.
+    """
+    out: list[str] = []
+    for label in _carried_labels(stdout):
+        if label.startswith("["):
+            name = label.strip("[]")
+            if not isinstance(data.get(name), dict):
+                out.append(f"{label} promised, not a table in the file")
+            continue
+        if label not in data:
+            out.append(f"{label} promised, absent at top level")
+        for table, values in data.items():
+            if isinstance(values, dict) and label in values:
+                out.append(f"{label} promised at top level, parsed inside [{table}]")
+    return out
 
 
 def _region(text: str, start: str, end: str) -> str:
@@ -188,14 +255,15 @@ class TestAC1Preserve:
         assert ExecutorConfig.from_file(tmp_path / "executor.toml") is not None, written
 
     def test_the_read_back_precedes_the_truncating_redirect(self):
-        """The proof the AC asks for, at the shipped source: the capture sits before the
+        """The proof the AC asks for, at the shipped source: both captures sit before the
         `} > /etc/venya/executor.toml` that destroys the file, never after it."""
         src = _source()
         assert src.count(TOML_REDIRECT) == 1, f"the writer redirect is no longer unique: {src.count(TOML_REDIRECT)}"
         capture = src.index(TOML_REGION_START)
         assert capture < src.index(TOML_REDIRECT), "the read-back runs after the write it is meant to protect"
         assert src.count(TOML_REGION_START) == 1, "the managed-key list appears twice"
-        assert src.index("PRESERVED_TOML_LINES=$(venya_toml_scan keep") < src.index(TOML_REDIRECT)
+        for mode in ("top", "sect"):
+            assert src.index(f"$(venya_toml_scan {mode} ") < src.index(TOML_REDIRECT), f"the {mode} scan runs late"
 
     def test_a_second_re_run_is_byte_identical(self, tmp_path):
         """No accumulation: the carried block is read from the incumbent and rewritten once,
@@ -207,6 +275,42 @@ class TestAC1Preserve:
         assert second.returncode == 0, second.stdout + second.stderr
         after_two = (tmp_path / "executor.toml").read_text(encoding="utf-8")
         assert after_two == after_one, "the carried block grew on the second run"
+
+
+class TestAC1PlacementAndPromise:
+    """Leg 1060 AC1 — the cell that was missing: a carried top-level key has to parse where
+    the promise says it parsed, and the proof runs through the shipped loader."""
+
+    def _both(self, tmp_path):
+        proc, written = _rerun(tmp_path, INCUMBENT_TOP_KEY, ca_installed=False)
+        return proc, written, tomllib.loads(written)
+
+    def test_the_documented_top_level_key_parses_at_top_level(self, tmp_path):
+        proc, written, data = self._both(tmp_path)
+        assert data["sandbox_memory_mb"] == 2048, written
+        assert ExecutorConfig.from_file(tmp_path / "executor.toml").sandbox_memory_mb == 2048, proc.stdout
+
+    def test_the_key_is_not_absorbed_by_a_table_the_installer_writes(self, tmp_path):
+        """TOML has no end-of-table, so this is the whole defect: the key survives the
+        rebuild and disappears in the parse."""
+        _proc, written, data = self._both(tmp_path)
+        for table in ("mtls", "audit", "executor"):
+            assert "sandbox_memory_mb" not in data.get(table, {}), f"absorbed into [{table}]: {written}"
+
+    def test_the_printed_name_and_the_parsed_placement_agree(self, tmp_path):
+        """The join leg 1054 never made, over both classes at once: `sandbox_memory_mb`
+        (bare, top level) and `[executor]` (bracketed, a table)."""
+        proc, written, data = self._both(tmp_path)
+        assert _disagreements(proc.stdout, data) == [], (proc.stdout, written, sorted(data))
+
+    def test_a_carried_top_level_key_is_written_before_the_first_table_header(self):
+        """Source-order pin: the emission sits inside the generated block and ahead of
+        `[mtls]`, so moving it back to the append is a visible change, not a quiet one."""
+        src = _source()
+        assert src.count(TOP_EMIT) == 1, "the carried top-level emission is missing or duplicated"
+        assert src.count(MTLS_OPEN) == 1, "the first table header is no longer unique"
+        assert src.index(TOP_EMIT) < src.index(MTLS_OPEN), "the top-level carry sits after a table header"
+        assert src.index(TOP_EMIT) < src.index(TOML_REDIRECT), "the carry escaped the generated block"
 
 
 class TestAC2InstallerStillWins:
@@ -305,6 +409,20 @@ class TestAC4BothCarriers:
             "rm -f /etc/venya/venya-executor.env"
         ), "the read-back runs after the file it reads is deleted"
 
+    def test_the_env_carrier_has_no_table_syntax_to_absorb_a_carried_key(self, tmp_path):
+        """Leg 1060 AC3 — parity checked, not assumed. The EnvironmentFile is a flat
+        `KEY=VALUE` list, so the executor.toml absorption shape cannot arise there, and each
+        carried key lands as its own pair carrying its own value."""
+        proc = _run(_env_script(tmp_path, self.INCUMBENT_ENV), tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = (tmp_path / "venya-executor.env").read_text(encoding="utf-8")
+        lines = [ln for ln in written.splitlines() if ln and not ln.startswith("#")]
+        assert not any(ln.startswith("[") for ln in lines), f"a table header appeared: {written}"
+        pairs = dict(ln.split("=", 1) for ln in lines)
+        assert pairs["VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS"] == "4", written
+        assert pairs["VENYA_EXECUTOR_NETWORK__CONNECT_TIMEOUT"] == "9.5", written
+        assert pairs["VENYA_EXECUTOR_KEY_PASSPHRASE"] == INSTALLER_PASSPHRASE, written
+
 
 class TestAC5TheBootLine:
     """AC5 — the observable the guest showed: the daemon's relay-listener line reads the
@@ -341,8 +459,10 @@ class TestTheGuardIsLoadBearing:
             broken = script.replace("    } >> $TOML\n", "    }\n", 1)
         elif kind == "carry_managed":
             broken = script.replace(TOML_REGION_START, 'MANAGED_TOML_KEYS="')
-        else:  # `no_scan`: the read-back asks for a mode the program does not implement
-            broken = script.replace("venya_toml_scan keep", "venya_toml_scan nomode")
+        else:  # `no_scan`: every read-back asks for a mode the program does not implement
+            broken = script
+            for mode in ("top", "sect", "name"):
+                broken = broken.replace(f"venya_toml_scan {mode}", "venya_toml_scan nomode", 1)
         assert broken != script, f"the {kind} break did not apply — the proof would be a lie"
         return broken
 
@@ -368,3 +488,41 @@ class TestTheGuardIsLoadBearing:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "Preserved" not in proc.stdout, proc.stdout
         assert "max_concurrent_commands" not in (tmp_path / "executor.toml").read_text(encoding="utf-8")
+
+    def _placement_break(self, tmp_path: Path, kind: str) -> str:
+        """The two ways the carried top-level key can be lost, each asserted to have applied."""
+        script = _writer_script(tmp_path, INCUMBENT_TOP_KEY, ca_installed=False)
+        if kind == "after_table":  # leg 1054's shipped shape: emit below `[mtls]`
+            broken = script.replace(TOP_EMIT + MTLS_OPEN, MTLS_OPEN + TOP_EMIT, 1)
+        else:  # `no_top_emit`: the carry is computed and never written
+            broken = script.replace(TOP_EMIT, "", 1)
+        assert broken != script, f"the {kind} break did not apply — the proof would be a lie"
+        return broken
+
+    def test_the_append_below_a_table_header_reproduces_the_defect(self, tmp_path):
+        """Move the emission back where leg 1054 put it and watch what a bytes-only check
+        misses: the key is still in the file, still promised, and gone from the config. That
+        disagreement is the defect, so `test_the_printed_name_and_the_parsed_placement_agree`
+        is what catches it — not a grep for the key."""
+        proc = _run(self._placement_break(tmp_path, "after_table"), tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = (tmp_path / "executor.toml").read_text(encoding="utf-8")
+        data = tomllib.loads(written)
+        assert "sandbox_memory_mb" in written, written
+        assert "sandbox_memory_mb" in _carried_labels(proc.stdout), proc.stdout
+        assert data["mtls"].get("sandbox_memory_mb") == 2048, f"not absorbed after all: {written}"
+        # The field's shipped default (SANDBOX_MEMORY_DEFAULT_MB = 1024, #589) is what the
+        # operator gets instead of what they wrote — a changed value, not a missing one.
+        assert ExecutorConfig.from_file(tmp_path / "executor.toml").sandbox_memory_mb != 2048, written
+        assert _disagreements(proc.stdout, data), "the agreement cell would not have fired"
+
+    def test_the_top_level_emit_is_what_places_the_key(self, tmp_path):
+        """Delete the emission instead: the promise still names the key while the file does
+        not carry it, which is the same false claim by a different route."""
+        proc = _run(self._placement_break(tmp_path, "no_top_emit"), tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        written = (tmp_path / "executor.toml").read_text(encoding="utf-8")
+        data = tomllib.loads(written)
+        assert "sandbox_memory_mb" not in data, written
+        assert "sandbox_memory_mb" in _carried_labels(proc.stdout), proc.stdout
+        assert _disagreements(proc.stdout, data), "the agreement cell would not have fired"
