@@ -40,6 +40,8 @@ Notable changes to Venya will be documented in this file.
 - The CLI installer's FIDO2 check looks for a key on the FIDO usage page rather than any `/dev/hidraw` node, so a keyboard on that bus no longer answers for a security key, a host with no HID nodes stays silent, and a key your user cannot reach is named by device with a grant scoped to that device alone (#748)
 - `venya executor register` prints an install recipe that keeps the one-use enrollment token out of `/tmp` and off the command line: stage the bundle in the SSH account's own directory at mode 700, pass the token as an environment prefix on the child, and remove the staged bundle when the install finishes (#752)
 - An admin certificate that verifies against this core's CA but is named by no enrolled row is logged as admitted-but-unknown, with the revoke route to use if it is not a credential you issued, where the same admission read as routine (#751)
+- A core uninstall that meets a symlinked `/var/lib/venya` or `/var/lib/venya/ca` stops before it removes anything and names where the link points, instead of printing `Venya Core uninstalled.` over a tree it never touched; a removal is now reported only after the path is proved gone (#755)
+- `VENYA_PURGE_CONFIG=yes` in the CLI uninstaller refuses a config dir that is a symlink, naming the link and its target, and prints `Removed …` only after proving the directory is gone — a config dir that was never there now says there was nothing to remove (#758)
 
 ## [0.1.0beta2] - 2026-10-28
 
