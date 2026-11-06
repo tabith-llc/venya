@@ -188,6 +188,13 @@ class _RootHarness:
         if variant == "core":
             self._mk("etc/systemd/system/venya-core.service", "[Unit]\n")
             self._mk("var/www/.well-known/venya-ca.crt")
+            # #749: the estate CA lives under /var/lib/venya/ca. These are marker
+            # files in the fake root, never the real paths; the cells ask only
+            # whether the uninstaller's rm reached them.
+            self._mk("var/lib/venya/ca/ca.key")
+            self._mk("var/lib/venya/ca/ca.crt")
+            self._mk("var/lib/venya/ca/admin-ca/admin-ca.key")
+            self._mk("var/lib/venya/stray-state/notes")
         else:
             for unit in (
                 "venya-executor.service",
@@ -209,7 +216,11 @@ class _RootHarness:
         self.rc.joinpath("db-count").write_text("1", encoding="utf-8")
         self.rc.joinpath("role-count").write_text("1", encoding="utf-8")
 
-    def run(self, rm_skip: str = "", skip: str = "yes", answer: str | None = None) -> subprocess.CompletedProcess:
+    def run(
+        self, rm_skip: str = "", skip: str = "yes", answer: str | None = None, purge: str | None = None
+    ) -> subprocess.CompletedProcess:
+        """purge: the VENYA_PURGE_CA value (#749). None leaves the variable out of
+        the environment entirely, which is the default-install case."""
         env = {
             "HOME": str(self.tmp),
             "PATH": f"{self.stub}:{os.defpath}:/usr/bin:/bin",
@@ -218,6 +229,8 @@ class _RootHarness:
             "RM_SKIP_SUB": rm_skip,
             "VENYA_SKIP_PROMPT": skip,
         }
+        if purge is not None:
+            env["VENYA_PURGE_CA"] = purge
         return _run_with_optional_tty(["/bin/bash", str(self.script)], env, answer, timeout=60)
 
     def calls(self) -> str:
@@ -249,8 +262,14 @@ def test_core_clean_uninstall_rc0_and_claim() -> None:
         assert "Venya Core uninstalled." in r.stdout
         assert "[ERROR]" not in r.stdout
         assert not (h.root / "etc/systemd/system/venya-core.service").exists()
-        for d in ("opt/venya", "etc/venya", "var/lib/venya", "var/log/venya"):
+        for d in ("opt/venya", "etc/venya", "var/log/venya"):
             assert not (h.root / d).exists(), f"survivor: {d}"
+        # #749: the CA is kept by default, so /var/lib/venya surviving is NOT a
+        # survivor and the verify block must not call it one; the service's own
+        # state next to the CA is removed.
+        assert (h.root / "var/lib/venya/ca/ca.key").exists()
+        assert not (h.root / "var/lib/venya/payload").exists()
+        assert not (h.root / "var/lib/venya/stray-state").exists()
         assert not (h.root / "usr/local/share/ca-certificates/venya-root-ca.crt").exists()
         assert "userdel -r venya" in h.calls()
 
