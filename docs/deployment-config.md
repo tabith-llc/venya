@@ -119,6 +119,19 @@ is the normal shape of a container or a hand-written unit override — and it wi
 already wrote. Read the boot lines after a restart: if the daemon reports a precedence conflict for the key you just
 set, the file still owns it.
 
+**A re-run keeps what you added.** The installer rebuilds this file on every run, and the rebuild owns the keys it
+writes — `server_url`, `executor_id`, `log_level`, `daemonize`, `injection_method`, `secret_base_fd`, `ca_bundle`,
+`dns_resolver`, `relay_client_ids`, and the `[mtls]` and `[audit]` tables. Anything else you put in the file is read
+back before the rebuild and written again where TOML still reads it at that level: a top-level key like
+`sandbox_memory_mb = 2048` is emitted ahead of the first table header, so it stays a top-level value and still wins
+over the environment, and a `[network]` or `[cert_rotation]` table you added is written after the installer's own
+tables. So `[executor] max_concurrent_commands = 4` is still 4 after you upgrade. The run names each setting it
+carried: `Preserved 2 operator-added executor.toml key(s) across regeneration: sandbox_memory_mb [executor]`. The
+service environment file `/etc/venya/venya-executor.env` follows the same rule — only `VENYA_EXECUTOR_KEY_PASSPHRASE`
+is installer-owned there — and that file is a flat key list, so placement cannot change what a line means (#738).
+One case is not carried, and the run says so: a key placed **inside** one of the installer's own tables (`[mtls]`,
+`[audit]`) is replaced by the installer's version of that table, and its name is printed as a drop.
+
 | Key class | File wins? | Environment spelling the daemon reads | Announced when both are set |
 |---|---|---|---|
 | top-level field (`dns_resolver`, `log_level`, `server_url`, `sandbox_memory_mb`, …) | yes | `VENYA_EXECUTOR_<KEY>` | yes, one line per key |

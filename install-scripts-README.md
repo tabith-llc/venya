@@ -56,7 +56,9 @@ Installs the Venya Executor daemon on a fresh VM. Includes:
 - Rust extension build (`venya_filter.so`)
 - Code fixes (same as core, including the dead-anchor stop)
 - **sbx** CLI (Docker Sandboxes)
-- Configuration: `executor.toml`
+- Configuration: `executor.toml` — a re-run keeps the settings you added there (and in
+  `venya-executor.env`) and names each one it carries; the installer's own keys still take the
+  installer's value (#738)
 - `venya-executor.service` systemd unit
 
 **Usage:**
