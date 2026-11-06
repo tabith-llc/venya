@@ -14,6 +14,7 @@ Tests cover:
 - Middleware mTLS validation chain (Phase 2)
 """
 
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -469,8 +470,15 @@ class TestExtractIdentity:
 # ---------------------------------------------------------------------------
 
 
-def _sqlite_revocation_backend(revocation_rows: list[tuple[str, str]] | None = None):
+def _sqlite_revocation_backend(
+    revocation_rows: list[tuple[str, str]] | None = None,
+    admin_rows: list[tuple[str, str]] | None = None,
+):
     """Real SQLite backend holding the AdminCertRevocation table.
+
+    ``admin_rows`` seeds the #684 registry as ``(serial_number, source)`` pairs —
+    what the #751 admission signal reads. ``registered_at`` keeps its model
+    default and the other columns carry the values the writers would write.
 
     File-backed with the normal connection pool (ticket
     admin-mtls-concurrency-flake #437). The earlier fixture pinned ONE
@@ -491,7 +499,7 @@ def _sqlite_revocation_backend(revocation_rows: list[tuple[str, str]] | None = N
     """
     import tempfile
 
-    from core.iam.models import AdminCertRevocation, Base
+    from core.iam.models import AdminCertRevocation, AdminCredential, Base
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -503,6 +511,8 @@ def _sqlite_revocation_backend(revocation_rows: list[tuple[str, str]] | None = N
     seed = session_factory()
     for serial_number, reason in revocation_rows or []:
         seed.add(AdminCertRevocation(serial_number=serial_number, reason=reason))
+    for serial_number, source in admin_rows or []:
+        seed.add(AdminCredential(serial_number=serial_number, common_name="admin@example.com", source=source))
     seed.commit()
     seed.close()
 
@@ -523,6 +533,7 @@ def _create_admin_mtls_app(
     known_admin_ids: list[str] | None = None,
     admin_mtls_enabled: bool = True,
     revocation_rows: list[tuple[str, str]] | None = None,
+    admin_rows: list[tuple[str, str]] | None = None,
     with_backend: bool = True,
     cert_prefix=None,
 ):
@@ -534,6 +545,9 @@ def _create_admin_mtls_app(
             lookup uses func.upper() SQL, which mocks cannot evaluate
             (ticket sec-admin-mtls-allowlist-revocation; house precedent:
             real-SQLite cells in test_session_manager_gate.py).
+        admin_rows: (serial_number, source) pairs seeded into a REAL SQLite
+            admin_credentials table, the population the #751 admission signal
+            reads (see ``_sqlite_revocation_backend``).
         with_backend: False simulates backend-unavailable → the middleware
             must fail closed.
         cert_prefix: directory the forwarded-cert-file header may point into
@@ -565,7 +579,7 @@ def _create_admin_mtls_app(
     app.state.config = config
 
     if with_backend:
-        app.state.backend = _sqlite_revocation_backend(revocation_rows)
+        app.state.backend = _sqlite_revocation_backend(revocation_rows, admin_rows)
 
     @app.get("/api/v1/admin/test")
     def admin_test(request: Request):
@@ -1778,3 +1792,139 @@ class TestAdminMtlsLeadingZeroSerial:
                 "/api/v1/admin/test", headers=forwarded_headers(prefix, cert)
             )
         assert any("no revocation row matched the rows on file" in r.getMessage() for r in caplog.records)
+
+
+class TestAdmissionSignalUnregisteredSerial751:
+    """#751: the admin admission line states only the premise this path can check.
+
+    The enforcement point answered a no-match with a line whose premise was a FRESH INSTALL
+    (#481). A CA-preserving database drop — the documented fleet wipe drops the database and
+    never touches ``/var/lib/venya``, where the CA lives — leaves the same empty
+    ``admin_cert_revocations`` table under an OLD, still-trusted CA. Table population cannot
+    tell those two states apart. Registration in ``admin_credentials`` can say something the
+    code actually read, so the unregistered case is named: UNKNOWN-BUT-UNREVOKED.
+
+    The decision is unchanged in every cell: an unregistered-but-CA-valid serial still gets 200
+    (a blanket refusal would break healthy certificates — the ruled wrong direction), the
+    admission log is not muted (the other ruled wrong direction), and a serial a revocation row
+    names still gets the shipped 403 with no signal at all.
+    """
+
+    SIGNAL = "UNKNOWN-BUT-UNREVOKED"
+
+    def _leaf(self, admin_ca_dir, admin_ca_security, serial_hex=ADMIN_SERIAL_HEX):
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(serial_hex, 16))
+        return cert, canonical_serial(cert.serial_number)
+
+    def _admit(self, app, prefix, cert):
+        return TestClient(app, raise_server_exceptions=False).get(
+            "/api/v1/admin/test", headers=forwarded_headers(prefix, cert)
+        )
+
+    def _signals(self, caplog):
+        return [r.getMessage() for r in caplog.records if self.SIGNAL in r.getMessage()]
+
+    def test_unregistered_serial_admits_and_signals_the_class(self, admin_ca_dir, admin_ca_security, tmp_path, caplog):
+        """The defect: an unenrolled credential walks in on an EMPTY revocation table and the
+        line must name the class it checked (no revocation row, no enrollment row) instead of
+        implying a fresh install."""
+        prefix = make_cert_prefix(tmp_path)
+        cert, serial_hex = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(admin_ca_dir, cert_prefix=prefix)
+        with caplog.at_level("INFO", logger="venya.server"):
+            resp = self._admit(app, prefix, cert)
+        assert resp.status_code == 200, "the signal is a line, not a gate — the ruled wrong direction"
+        assert resp.json()["user"]["caller"] == "admin"
+        signals = self._signals(caplog)
+        assert len(signals) == 1, f"expected exactly one signal line, got {signals}"
+        msg = signals[0]
+        assert serial_hex in msg, msg
+        # #481 acceptance 5 survives: the line still says WHICH no-match this is.
+        assert "no revocation rows exist" in msg, msg
+        # And #751 is exactly the retirement of the inferred premise.
+        assert "fresh install" not in msg.lower(), msg
+        warning = [r for r in caplog.records if self.SIGNAL in r.getMessage()]
+        assert warning[0].levelno == logging.WARNING, "an operator must see this without log-level surgery"
+
+    def test_enrolled_serial_admits_without_the_signal(self, admin_ca_dir, admin_ca_security, tmp_path, caplog):
+        """Paired negative: a credential a real writer DID enroll gets no alarm.
+
+        Without this half the signal is a blanket shout at every healthy certificate, which is
+        the other ruled-wrong direction (root AGENTS.md §2: every gate gets its negative)."""
+        prefix = make_cert_prefix(tmp_path)
+        cert, serial_hex = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(admin_ca_dir, cert_prefix=prefix, admin_rows=[(serial_hex, "issue-route")])
+        with caplog.at_level("INFO", logger="venya.server"):
+            resp = self._admit(app, prefix, cert)
+        assert resp.status_code == 200
+        assert self._signals(caplog) == []
+        assert any("admitted — enrolled credential" in r.getMessage() for r in caplog.records), [
+            r.getMessage() for r in caplog.records
+        ]
+
+    def test_observed_admission_row_alone_is_not_enrollment(self, admin_ca_dir, admin_ca_security, tmp_path, caplog):
+        """The #684 population writes this credential's row at THIS admission, so a row whose
+        source is ``observed-admission`` cannot be the evidence that it was enrolled — reading it
+        that way is the circularity #684 itself refuses. The signal must survive a second
+        admission of the same serial."""
+        from server.admin_registry import SOURCE_OBSERVED_ADMISSION
+
+        prefix = make_cert_prefix(tmp_path)
+        cert, serial_hex = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            cert_prefix=prefix,
+            admin_rows=[(serial_hex, SOURCE_OBSERVED_ADMISSION)],
+        )
+        with caplog.at_level("INFO", logger="venya.server"):
+            resp = self._admit(app, prefix, cert)
+        assert resp.status_code == 200
+        assert len(self._signals(caplog)) == 1, "a self-written row must not quiet the signal"
+
+    def test_populated_table_miss_keeps_its_own_wording(self, admin_ca_dir, admin_ca_security, tmp_path, caplog):
+        """A non-empty table that simply has no row for this serial is where a FAILED revocation
+        would hide (#481); that case keeps its distinct wording inside the new signal."""
+        prefix = make_cert_prefix(tmp_path)
+        cert, serial_hex = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            cert_prefix=prefix,
+            revocation_rows=[(FOREIGN_SERIAL_HEX, "someone-else")],
+        )
+        with caplog.at_level("INFO", logger="venya.server"):
+            resp = self._admit(app, prefix, cert)
+        assert resp.status_code == 200
+        signals = self._signals(caplog)
+        assert len(signals) == 1
+        assert serial_hex in signals[0], signals[0]
+        assert "no revocation row matched the rows on file" in signals[0], signals[0]
+
+    def test_revoked_serial_refuses_and_prints_no_signal(self, admin_ca_dir, admin_ca_security, tmp_path, caplog):
+        """The decision half: a revocation row naming this serial still answers the shipped 403,
+        and the admission signal never fires for a credential that was refused."""
+        prefix = make_cert_prefix(tmp_path)
+        cert, serial_hex = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            cert_prefix=prefix,
+            revocation_rows=[(serial_hex, "operator-rotated")],
+        )
+        with caplog.at_level("INFO", logger="venya.server"):
+            resp = self._admit(app, prefix, cert)
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == "Admin certificate revoked"
+        assert self._signals(caplog) == []
+
+    def test_the_registry_read_is_inside_the_bounded_window(self):
+        """Structural pin: the #751 read sits in the SAME #658 deadline as the two reads above it.
+
+        A stall on a logging read must not fall through to a 200 — the failure
+        ``test_admin_revocation_read_bound_658.py::test_row_b_still_refuses_when_the_serial_is_not_on_the_list``
+        catches, with a double that fails EVERY read. Which read is inside the window is therefore
+        pinned from the tracked text, the same way that file pins the ``except``-arm order: both
+        shapes behave, only one tells the truth."""
+        text = (Path(__file__).resolve().parents[1] / "src" / "server" / "middleware" / "auth.py").read_text()
+        start = text.index("bounded_read(db, site=ADMIN_MTLS_REVOCATION_SITE)")
+        block = text[start : text.index("except RevocationReadUnavailable", start)]
+        assert "AdminCredential.serial_number" in block, "the enrollment read left the bounded window"
+        assert block.count("db.query(") == 3, "the no-match branch no longer runs the three reads #751 pins"

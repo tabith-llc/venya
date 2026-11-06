@@ -228,10 +228,12 @@ class TestAdminRevocationReadTruthTable658:
     def test_row_b_still_refuses_when_the_serial_is_not_on_the_list(self, admin_ca_dir, admin_ca_security, tmp_path):
         """The empty-list read is inside the same deadline, so a stall there cannot admit either.
 
-        The no-match branch runs a SECOND query (``rows_exist``, the #481 "which no-match is this"
-        line). Both reads are inside one ``bounded_read``, and this cell proves the second one is
-        too: widening only the first read would let a lock stall on the logging query fall through
-        to a 200.
+        The no-match branch runs TWO further queries after the one that decides (``rows_exist``, the
+        #481 "which no-match is this" line, and the #751 enrollment read that decides whether the
+        admission is logged as an UNKNOWN-BUT-UNREVOKED signal). This double fails EVERY read, so the
+        cell proves the shape — a stall anywhere inside the window answers 503 and cannot admit — but
+        it cannot say WHICH query is enclosed. That is pinned structurally, and only structurally, by
+        ``test_admin_mtls.py::TestAdmissionSignalUnregisteredSerial751::test_the_registry_read_is_inside_the_bounded_window``.
         """
         prefix = make_cert_prefix(tmp_path)
         cert = _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(ADMIN_SERIAL_HEX, 16))
