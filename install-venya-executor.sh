@@ -22,6 +22,16 @@ umask 077
 #   - sbx CLI, executor.toml
 #   - venya-executor.service
 #
+# Re-run behavior: executor.toml and /etc/venya/venya-executor.env are rebuilt from the
+# installer's own values, and every setting an operator added to either file is read back
+# BEFORE the write and written again where the parser still reads it at that level,
+# named in the output (#738). A carried top-level key goes ahead of the first table
+# header — appending one after a table would make TOML read it as a member of that table,
+# and extra="ignore" drops it — while carried tables go after the installer's. The
+# installer's own keys keep taking the installer's value; a key set inside one of its
+# tables ([mtls], [audit]) is the one case that cannot be carried, and the run names it
+# as a drop.
+#
 # Environment variables:
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt. It skips
@@ -634,6 +644,72 @@ install -d -m 0755 /etc/venya
 mkdir -p /etc/venya/executor
 mkdir -p /var/log/venya
 
+# --- Preserve operator-added executor.toml keys across a re-run (#738) ---
+# The rebuild below owns MANAGED_TOML_KEYS and MANAGED_TOML_TABLES; every other
+# setting in an existing /etc/venya/executor.toml was put there by an operator, and
+# docs/deployment-config.md tells them to do it. Capture before the truncating
+# redirect, then emit each class where TOML still reads it: a carried top-level line
+# goes inside the generated block BEFORE the first table header, carried tables after
+# it — appending a top-level line to a file whose last line opens a table would bury
+# it in that table (#738, leg 1060). Name both halves in the output, on the shape
+# install-venya-core.sh uses for its .env (installer-rerun-env-custom-keys-clobbered).
+# An operator key inside an installer-owned table cannot be carried without fighting
+# the installer's own value for that table (#738 AC2), so it is dropped and NAMED.
+MANAGED_TOML_KEYS="server_url executor_id log_level daemonize injection_method secret_base_fd ca_bundle dns_resolver relay_client_ids"
+MANAGED_TOML_TABLES="mtls audit"
+MANAGED_TOML_TABLE_KEYS="mtls:ca_cert mtls:cert mtls:key audit:remote_url audit:ca_cert_path"
+
+# One program read four times over a small file: `top` prints the top-level lines to carry,
+# `sect` prints the table sections to carry, `name` prints one label per carried setting,
+# `drop` prints the operator keys that sit inside an installer-owned table. Section bodies
+# travel verbatim, so a multi-line value inside an operator table survives intact. The two
+# classes are separated because they land in different places (#738, leg 1060).
+venya_toml_scan() {  # $1 = top|sect|name|drop, $2 = file
+    awk -v mode="$1" -v keys="$MANAGED_TOML_KEYS" -v tables="$MANAGED_TOML_TABLES" -v tkeys="$MANAGED_TOML_TABLE_KEYS" '
+        function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+        BEGIN {
+            n = split(keys, k, " ");  for (i = 1; i <= n; i++) top[k[i]] = 1
+            n = split(tables, t, " "); for (i = 1; i <= n; i++) tab[t[i]] = 1
+            n = split(tkeys, q, " ");  for (i = 1; i <= n; i++) own[q[i]] = 1
+            cur = ""; keep = 1; cont = 0
+        }
+        /^[ \t]*\[/ {
+            name = trim(substr($0, index($0, "[") + 1)); sub(/\].*$/, "", name)
+            cur = name; keep = !(name in tab); cont = 0
+            if (!keep) next
+            if (mode == "sect") print
+            else if (mode == "name") print "[" name "]"
+            next
+        }
+        {
+            key = ""
+            if ($0 ~ /^[ \t]*[A-Za-z_][A-Za-z0-9_.-]*[ \t]*=/) {
+                eq = index($0, "="); key = trim(substr($0, 1, eq - 1))
+            }
+            if (cur == "") {                    # preamble: top-level keys only
+                if (key == "") { if (cont && mode == "top") print; next }
+                cont = (key in top) ? 0 : 1
+                if (!cont) next
+                if (mode == "top") print
+                else if (mode == "name") print key
+                next
+            }
+            if (keep) { if (mode == "sect") print; next }
+            if (key != "" && !((cur ":" key) in own) && mode == "drop") print cur "." key
+        }
+    ' "$2"
+}
+PRESERVED_TOML_TOP=""
+PRESERVED_TOML_SECTS=""
+PRESERVED_TOML_NAMES=""
+DROPPED_TOML_KEYS=""
+if [ -f /etc/venya/executor.toml ]; then
+    PRESERVED_TOML_TOP=$(venya_toml_scan top /etc/venya/executor.toml)
+    PRESERVED_TOML_SECTS=$(venya_toml_scan sect /etc/venya/executor.toml)
+    PRESERVED_TOML_NAMES=$(venya_toml_scan name /etc/venya/executor.toml)
+    DROPPED_TOML_KEYS=$(venya_toml_scan drop /etc/venya/executor.toml)
+fi
+
 # #326 F-2: printf writer — interpolated values pass as ARGUMENTS (no
 # format-string exposure, no implicit expansion in the sink body); static
 # lines keep their exact bytes and order.
@@ -651,6 +727,16 @@ mkdir -p /var/log/venya
     printf '# the core'\''s relay-client cert CN (core installer). %s\n' "'venya exec register'"
     printf '# writes only cert files, so this line survives registration.\n'
     printf 'relay_client_ids = ["%s-relay"]\n' "$CORE_HOSTNAME"
+    # Carried top-level keys land HERE, before the first table header, and not after
+    # the write: TOML has no end-of-table, so a top-level line appended once a table has
+    # been opened parses as a member of that table, and ExecutorConfig's extra="ignore"
+    # drops it — while this run's own `Preserved` line named it. That is the promise and
+    # the bytes disagreeing (#738, leg 1060).
+    if [ -n "${PRESERVED_TOML_TOP:-}" ]; then
+        printf '\n'
+        echo '# --- operator-added top-level keys preserved across re-run (installer, #738) ---'
+        printf '%s\n' "$PRESERVED_TOML_TOP"
+    fi
     printf '\n'
     printf '[mtls]\n'
     printf 'ca_cert = "/etc/venya/executor/ca.crt"\n'
@@ -667,6 +753,20 @@ mkdir -p /var/log/venya
     esac
 } > /etc/venya/executor.toml
 
+if [ -n "$PRESERVED_TOML_SECTS" ]; then
+    {
+        printf '\n'
+        echo '# --- operator-added tables preserved across re-run (installer, #738) ---'
+        printf '%s\n' "$PRESERVED_TOML_SECTS"
+    } >> /etc/venya/executor.toml
+fi
+if [ -n "$PRESERVED_TOML_NAMES" ]; then
+    info "Preserved $(printf '%s\n' "$PRESERVED_TOML_NAMES" | wc -l) operator-added executor.toml key(s) across regeneration: $(printf '%s\n' "$PRESERVED_TOML_NAMES" | tr '\n' ' ')"
+fi
+if [ -n "$DROPPED_TOML_KEYS" ]; then
+    warn "Dropped operator-added executor.toml key(s) inside an installer-owned table: $(printf '%s\n' "$DROPPED_TOML_KEYS" | tr '\n' ' ')"
+fi
+
 info "Executor config written to /etc/venya/executor.toml"
 
 # --- Runtime passphrase delivery: root-only systemd EnvironmentFile (#565) ---
@@ -678,8 +778,28 @@ info "Executor config written to /etc/venya/executor.toml"
 # MEASURED: the core installer's EnvironmentFile is 0640 root:venya, NOT 0600
 # venya-owned (install-venya-core.sh, the venya-core.env write). Copied deliberately,
 # per the correction booked in docs/design-fido2-keywrap.md section 6.
+# AC4 (#738): this carrier follows the same rule as executor.toml, so an operator
+# cannot be left with one file that preserves and one that silently does not. Only
+# the passphrase line is installer-owned; every other VENYA_ line in the incumbent
+# file is captured before the delete and re-appended after the write — the
+# install-venya-core.sh .env idiom, verbatim in shape.
+MANAGED_ENV_KEYS="VENYA_EXECUTOR_KEY_PASSPHRASE"
+PRESERVED_ENV_LINES=""
+if [ -f /etc/venya/venya-executor.env ]; then
+    PRESERVED_ENV_LINES=$(awk -F= -v managed="$MANAGED_ENV_KEYS" '
+        BEGIN { n = split(managed, m, " "); for (i = 1; i <= n; i++) skip[m[i]] = 1 }
+        /^VENYA_/ && !($1 in skip)
+    ' /etc/venya/venya-executor.env)
+fi
 rm -f /etc/venya/venya-executor.env
 printf 'VENYA_EXECUTOR_KEY_PASSPHRASE=%s\n' "$EXECUTOR_KEY_PASSPHRASE" > /etc/venya/venya-executor.env
+if [ -n "$PRESERVED_ENV_LINES" ]; then
+    {
+        echo "# --- operator-added keys preserved across re-run (installer, #738) ---"
+        printf '%s\n' "$PRESERVED_ENV_LINES"
+    } >> /etc/venya/venya-executor.env
+    info "Preserved $(printf '%s\n' "$PRESERVED_ENV_LINES" | wc -l) operator-added EnvironmentFile key(s) across regeneration: $(printf '%s\n' "$PRESERVED_ENV_LINES" | cut -d= -f1 | tr '\n' ' ')"
+fi
 chown root:venya /etc/venya/venya-executor.env
 chmod 0640 /etc/venya/venya-executor.env
 info "Executor key passphrase delivered via /etc/venya/venya-executor.env (0640 root:venya)."

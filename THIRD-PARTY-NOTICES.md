@@ -101,7 +101,7 @@ block and not backed by a command below is a defect the release gate refuses to 
 | fido2 | `2.2.1` | `grep -A1 '^name = "fido2"$' uv.lock` |
 | hex | `0.4.3` | `grep -A1 '^name = "hex"$' packages/executor/Cargo.lock` |
 | httpx2 | `2.12.0` | `grep -A1 '^name = "httpx2"$' uv.lock` |
-| mcp | `1.29.1` | `grep -A1 '^name = "mcp"$' uv.lock` |
+| mcp | `1.30.0` | `grep -A1 '^name = "mcp"$' uv.lock` |
 | prometheus-client | `0.26.0` | `grep -A1 '^name = "prometheus-client"$' uv.lock` |
 | psycopg2-binary | `2.9.12` | `grep -A1 '^name = "psycopg2-binary"$' uv.lock` |
 | pycryptodome | `3.23.0` | `grep -A1 '^name = "pycryptodome"$' uv.lock` |
