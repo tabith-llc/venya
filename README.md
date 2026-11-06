@@ -314,7 +314,7 @@ Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict ve
 
 Core and executor must run on separate hosts (or separate VMs on one physical machine) — see [Host Trust Model](#host-trust-model).
 
-Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/Application Support/venya/config.json` on macOS, `%APPDATA%\venya\config.json` on Windows. FIDO2 needs no extra setup on macOS (native IOKit HID transport, no root) or Windows (platform WebAuthn API — standard-user capable, interactive desktop required); on Linux the installer prints udev rules if `/dev/hidraw*` is not user-readable.
+Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/Application Support/venya/config.json` on macOS, `%APPDATA%\venya\config.json` on Windows. FIDO2 needs no extra setup on macOS (native IOKit HID transport, no root) or Windows (platform WebAuthn API — standard-user capable, interactive desktop required); on Linux systemd already grants the user logged in at the console access to security keys, and the installer names the device plus a grant scoped to that one device if it finds a key your user cannot reach.
 
 Production deployment guide: **[Installation Guide](docs/installation.md)**
 
