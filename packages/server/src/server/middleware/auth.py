@@ -574,7 +574,9 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         db = backend.get_session()
         try:
-            from core.iam.models import AdminCertRevocation
+            from core.iam.models import AdminCertRevocation, AdminCredential
+
+            from ..admin_registry import SOURCE_OBSERVED_ADMISSION
 
             # #658: this read is now BOUNDED, through the same savepoint-scoped lock deadline the
             # executor plane got in #603 — not a second implementation of it. A held
@@ -599,16 +601,57 @@ class SessionMiddleware(BaseHTTPMiddleware):
                     .first()
                 )
                 if revoked is None:
-                    # One line at the enforcement point, naming WHICH no-match this
-                    # is: an empty table is a fresh install, a non-empty table that
-                    # missed is where a failed revocation would hide (#481).
+                    # One line at the enforcement point, naming WHICH no-match this is
+                    # (#481). #481's reasoning was that an empty revocation table means a
+                    # FRESH INSTALL. #751 retires that premise: the documented fleet wipe
+                    # drops the database and never touches /var/lib/venya, where the CA
+                    # lives, so after that act the table is empty under an OLD, still
+                    # trusted CA and every credential issued before the drop is CA-valid,
+                    # unexpired, and named by no table this path reads — admitted, and
+                    # logged as routine.
+                    #
+                    # What this path CAN check is registration, not table population:
+                    # ``admin_credentials`` is written by the boot reader, the mint route
+                    # and the operator's register verb. A row whose source is
+                    # ``observed-admission`` is written by the admission further down this
+                    # same function, so treating it as enrollment would be circular — the
+                    # same reasoning #684 gives for not reading membership out of the
+                    # revocation table. This read stays INSIDE the same ``bounded_read``
+                    # as the two above it, so a lock stall here refuses (503) rather than
+                    # admitting with an unverified claim (#658).
                     rows_exist = db.query(AdminCertRevocation.serial_number).first() is not None
-                    logger.info(
-                        "Admin route %s: serial %s admitted — %s",
-                        path,
-                        presented_serial,
-                        "no revocation row matched the rows on file" if rows_exist else "no revocation rows exist",
+                    enrolled = (
+                        db.query(AdminCredential.serial_number)
+                        .filter(
+                            serial_match_clause(AdminCredential.serial_number, presented_serial),
+                            AdminCredential.source != SOURCE_OBSERVED_ADMISSION,
+                        )
+                        .first()
+                        is not None
                     )
+                    rows_note = (
+                        "no revocation row matched the rows on file" if rows_exist else "no revocation rows exist"
+                    )
+                    if enrolled:
+                        logger.info(
+                            "Admin route %s: serial %s admitted — enrolled credential, %s",
+                            path,
+                            presented_serial,
+                            rows_note,
+                        )
+                    else:
+                        logger.warning(
+                            "Admin route %s: serial %s admitted as UNKNOWN-BUT-UNREVOKED — the certificate "
+                            "verifies against this core's admin CA, %s, and no enrolled row in "
+                            "admin_credentials names this serial. Registration is the checkable premise here, "
+                            "not table population: a database dropped under a surviving CA leaves no enrolled "
+                            "row for anything issued before it. This line does not say the credential is "
+                            "revoked and does not say it is new — confirm it is a credential you issued, and "
+                            "revoke it at POST /api/v1/admin/certs/revoke if it is not.",
+                            path,
+                            presented_serial,
+                            rows_note,
+                        )
         except RevocationReadUnavailable as e:
             # ORDER MATTERS: this arm must stay ABOVE the fail-closed ``except Exception`` below.
             # RevocationReadUnavailable is a RuntimeError, so a generic arm placed first swallows it

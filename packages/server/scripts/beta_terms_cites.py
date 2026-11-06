@@ -176,8 +176,8 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     "packages/core/src/core/iam/models.py:382": (M, "Revoked executor certificate serial numbers", 1, "pin"),
     f"{M}:379": (M, "class ExecutorCertRevocation", 1, "pin"),
     f"{M}:613": (M, "class AdminCertRevocation", 1, "pin"),
-    "packages/server/src/server/middleware/auth.py:860": (A, "async def _validate_executor_mtls", 1, "pin"),
-    "packages/server/src/server/middleware/auth.py:975": (A, "rev = executor_revocation_state(", 1, "pin"),
+    "packages/server/src/server/middleware/auth.py:903": (A, "async def _validate_executor_mtls", 1, "pin"),
+    "packages/server/src/server/middleware/auth.py:1018": (A, "rev = executor_revocation_state(", 1, "pin"),
     "packages/server/src/server/middleware/auth.py:555": (
         A,
         "ssl_crl, so this lookup is the enforcement point",
