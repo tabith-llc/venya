@@ -80,6 +80,28 @@ if [ -d /var/lib/venya/ca ]; then
     CA_PRESENT="yes"
 fi
 
+# #755: a state path that is a symlink is not this machine's state, and neither
+# removal arm can see that. `find` with the default -P does not follow a symlink
+# given as its starting point, and `rm -rf` on a symlink unlinks the NAME, not
+# the tree it points at. So against a linked /var/lib/venya the preserve sweep
+# removed nothing, the survivor probe named nothing, and the run still printed
+# "Venya Core uninstalled."; on the VENYA_PURGE_CA=yes arm it reported the
+# estate CA gone while the key material stayed on disk. Refuse both paths before
+# anything is touched, on the same -L test venya-common.sh uses for a symlinked
+# file:// tarball (#327) — a dangling link is refused too, because -L is an lstat
+# and reads true where -e would read "gone".
+STATE_TYPE_REFUSED=""
+for state_path in /var/lib/venya /var/lib/venya/ca; do
+    [ -L "$state_path" ] || continue
+    link_target="$(readlink -f -- "$state_path" 2> /dev/null || true)"
+    error "State path is a symlink: $state_path${link_target:+ -> $link_target} — refusing to follow it (#755)."
+    STATE_TYPE_REFUSED="${STATE_TYPE_REFUSED:+$STATE_TYPE_REFUSED, }$state_path"
+done
+if [ -n "$STATE_TYPE_REFUSED" ]; then
+    error "Nothing was removed: $STATE_TYPE_REFUSED is not a real directory. Repoint it at a directory on this machine, or run this uninstaller where the state actually lives."
+    exit 1
+fi
+
 if [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
     # #399: read on a closed/EOF stdin aborts under set -e with zero output.
     # Gate the non-TTY case loudly first, before any removal — same contract
@@ -169,7 +191,10 @@ for path_item in /etc/systemd/system/venya-core.service \
                  /var/www/.well-known/venya-ca.crt \
                  /usr/local/share/ca-certificates/venya-root-ca.crt \
                  /usr/local/share/ca-certificates/venya-local-ca.crt; do
-    if [ -e "$path_item" ]; then
+    # -L beside -e (#755): a leftover that is a dangling symlink reads "gone" to
+    # -e alone, and this loop is what stands between a partial run and the
+    # success line. Same idiom as cleanup_install_temps in venya-common.sh.
+    if [ -e "$path_item" ] || [ -L "$path_item" ]; then
         error "$(basename "$path_item") still present at $path_item — inspect manually."
         VERIFY_FAILED=1
     fi
@@ -181,7 +206,7 @@ fi
 # The state directory is verified by mode: purged means gone, kept means the CA
 # is still there and nothing else is.
 if [ "$PURGE_CA" = "yes" ]; then
-    if [ -e /var/lib/venya ]; then
+    if [ -e /var/lib/venya ] || [ -L /var/lib/venya ]; then
         error "/var/lib/venya still present after VENYA_PURGE_CA=yes — inspect manually."
         VERIFY_FAILED=1
     fi
