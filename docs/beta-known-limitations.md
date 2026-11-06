@@ -113,7 +113,7 @@ succeeded.
 And the stronger thing, which the page has to say rather than imply: **at this surface the listener
 can name a revoked peer today, from two populations and from no CRL at all.** The service CA that signs the core's
 relay-client credential
-(`-CA /var/lib/venya/ca/ca.crt`, `install-venya-core.sh:1024`) is the same CA that signs executor
+(`-CA /var/lib/venya/ca/ca.crt`, `install-venya-core.sh:1127`) is the same CA that signs executor
 leaves (`CAManager.ca_cert_path`, `packages/server/src/server/ca.py:395`, leaf mint at
 `packages/server/src/server/ca.py:622`), and the CRL that CA mints is populated from
 `ExecutorCertRevocation` alone (`CAManager.generate_crl`,
@@ -153,8 +153,8 @@ and takes connections from the core network (default `host="0.0.0.0"` in `RelayL
 `packages/executor/src/executor/relay_listener.py:654`, and the inbound `8443/tcp` rule for an
 executor in [FIREWALL.md](FIREWALL.md):50). The peer that presents at that door is the
 core's relay-client credential, signed by the core installer with a **365-day** validity
-(`-days 365`, `install-venya-core.sh:1026`), CN `${CORE_HOSTNAME}-relay`
-(`install-venya-core.sh:1017`). So: any core host that still holds a relay-client certificate
+(`-days 365`, `install-venya-core.sh:1129`), CN `${CORE_HOSTNAME}-relay`
+(`install-venya-core.sh:1120`). So: any core host that still holds a relay-client certificate
 that was once signed by your CA, and whose CN is still in the executor's `relay_client_ids`,
 completes the handshake at that executor. **Retiring the machine is no longer silently ignored —
 since #597 a revoked serial of that credential is refused at the accept point — but the handshake
@@ -249,7 +249,7 @@ assumption is not:
 - **Re-mint the core's relay pair, and know what that does NOT do.** A completing run of
   `install-venya-core.sh` regenerates the relay key and re-signs the credential with no
   existence guard on the files (`openssl ecparam -genkey ... relay-client.key`,
-  `install-venya-core.sh:1009`, then the sign at `install-venya-core.sh:1026`), while the run
+  `install-venya-core.sh:1112`, then the sign at `install-venya-core.sh:1129`), while the run
   preserves the certificate authority — the same re-run behaviour named in the `#588` entry
   below. So a re-run rotates what the core presents. **Since #597 the previous credential is not
   invisible either — it is in `core_relay_credentials` and is revocable by serial**
@@ -267,7 +267,7 @@ assumption is not:
 **A revoked core relay-client credential is refused at this door, and do not read short-lived
 certificates as the mechanism.** The 30-day short lifetime that exists is the
 EXECUTOR leaf (`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:47`); the
-core relay-client credential is minted at 365 days (`install-venya-core.sh:1026`). **This bullet used to
+core relay-client credential is minted at 365 days (`install-venya-core.sh:1129`). **This bullet used to
 say the opposite — that no revoked serial of this class existed and that the cell proving a refusal
 could not be written against today's product. Both halves became false at `0c81975`:** the serial is
 nameable now, the door refuses it, and the cell is written
@@ -618,7 +618,7 @@ documented once in
 on a host.** The two above are the Python writers of CA and leaf key material — the class #565
 governs. Separately, the core installer mints three TLS machine keys with `openssl ecparam` and
 leaves them unencrypted at rest, each guarded by mode and ownership rather than a passphrase:
-the server leaf key (`install-venya-core.sh:969`, `chmod 600` at `:967`), the relay client key
+the server leaf key (`install-venya-core.sh:1072`, `chmod 600` at `:967`), the relay client key
 (`:1005`, `:1007`) and the inner-listener key (`:1063`, `:1065`). Those are not #565 sites — no
 `NoEncryption()` call is involved, and a daemon must read them unattended at start — but a partner
 sweeping a core for readable private keys will find them, so they are named here rather than left
