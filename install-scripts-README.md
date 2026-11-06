@@ -97,7 +97,7 @@ Installs the Venya workstation client bundle for the current operator user. **No
 - **uv** (if missing, into `~/.local/bin`)
 - `venya-cli` via `uv tool install` (isolated venv, `venya` shim in `~/.local/bin`)
 - `venya-mcp` via `uv tool install` (isolated venv, `venya-mcp` shim; `VENYA_INSTALL_MCP=no` skips)
-- FIDO2 `/dev/hidraw*` access check with actionable udev/plugdev instructions
+- FIDO2 access check scoped to security-key devices (HID usage page `0xF1D0`): a keyboard or joystick on the same bus is not reported as a key, a host with no HID devices says nothing, and any remedy printed names the one device found
 
 **Usage (on the operator workstation):**
 ```bash

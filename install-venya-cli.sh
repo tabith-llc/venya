@@ -222,19 +222,42 @@ if [ "$(uname -s)" = "Darwin" ]; then
     info "FIDO2 on macOS uses IOKit HID — no udev rules or root required."
     info "Plug in the security key before first venya login/enroll."
 else
-    HIDRAW_RW=0
-    for d in /dev/hidraw*; do
-        if [ -r "$d" ] && [ -w "$d" ]; then
-            HIDRAW_RW=1
+    # A security key is identified by its HID usage page (0xF1D0), not by the mere
+    # existence of a /dev/hidraw node: a keyboard or a joystick on that bus used to
+    # answer for a FIDO key here, and a host with no HID nodes at all warned too,
+    # because an unmatched glob runs the loop body once with the literal pattern.
+    # The two roots are overridable so the #748 cells can drive both branches
+    # without hardware; the defaults are the real paths.
+    HIDRAW_CLASS="${VENYA_HIDRAW_CLASS_DIR:-/sys/class/hidraw}"
+    HIDRAW_DEV="${VENYA_HIDRAW_DEV_DIR:-/dev}"
+    HID_OK=""      # a FIDO node this user can read and write
+    HID_NODE=""    # the first FIDO node this user cannot reach
+    HID_ID=""      # its device identity, so the warning names a device, not a bus
+    for sysdir in "$HIDRAW_CLASS"/hidraw*; do
+        [ -d "$sysdir" ] || continue
+        node="$HIDRAW_DEV/${sysdir##*/}"
+        [ -e "$node" ] || continue
+        # Short item 06 D0 F1 = Usage Page (0xF1D0, FIDO), read out of the same
+        # sysfs attribute systemd's own fido_id classifier uses. A kernel that
+        # does not expose it classifies nothing, and so stays silent here too.
+        LC_ALL=C grep -a -qF -- $'\x06\xd0\xf1' "$sysdir/device/report_descriptor" 2> /dev/null || continue
+        if [ -r "$node" ] && [ -w "$node" ]; then
+            HID_OK="$node"
             break
         fi
+        if [ -z "$HID_NODE" ]; then
+            HID_NODE="$node"
+            HID_ID="$(cat "$sysdir/device/modalias" 2> /dev/null || true)"
+        fi
     done
-    if [ "$HIDRAW_RW" != "1" ]; then
-        warn "No read/write access to /dev/hidraw* — FIDO2 key will not be reachable as this user."
-        warn "Fix (one-time, needs sudo):"
-        warn "  echo 'KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", MODE=\"0660\", GROUP=\"plugdev\"' | sudo tee /etc/udev/rules.d/60-fido2.rules"
-        warn "  sudo udevadm control --reload-rules && sudo udevadm trigger"
-        warn "  sudo usermod -aG plugdev $(id -un)   # then re-login"
+    if [ -n "$HID_OK" ]; then
+        info "FIDO2 key reachable at $HID_OK"
+    elif [ -n "$HID_NODE" ]; then
+        warn "FIDO2 key present at $HID_NODE${HID_ID:+ ($HID_ID)} — not readable/writable as $(id -un), so venya cannot reach it."
+        warn "The key belongs to the machine it is plugged into, and systemd grants the user logged"
+        warn "in at that console access to security keys already. If this shell is not that user,"
+        warn "run venya there. To grant just this device instead:"
+        warn "  sudo chown $(id -un) $HID_NODE   # until the key is unplugged; needs no udev rule"
     fi
 fi
 

@@ -590,8 +590,10 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 
 Installs `venya` (CLI) and `venya-mcp` (MCP server for LLM clients) as
 isolated `uv tool` venvs with shims in `~/.local/bin`. Set
-`VENYA_INSTALL_MCP=no` for CLI-only. If the FIDO2 key is not reachable as
-your user, the installer prints the exact udev/plugdev commands to fix it.
+`VENYA_INSTALL_MCP=no` for CLI-only. On Linux, systemd already grants the user
+logged in at the console access to FIDO2 security keys, so a key plugged into
+this machine normally needs no setup; if the installer finds a key your user
+cannot reach it names that device and a grant scoped to that device alone.
 
 **Windows:** use `install-venya-cli.ps1` from the same release (run as
 Administrator — machine-wide install to `C:\Program Files\Venya`; per-user
