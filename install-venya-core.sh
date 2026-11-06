@@ -412,6 +412,109 @@ else
     info "Upgrade: $INSTALLED_VERSION -> $INCOMING_VERSION"
 fi
 
+# --- Pre-upgrade restore point, as a function, so the schema compare below can take it BEFORE
+# it refuses (ticket installer-version-guard-face-compare-750). The body is the one this script has
+# run since installer-upgrade-version-guard-and-backup: taken once, failure aborts before any
+# migration, retention keeps the 3 newest. It was an inline branch of the version comparison, which
+# is exactly why a same-version face skipped it; the call sites are now two and the body is one.
+venya_preupgrade_backup() {
+    if [ "${PREUPGRADE_BACKUP_TAKEN:-}" = "yes" ]; then
+        return 0
+    fi
+    BACKUP_DIR="/var/backups/venya"
+    mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
+    BACKUP_FILE="$BACKUP_DIR/pre-upgrade-${INSTALLED_VERSION}-to-${INCOMING_VERSION}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+    info "Backing up database before migrations -> $BACKUP_FILE"
+    if ! sudo -u postgres pg_dump -d venya 2>/dev/null | gzip > "$BACKUP_FILE"; then
+        error "Pre-upgrade pg_dump FAILED — aborting BEFORE migrations (no backup, no upgrade)."
+        rm -f "$BACKUP_FILE"
+        exit 1
+    fi
+    chmod 600 "$BACKUP_FILE"
+    # Retention: keep the 3 newest pre-upgrade backups.
+    ls -1t "$BACKUP_DIR"/pre-upgrade-*.sql.gz 2>/dev/null | tail -n +4 | while read -r old_backup; do
+        rm -f "$old_backup"
+    done
+    info "Backup complete: $(du -h "$BACKUP_FILE" | cut -f1)"
+    PREUPGRADE_BACKUP_TAKEN=yes
+}
+
+# --- Schema-face compare BEFORE any mutation (ticket installer-version-guard-face-compare-750) ---
+# The version arm above asks whether two STRINGS are equal and treats "equal" as safety. Two
+# different source trees can carry the same release name, so a same-version face swap walks through
+# that arm into forward-only migrations — and used to walk past the restore point as well, because
+# the backup keyed on INSTALLED_VERSION != INCOMING_VERSION. What the installer can read instead of
+# a name is the alembic POSITION: the head the incoming tarball ships, and the stamp the live
+# database stores. Both are printed on every path that decides. Refused when the stored stamp is
+# neither that head nor one of its ancestors, overridable only by VENYA_ALLOW_AHEAD_SCHEMA —
+# deliberately NOT VENYA_ALLOW_DOWNGRADE, which already answers the version-string question. One
+# knob per question, so nobody moves a schema with an escape hatch meant for a label.
+#
+# READ-ONLY: nothing here runs alembic, nothing writes alembic_version, and no migration is added or
+# edited. The chain is walked from the tarball's own revision files, unextracted, so a refusal
+# leaves the host exactly as it was found except for the restore point it took first.
+# shortcut: walks single-parent chains only — a merge revision (down_revision as a tuple) reads as
+# more than one head, which warns and takes a restore point rather than refusing; upgrade when the
+# product ships its first branched migration set.
+if [ -z "$INSTALLED_VERSION" ]; then
+    info "Schema compare: no incumbent install — fresh install, nothing to compare and no refusal."
+elif [ -z "$INCOMING_VERSION" ]; then
+    warn "Schema compare: the incoming version was unreadable, so the tarball's migration set was not compared either. The version guard above refused to guess at it; this does not."
+else
+    MIG_INDEX=$(tar -xzOf "$TARBALL_FILE" --wildcards '*/packages/core/alembic/versions/*.py' 2>/dev/null \
+        | grep -E '^(revision|down_revision)') || MIG_INDEX=""
+    STORED_STAMP=$(sudo -u postgres psql -d venya -tA -c 'select version_num from alembic_version limit 1' 2>/dev/null | head -n1) || STORED_STAMP=""
+    if [ -z "$MIG_INDEX" ]; then
+        warn "Schema compare: no alembic revisions readable in the tarball, so the schema face cannot be named. Not a refusal — but a restore point is taken before anything changes."
+        BACKUP_REQUIRED=yes
+    else
+        FACES=$(printf '%s\n' "$MIG_INDEX" | awk -v stored="$STORED_STAMP" '
+            /^revision/ { if (match($0, /"[^"]*"/)) { n++; rev[n] = substr($0, RSTART + 1, RLENGTH - 2) } }
+            /^down_revision/ { if (match($0, /"[^"]*"/) && n > 0) { d = substr($0, RSTART + 1, RLENGTH - 2); down[rev[n]] = d; isdown[d] = 1 } }
+            END {
+                heads = 0; head = ""
+                for (i = 1; i <= n; i++) if (!(rev[i] in isdown)) { heads++; head = rev[i] }
+                if (heads != 1 || n == 0) { printf "\tunreadable\n"; exit }
+                if (stored == "") { printf "%s\tnostored\n", head; exit }
+                cur = head; steps = 0
+                while (cur != "" && steps <= n) {
+                    if (cur == stored) { printf "%s\t%s\n", head, (cur == head ? "equal" : "ancestor"); exit }
+                    cur = down[cur]; steps++
+                }
+                printf "%s\tahead\n", head
+            }')
+        INCOMING_HEAD=${FACES%%$'\t'*}
+        SCHEMA_VERDICT=${FACES##*$'\t'}
+        info "Schema faces — incoming head: ${INCOMING_HEAD:-<unreadable>}; stored stamp: ${STORED_STAMP:-<none>}; verdict: ${SCHEMA_VERDICT:-<none>}"
+        case "$SCHEMA_VERDICT" in
+            equal)
+                info "Stored stamp IS the incoming head: this re-run moves no schema. That is the check the version string could not make."
+                ;;
+            ancestor)
+                BACKUP_REQUIRED=yes
+                warn "Schema moves this run: stored $STORED_STAMP -> incoming $INCOMING_HEAD. A restore point is taken before any change, even on a same-version re-run (#750)."
+                ;;
+            ahead)
+                if [ "${VENYA_ALLOW_AHEAD_SCHEMA:-}" = "yes" ]; then
+                    BACKUP_REQUIRED=yes
+                    warn "The live database is stamped AHEAD of the incoming tarball (stored $STORED_STAMP, incoming head $INCOMING_HEAD) and VENYA_ALLOW_AHEAD_SCHEMA=yes proceeds. The schema is NOT downgraded; old code over a newer schema is unsupported."
+                else
+                    warn "Refusing: the live database is stamped AHEAD of the incoming tarball (stored $STORED_STAMP, incoming head $INCOMING_HEAD), while the version strings read as a routine re-run."
+                    warn "The incoming code has no path to that stamp. Taking the restore point FIRST, then stopping before any change to the install."
+                    venya_preupgrade_backup
+                    error "Nothing was extracted, no venv was rebuilt, no migration ran. If this face swap is deliberate: VENYA_ALLOW_AHEAD_SCHEMA=yes — a knob of its own, not VENYA_ALLOW_DOWNGRADE."
+                    exit 1
+                fi
+                ;;
+            *)
+                BACKUP_REQUIRED=yes
+                warn "Schema compare could not name both faces (stored: ${STORED_STAMP:-<none>}; incoming head: ${INCOMING_HEAD:-<unreadable>}). Not a refusal — but a restore point is taken before anything changes."
+                ;;
+        esac
+    fi
+fi
+
 venya_extract_tarball
 
 # --- Apply shared code fixes (patch source BEFORE building) ---
@@ -1353,28 +1456,19 @@ if [ "$NGINX_RESTART_RC" -ne 0 ] || ! systemctl is-active --quiet nginx.service 
 fi
 info "Nginx enabled and started"
 
-# --- Pre-upgrade database backup (ticket installer-upgrade-version-guard-and-backup) ---
+# --- Pre-upgrade database backup (tickets installer-upgrade-version-guard-and-backup,
+# installer-version-guard-face-compare-750) ---
 # Migrations are forward-only; the honest rollback is restore-from-backup.
-# Taken ONLY on a version-changing re-run over an existing install: fresh
-# installs have an empty DB, same-version re-runs have no schema delta.
-# Failure aborts BEFORE any migration runs — no backup, no upgrade.
-if [ -n "$INSTALLED_VERSION" ] && [ -n "$INCOMING_VERSION" ] && [ "$INSTALLED_VERSION" != "$INCOMING_VERSION" ]; then
-    BACKUP_DIR="/var/backups/venya"
-    mkdir -p "$BACKUP_DIR"
-    chmod 700 "$BACKUP_DIR"
-    BACKUP_FILE="$BACKUP_DIR/pre-upgrade-${INSTALLED_VERSION}-to-${INCOMING_VERSION}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
-    info "Backing up database before migrations -> $BACKUP_FILE"
-    if ! sudo -u postgres pg_dump -d venya 2>/dev/null | gzip > "$BACKUP_FILE"; then
-        error "Pre-upgrade pg_dump FAILED — aborting BEFORE migrations (no backup, no upgrade)."
-        rm -f "$BACKUP_FILE"
-        exit 1
-    fi
-    chmod 600 "$BACKUP_FILE"
-    # Retention: keep the 3 newest pre-upgrade backups.
-    ls -1t "$BACKUP_DIR"/pre-upgrade-*.sql.gz 2>/dev/null | tail -n +4 | while read -r old_backup; do
-        rm -f "$old_backup"
-    done
-    info "Backup complete: $(du -h "$BACKUP_FILE" | cut -f1)"
+# Taken on a version-CHANGING re-run, as before, and NOW ALSO when the schema compare above
+# named a movement the version strings could not see: a same-version face swap whose stored
+# stamp is not the incoming head moves the schema exactly as an upgrade does. The sentence this
+# block used to carry — "same-version re-runs have no schema delta" — is the premise #750 exists
+# to retire: the delta lives in the alembic stamp, not in the label beside it.
+# Failure aborts BEFORE any migration runs — no backup, no upgrade. The ahead-refusal path in the
+# compare block calls the same function first, so a refused face swap still leaves a restore point.
+if [ -n "$INSTALLED_VERSION" ] && [ -n "$INCOMING_VERSION" ] &&
+    { [ "$INSTALLED_VERSION" != "$INCOMING_VERSION" ] || [ "${BACKUP_REQUIRED:-no}" = "yes" ]; }; then
+    venya_preupgrade_backup
 fi
 
 # --- Run database migrations (core-specific) ---
