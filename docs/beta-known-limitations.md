@@ -220,8 +220,8 @@ it is the owner's to make, and it is named here as his rather than as a task.
 the page should not let the peer-revocation gap hide them. First, the core's own application gate
 refuses a revoked EXECUTOR serial per request, on the inbound plane, in
 `_validate_executor_mtls` → `executor_revocation_state` with the presented serial
-(`packages/server/src/server/middleware/auth.py:860`, lookup at
-`packages/server/src/server/middleware/auth.py:975`). Second, the executor daemon stops
+(`packages/server/src/server/middleware/auth.py:903`, lookup at
+`packages/server/src/server/middleware/auth.py:1018`). Second, the executor daemon stops
 cooperatively on a bounded outage rather than serving on an unanswered question —
 `max_revocation_failures`, default 3
 (`packages/executor/src/executor/config.py`, `CertificateRotationConfig.max_revocation_failures`), fed at
