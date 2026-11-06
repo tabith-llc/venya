@@ -245,7 +245,7 @@ assumption is not:
   matters: the executor installer
   **rewrites** this key on every run (`relay_client_ids = ["${CORE_HOSTNAME}-relay"]`,
   `install-venya-executor.sh:653`), so a hand-edit there is not durable across a re-run — the
-  rewrite is documented in its own entry below (#598).
+  rewrite is documented in its own entry below (#738).
 - **Re-mint the core's relay pair, and know what that does NOT do.** A completing run of
   `install-venya-core.sh` regenerates the relay key and re-signs the credential with no
   existence guard on the files (`openssl ecparam -genkey ... relay-client.key`,
@@ -764,49 +764,45 @@ entry is **deleted**, not softened, when it does.
 
 ## Installing and upgrading
 
-### An executor setting you put in the config file disappears the next time the installer re-runs
+### An executor setting you put inside one of the installer's own tables is replaced when the installer re-runs
 
-Status: known limitation in beta · Target: no date set · Tracked as: #598 (row closed on the API
-label face 2026-10-16, `status/merged`, with the precedence contract; **its AC6, the installer
-half, did not ship**, and this entry is the live carrier for that half — the whole-file rewrite is
-still shipped bytes at `install-venya-executor.sh:668` and the environment-file rewrite at
-`:586-587`)
+Status: known limitation in beta · Target: no date set · Tracked as: #738 (the installer half of
+#598 AC6; the preserve landed with `refs #738`, and the served-guest re-run cell is what closes this
+entry)
 
-**Who is affected:** an operator who tunes an executor by editing
-`/etc/venya/executor.toml` — which is exactly what the config reference and the precedence
-page tell you to do — and later re-runs `install-venya-executor.sh` on that host. Re-runs are
-the supported upgrade path, so this is not an edge case.
+**Who is affected:** an operator who tunes an executor by editing `/etc/venya/executor.toml` or
+`/etc/venya/venya-executor.env` — which is what the config reference and the precedence page tell
+you to do — and later re-runs `install-venya-executor.sh` on that host. Re-runs are the supported
+upgrade path.
 
-**What you get today:** the installer rebuilds that file from nothing on every run — the
-write in `install-venya-executor.sh` redirects the whole generated block over the file
-(`} > /etc/venya/executor.toml`), so afterwards the only lines in it are the ones that run
-printed: `server_url`, `executor_id`, `log_level`, `daemonize`, `injection_method`,
-`secret_base_fd`, `ca_bundle`, `dns_resolver`, `relay_client_ids`, the `[mtls]` trio
-(`ca_cert`, `cert`, `key`), a conditional `[audit]` section carrying `remote_url` and
-`ca_cert_path`, and nothing else. **A key you added there is gone.**
+**What you get today:** both files keep what you added. Before the installer rebuilds
+`/etc/venya/executor.toml` it reads back every table and every top-level key it does not own, and
+re-appends them after its own block, so `[executor] max_concurrent_commands = 4` is still 4 on the
+next boot; `/etc/venya/venya-executor.env` does the same for any `VENYA_` line except the
+installer's own `VENYA_EXECUTOR_KEY_PASSPHRASE`. Each carried setting is named in the run's output,
+so you never have to re-read the file to find out what survived:
 
-One key is deliberately rescued before that rewrite: `dns_resolver` is read back out of the
-existing file when the environment does not supply it
-(`venya_resolve_dns_resolver`, `venya-common.sh`), so a configured resolver survives.
-Everything else does not.
+```
+Preserved 2 operator-added executor.toml key(s) across regeneration: [executor] [network]
+```
 
-**The service environment file is rewritten too, and harder.** The same installer removes
-and rewrites `/etc/venya/venya-executor.env` with one line — the `rm -f` followed by the
-single `printf 'VENYA_EXECUTOR_KEY_PASSPHRASE=…'` — so any executor setting an operator
-added to that file is destroyed on the next re-run as well. Both file-based carriers are
-installer-owned.
+The installer's own keys still take the installer's value, on purpose: `server_url`, `executor_id`,
+`ca_bundle`, `dns_resolver`, `relay_client_ids` and the `[mtls]` and `[audit]` tables are what a run
+writes. `dns_resolver` keeps its existing stored-reuse read (`venya_resolve_dns_resolver`,
+`venya-common.sh`) as well.
 
-There is a second consequence worth naming, because it changes behavior rather than merely
-losing it. The executor's precedence is config file, then environment, then the field default.
-So a knob that only ever lived in the file — `sandbox_memory_mb`, or `max_concurrent_commands`
-under its `[executor]` table — reverts to whatever the environment or the shipped default
-gives after a re-run, with no message saying your tuning was replaced. The change is silent
-because nothing was wrong: the file simply no longer carries the key.
+**The one thing not carried:** a key you put *inside* `[mtls]` or `[audit]`. Carrying it would mean
+two owners for one table, so the installer writes its table and tells you what it dropped:
 
-**Workaround:** put executor tuning where the installer does not reach, and re-check it after
-any re-run. One carrier survives: a systemd drop-in of your own name. The installer creates
-the `.d` directory but removes and rewrites **only its own** `10-sandboxd.conf`, so an
-override you add under a different name is untouched by a re-run:
+```
+Dropped operator-added executor.toml key(s) inside an installer-owned table: mtls.operator_stray
+```
+
+**What to do:** keep executor tuning in a table of its own — `[executor]`, `[network]`,
+`[cert_rotation]`, `[command_validator]`, `[reaper]` — which is the shape
+[deployment-config.md](deployment-config.md) documents, including the re-run behavior for
+`[executor] max_concurrent_commands`. A systemd drop-in of your own name is still untouched by a
+re-run and remains the place to put an environment spelling:
 
 ```bash
 sudo systemctl edit venya-executor        # writes /etc/systemd/system/venya-executor.service.d/override.conf
@@ -817,17 +813,9 @@ sudo systemctl restart venya-executor
 journalctl -u venya-executor -n 50
 ```
 
-That works because the environment spelling wins wherever the file does not carry the key —
-which, after a re-run, it no longer does. (The installer's own `10-sandboxd.conf` carries no
-`Environment=` line, so it does not compete with yours.)
-
-Read the boot lines after a restart rather than trusting the file you edited: the daemon names
-any key that both spellings carry to different values, and a re-run that dropped your key shows
-up as the setting you expect no longer taking effect.
-
-**What changes at beta+:** #598 AC6 — the re-run preserving an operator's set value the way
-`dns_resolver` reuse already does, instead of overwriting it. Until that lands, treat
-`/etc/venya/executor.toml` as installer-owned: safe to read, not safe to hand-edit.
+**What changes at beta+:** the physical cell — set the knob on a served guest, re-run the installer,
+restart, and read the same number back on the relay listener's boot line — closes this entry, and it
+is deleted rather than softened when it does.
 
 ---
 
