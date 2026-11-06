@@ -139,7 +139,7 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     ":1007": (HC, 'chmod 600 "$RELAY_DIR/relay-client.key"', 1, "pin"),
     ":1063": (HC, '-out "$INNER_DIR/inner.key"', 1, "pin"),
     ":1065": (HC, 'chmod 600 "$INNER_DIR/inner.key"', 1, "pin"),
-    "install-venya-executor.sh:719": (HE, "printf 'relay_client_ids = ", 1, "pin"),
+    "install-venya-executor.sh:729": (HE, "printf 'relay_client_ids = ", 1, "pin"),
     "packages/server/src/server/ca.py:395": (C, 'self.ca_cert_path = self.ca_dir / "ca.crt"', 1, "pin"),
     "packages/server/src/server/ca.py:622": (
         C,
@@ -248,9 +248,9 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
 #: the region. It read 660 until the #675 scope leg: that line sits inside a live entry, and the
 #: only coordinate in the 414 lines between there and here was a live carrier whose digits the old
 #: value exempted from re-pinning. The exemption started too early, in the file's own ordering.
-#: The #738 narrowing of the executor-config entry moved it 1074 -> 1062: the entry above the
-#: boundary got twelve lines shorter, and the heading is the boundary, so the number followed.
-DATED_BLOCK_FIRST_PAGE_LINE = 1062
+#: The #738 narrowing of the executor-config entry moved it 1074 -> 1062, and the leg-1060
+#: rework of that same entry moved it again, 1062 -> 1064: two lines added above the heading.
+DATED_BLOCK_FIRST_PAGE_LINE = 1064
 
 #: Tokens deliberately outside the pin set, with the reason. Anything else that is neither
 #: manifest nor dated makes the guard RED rather than being quietly skipped.
