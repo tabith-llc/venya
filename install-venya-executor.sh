@@ -24,7 +24,9 @@ umask 077
 #
 # Environment variables:
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
-#   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
+#   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt. It skips
+#                         prompts only: an unattended re-run still refuses to
+#                         change this executor's identity (#746).
 #   VENYA_TARBALL       - Tarball URL (default: latest GitHub release asset —
 #                         https://github.com/tabith-llc/venya/releases/latest/download/venya-executor-install.tar.gz)
 #   VENYA_TARBALL_SHA256 - Pin the expected sha256 (recommended: strict integrity).
@@ -37,6 +39,10 @@ umask 077
 #                                    nothing). CONTRACT: the ID
 #                                    is the relay dial hostname + client-cert SAN — it MUST
 #                                    be resolvable from every core (e.g. via /etc/hosts or DNS).
+#                                    On a RE-RUN: an unattended run (skip flag, or no terminal)
+#                                    that would change the installed ID refuses and writes
+#                                    nothing; naming a value here is the consent that change
+#                                    needs (#746).
 #   VENYA_SERVER_URL               - Core server URL (required)
 #   VENYA_DNS_RESOLVER         - Sandbox DNS resolver IP (required, no default — strict
 #                                IPv4, validated; re-runs reuse the stored toml value). Find
@@ -197,6 +203,44 @@ fi
 # a single-quoted printf and never interpolated.
 venya_guard_injection "SERVER_URL" "$SERVER_URL" '"' '\'
 venya_guard_injection "EXECUTOR_ID" "$EXECUTOR_ID" '"' '\'
+
+# --- Re-run identity stop (#746) ---
+# The ID below is written into /etc/venya/executor.toml by a whole-file rebuild through a
+# truncating redirect, and the script keeps no copy of the previous face. So on a re-run
+# over an existing install, the installed ID is the only record of what this executor has
+# been dialling as and what its client certificate carries as SAN — and an unattended run
+# that quietly replaced it left the operator with a sentence that reads like a status line
+# and nothing to compare against. This run therefore refuses to CHANGE the identity when
+# nobody is there to see it: both values are named and nothing is written.
+#
+# A HARD STOP, not a confirmation prompt — the posture this installer already states for a
+# design boundary: venya-common.sh's co-location guard says it in its own words, "This is a
+# HARD STOP, not a confirmation prompt: VENYA_SKIP_PROMPT=yes must NOT bypass it". The skip
+# flag answers prompts; it does not authorise an identity change.
+# What is deliberately NOT changed here: (1) an operator who NAMED a VENYA_EXECUTOR_ID is
+# never refused — naming one is the consent; (2) an interactive run keeps its #745
+# confirmation and is warned, not stopped; (3) a missing or unreadable installed ID is not
+# a refusal — the rebuild that follows is the installer's ordinary job.
+if [ -z "${VENYA_EXECUTOR_ID:-}" ] && [ -f /etc/venya/executor.toml ]; then
+    INSTALLED_EXECUTOR_ID="$(sed -n 's/^executor_id = "\(.*\)"$/\1/p' /etc/venya/executor.toml | head -1)"
+    if [ -n "$INSTALLED_EXECUTOR_ID" ] && [ "$INSTALLED_EXECUTOR_ID" != "$EXECUTOR_ID" ]; then
+        if [ "${VENYA_SKIP_PROMPT:-}" = "yes" ] || [ ! -t 0 ]; then
+            error "Re-run would change this executor's identity unattended — writing nothing."
+            error "  installed: executor_id = '$INSTALLED_EXECUTOR_ID' (/etc/venya/executor.toml)"
+            error "  this run:  executor_id = '$EXECUTOR_ID' (this host's name; VENYA_EXECUTOR_ID unset)"
+            error "The ID is the relay dial hostname and the client-cert SAN, and the config file is"
+            error "rebuilt in place with no copy of the previous face kept, so the installed value"
+            error "cannot be read back off this host after this run."
+            error "To continue deliberately, name one:"
+            error "  VENYA_EXECUTOR_ID='$INSTALLED_EXECUTOR_ID'  keeps the identity this executor already has"
+            error "  VENYA_EXECUTOR_ID='$EXECUTOR_ID'  makes the change by name"
+            exit 1
+        fi
+        warn "Re-run changes this executor's identity: '$INSTALLED_EXECUTOR_ID' -> '$EXECUTOR_ID'."
+        warn "CONTRACT: the ID is the relay dial hostname + client-cert SAN — every core must resolve"
+        warn "the new one, and the old certificate's SAN no longer names this executor."
+    fi
+fi
 
 # --- Executor-id dial contract: checked while the install is still cheap (#745) ---
 # This block used to sit at the foot of the script, after the toolchain install,
