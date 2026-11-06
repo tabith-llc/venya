@@ -2,22 +2,47 @@
 
 Notable changes to Venya will be documented in this file.
 
-## [Unreleased]
+## [0.1.0beta3] - 2026-11-06
 
-The row below is a change that is not part of `v0.1.0beta2`. It was read against the source face that
-carries it — the behavior it describes is on `dev` today — and a row describes behavior an operator can
-read, never a plan. The section is emptied and re-dated at the cut commit, which is a release act and
-not a documentation act. The rows that had landed since `v0.1.0beta1` are folded into the `0.1.0beta2`
-section below, and the same emptying marked that earlier cut (`4f6339f`).
+### Breaking changes
 
-- **A failed API call from the CLI names the HTTP status it received (`#729`).** The error path built
-  its sentence from the response's `detail` and threw the status number away, so an operator running an
-  older CLI against a newer core read `Method Not Allowed` — or `Unknown error` when the body carried no
-  detail — with nothing to say whether that was a path that moved, a path that never existed, or a
-  caller who is not an admin. The line on stderr now reads `HTTP <status>: <detail>`: the same detail
-  text the caller already got, with the number in front of it. Advisory only. The 401 token-refresh path
-  is unchanged, a caller without a valid session is refused exactly as before, and nothing about what a
-  caller has to send moves.
+- If you call the role API yourself rather than through the CLI, the five writers now sit under `/api/v1/admin/`: `POST /api/v1/admin/roles`, `PUT /api/v1/admin/roles/{role_id}`, `DELETE /api/v1/admin/roles/{role_id}`, `POST /api/v1/admin/roles/{role_id}/members`, `DELETE /api/v1/admin/roles/{role_id}/members/{user_id}` — update the path in your caller or it reads 405 or 404 (#729)
+
+### Added
+
+- `venya store` prints the secret's decimal id on a first store, the number a `/run/secrets/venya/<decimal-id>` redirect needs (#732 #733)
+- The CLI installer prints two answers separately: the shim exists, and whether a fresh login shell resolves `venya`, with the PATH line to add when it does not (#744)
+- `venya-mcp` gets the same login-shell check and a remedy line on the branch that printed nothing before (#744)
+- `venya audit`, its help line and `get_audit` say which column is the authoritative argument list and which is the display copy (#733)
+- The core installer compares the schema face before it changes anything: it reads the alembic head the incoming tarball ships and the stamp the live database stores, prints both, and refuses when the stored stamp is neither that head nor one of its ancestors — `VENYA_ALLOW_AHEAD_SCHEMA=yes` is the named override, a knob of its own and deliberately not `VENYA_ALLOW_DOWNGRADE` (#750)
+- A pre-upgrade restore point in `/var/backups/venya` is taken on a same-version re-run too, where it used to key on two version strings differing; the three newest are kept, and a failed dump stops the run before any migration (#750)
+- `VENYA_PURGE_CA=yes` on the core uninstaller is now the only way to remove the estate CA, and it is a separate choice from `VENYA_SKIP_PROMPT` — skipping the prompt does not authorise it (#749)
+- The full-lifecycle test plan carries the guard-crossing rule for middleware and auth-routing cells: such a cell mounts the shipped session middleware and the real router, or says which half it is not crossing (#730)
+
+### Changed
+
+- `install-venya-executor.sh` checks that the executor name resolves from every core before it installs or builds anything; that check used to sit after a full Rust release build and stopped at registration (#745)
+- `EXECUTOR_ID` defaults to the host's own name instead of the literal `venya-exec-1`, and an unattended run prints the name it chose (#745)
+- The startup disk-encryption check finds the PostgreSQL cluster the machine actually runs — the cluster manager first, then the running server, then a single installed cluster — instead of assuming `/var/lib/postgresql/16/main` (#740)
+- An unattended re-run of the executor installer that would change the installed `executor_id` refuses and writes nothing, naming both values: set `VENYA_EXECUTOR_ID=` to either one to consent by name, and an interactive run keeps its confirmation (#746)
+- Uninstalling a core leaves `/var/lib/venya/ca` standing while the rest of the service's state under `/var/lib/venya` still goes, and the run prints the path it left behind so you can finish deliberately (#749)
+
+### Fixed
+
+- A failed API call from the CLI names the HTTP status it received, so an older CLI against a newer core reads `HTTP 405: …` where it read `Method Not Allowed` or `Unknown error` (#729)
+- The memory pin on a key engages: the buffer address reached the kernel as a 32-bit integer, so any buffer above 2 GiB was refused (#739)
+- A refused memory pin names the kernel's reason — a capability, the locked-memory limit, or neither — instead of pointing at a permission the host already grants (#739)
+- The disk-encryption check recognises the local database behind the Unix socket the installer writes, so it reports on the volume of a machine the installer itself built (#740)
+- An executor refusal for a redirect target names the argument number at fault and how many session-bound paths that run allows, so you do not bisect the command line to find the element (#732)
+- The redirect-target documentation shows `<decimal-id>`, the shape the guard accepts, where it showed a key-name that could never validate (#732)
+- A run that bound no credential writes no `credential_injected` event (#731)
+- One run stores one command text on the executor row, the server row and a refused command (#733)
+- The CLI installer's FIDO2 check looks for a key on the FIDO usage page rather than any `/dev/hidraw` node, so a keyboard on that bus no longer answers for a security key, a host with no HID nodes stays silent, and a key your user cannot reach is named by device with a grant scoped to that device alone (#748)
+- `venya executor register` prints an install recipe that keeps the one-use enrollment token out of `/tmp` and off the command line: stage the bundle in the SSH account's own directory at mode 700, pass the token as an environment prefix on the child, and remove the staged bundle when the install finishes (#752)
+- An admin certificate that verifies against this core's CA but is named by no enrolled row is logged as admitted-but-unknown, with the revoke route to use if it is not a credential you issued, where the same admission read as routine (#751)
+- A core uninstall that meets a symlinked `/var/lib/venya` or `/var/lib/venya/ca` stops before it removes anything and names where the link points, instead of printing `Venya Core uninstalled.` over a tree it never touched; a removal is now reported only after the path is proved gone (#755)
+- `VENYA_PURGE_CONFIG=yes` in the CLI uninstaller refuses a config dir that is a symlink, naming the link and its target, and prints `Removed …` only after proving the directory is gone — a config dir that was never there now says there was nothing to remove (#758)
+- Re-running the executor installer keeps the settings you added to `/etc/venya/executor.toml` and `/etc/venya/venya-executor.env` instead of rebuilding them away, and names each one it carried; a key placed inside an installer-owned table such as `[mtls]` is the one case it cannot carry, and that run says so too (#738)
 
 ## [0.1.0beta2] - 2026-10-28
 
