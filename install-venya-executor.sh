@@ -322,9 +322,9 @@ venya_create_venv "venya-executor-requirements.txt" "/home/venya/.cargo/bin"
 # See Bug B tracker for full evidence chain.
 
 # PYO3_PYTHON is set explicitly to the venv's Python. Without it, pyo3-build-config
-# falls back to /usr/bin/python3 (3.12.3 on Ubuntu 24.04), producing an extension
+# falls back to /usr/bin/python3 — the distro's system Python — producing an extension
 # compiled against the wrong CPython version. (Root cause of Bug B — SEGV at
-# filter.py:87 when the 3.12-targeted .so was loaded on 3.14.7.)
+# filter.py:87 when a system-Python-targeted .so was loaded on 3.14.7.)
 
 info "Building Rust filter extension (cargo + tagged copy)..."
 # -print -quit, not `| head -1`: under set -o pipefail, head exiting early can

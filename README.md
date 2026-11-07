@@ -283,7 +283,7 @@ See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)** — hands-on in 
 
 ### Full Installation
 
-Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (core/executor: Ubuntu 24.04 only; the Workstation CLI additionally runs on Debian 13, macOS, and Windows):
+Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (core/executor: Ubuntu 26.04 LTS is the tested target; the Workstation CLI additionally runs on Debian 13, macOS, and Windows):
 
 ```bash
 # Core server (root)
@@ -325,9 +325,9 @@ Setup note worth knowing before your first unattended boot: the core's two produ
 
 ### Prerequisites
 
-- Linux — Ubuntu 24.04 LTS (core/executor; tested target, installers assume it). Workstation CLI additionally supports Debian 13 and macOS (verified macOS 26.6.2 arm64)
+- Linux — Ubuntu 26.04 LTS is the tested target for core and executor. Workstation CLI additionally supports Debian 13 and macOS (verified macOS 26.6.2 arm64). Ubuntu 24.04 is no longer a supported server/executor platform. The installers assume an apt-and-systemd host; they carry no OS-version check, so a release outside the tested target is not refused, it is simply untested
 - Windows — **Workstation CLI only** (core and executor are Linux). Machine-wide install via `install-venya-cli.ps1` requires Administrator; standard users run the CLI after install. FIDO2 ceremonies work for standard users via the platform WebAuthn API (verified Windows 11 25H2). Interactive desktop only — headless Windows is unsupported
-- PostgreSQL — installed automatically by the core installer (16 on Ubuntu 24.04)
+- PostgreSQL — installed automatically by the core installer, which installs the distro's `postgresql` package unpinned, so the major version follows the Ubuntu release it is installed on
 - Python 3.14 — pinned (`>=3.14,<3.15`); provisioned automatically via uv
 - FIDO2 security key — Tabith LLC recommends Yubico YubiKey® for Venya
 - Docker Sandboxes (sbx) — installed automatically by the executor installer; **a Docker account is required** (username + API key/access token at install time, stdin-only): sbx pulls its agent template from Docker Hub, so executor installs need a Docker account and outbound access to Docker Hub. **Executor hosts need hardware-virtualization access (`/dev/kvm`) — sbx runs microVMs; VM deployments require nested virtualization enabled**

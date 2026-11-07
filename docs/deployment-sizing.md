@@ -7,8 +7,9 @@ the system actually operates and keeps planning honest.
 
 The performance figures below are **measured**, not estimated: they come from a
 benchmark on the serial execution path (the shipped behavior). Environment
-for the measured numbers: Ubuntu 24.04, 2 vCPU / 5 GB per VM, sandbox runtime
-`sbx` 0.45.1, single executor, warm agent template. Figures labeled *estimate*
+for the measured numbers, a dated reading taken on Ubuntu 24.04 guests: 2 vCPU / 5 GB per VM, sandbox runtime
+`sbx` 0.45.1, single executor, warm agent template. The 26.04 sizing measurement is owed; 26.04 LTS is the tested
+target, and these figures were not gathered on it. Figures labeled *estimate*
 are not yet load-tested and are marked as such.
 
 ## Capacity philosophy
@@ -91,7 +92,7 @@ new enrollment token. No code changes required.
 | Core server | 2 vCPU / 4–8 GB | 10 GB class | nginx + PostgreSQL + core service |
 | Executor | 2 vCPU / 5 GB | 60 GB provisioned; ~7 GB used post-install (warm template ~3.7 GB) | needs `/dev/kvm`; ~1.2 GB RAM floor measured on the serial path (one active sandbox); concurrent-sandbox RAM on this shape is **unmeasured beyond 2** |
 
-Both: Ubuntu 24.04 LTS. The "5–8 GB RAM" sizing figure is **headroom**, not a
+Both: the OS face of that dated reading is Ubuntu 24.04; the 26.04 sizing measurement is owed. The "5–8 GB RAM" sizing figure is **headroom**, not a
 floor — the measured serial floor is ~1.2 GB per executor (OS + services + one
 ~527 MB sandbox); the extra room covers OS overhead and safety margin.
 
