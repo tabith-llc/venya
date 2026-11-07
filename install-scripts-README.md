@@ -180,7 +180,7 @@ they work offline and after the serving origin is gone:
 | Script | Runs as | Removes | Keeps |
 |---|---|---|---|
 | `uninstall-venya-core.sh` | root (on core VM) | service+unit, nginx site, /opt/venya, /etc/venya, /var/lib/venya (CA keys), well-known CA, trust entries, PostgreSQL db+role, venya user | nginx/postgresql OS packages |
-| `uninstall-venya-executor.sh` | root (on executor VM) | service+mount+seccomp units, /opt/venya, /etc/venya (mTLS key), /var/lib/venya, trust entries, venya user (Rust/uv/sbx state) | sbx/docker packages, /etc/hosts (provisioning-owned); revoke the cert on the core separately |
+| `uninstall-venya-executor.sh` | root (on executor VM) | service+mount+seccomp units, /opt/venya, /etc/venya (mTLS key), /var/log/venya, trust entries, venya user (Rust/uv/sbx state); `/var/lib/venya` only with `VENYA_PURGE_STATE=yes` | **`/var/lib/venya` by default** (executor CA + enrollment state, `#757`), sbx/docker packages, /etc/hosts (provisioning-owned); revoke the cert on the core separately |
 | `uninstall-venya-cli.sh` | operator user (no sudo) | uv tools `venya-cli` + `venya-mcp` and shims; optionally `~/.config/venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself |
 | `uninstall-venya-cli.ps1` | Administrator (Windows, machine-wide) | the install root (pinned uv, uv-managed Python, both tool venvs, shims), its bin dir from the MACHINE PATH; optionally the invoking user's `%APPDATA%\venya` (`VENYA_PURGE_CONFIG=yes`) | other users' per-profile config (a find-command is printed, not run) |
 

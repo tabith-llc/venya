@@ -5,7 +5,8 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 """Behavioral cells: core/executor uninstallers verify removals before the
-success claim (#396).
+success claim (#396), and #757 extends the executor half to the preserving state
+directory (VENYA_PURGE_STATE) and to a state path that is a symlink.
 
 Root cause (ticket server-uninstallers-unverified-success-claim): both server
 uninstallers printed "Venya <X> uninstalled." and exited 0 through warn-only
@@ -35,6 +36,7 @@ Paired negative on core: postgres-not-active skips the DB verify entirely
 
 import os
 import pty
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -92,6 +94,13 @@ _STUB_USERDEL = """#!/bin/bash
 echo "userdel $*" >> "$STUB_LOG"
 if [ -f "$RC_DIR/rc-userdel" ]; then exit 1; fi
 /bin/rm -f "$RC_DIR/user-present"
+# #757 fault injection: userdel runs after the directory step and before the
+# verify block, so a path named in the rm-loss marker disappears in exactly that
+# window — how the "state dir vanished although no removal was asked for" arm is
+# reached from a cell without touching any real filesystem outside the tmpdir.
+if [ -f "$RC_DIR/rm-loss" ]; then
+    /bin/rm -rf "$(cat "$RC_DIR/rm-loss")"
+fi
 exit 0
 """
 
@@ -216,11 +225,32 @@ class _RootHarness:
         self.rc.joinpath("db-count").write_text("1", encoding="utf-8")
         self.rc.joinpath("role-count").write_text("1", encoding="utf-8")
 
+    def link_state(self, rel: str, target_rel: str, marker: str = "marker", dangling: bool = False) -> Path:
+        """#757: replace one fake-root path with a symlink, the case -e alone cannot
+        see. Returns the target (created with one marker file unless dangling)."""
+        link = self.root / rel
+        target = self.root / target_rel
+        if link.is_symlink() or link.exists():
+            shutil.rmtree(link, ignore_errors=True)
+            link.unlink(missing_ok=True)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if not dangling:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / marker).write_text("keep-me\n", encoding="utf-8")
+        link.symlink_to(target)
+        return target
+
     def run(
-        self, rm_skip: str = "", skip: str = "yes", answer: str | None = None, purge: str | None = None
+        self,
+        rm_skip: str = "",
+        skip: str = "yes",
+        answer: str | None = None,
+        purge: str | None = None,
+        purge_state: str | None = None,
     ) -> subprocess.CompletedProcess:
-        """purge: the VENYA_PURGE_CA value (#749). None leaves the variable out of
-        the environment entirely, which is the default-install case."""
+        """purge: the VENYA_PURGE_CA value (#749). purge_state: the VENYA_PURGE_STATE
+        value (#757). None leaves either variable out of the environment entirely,
+        which is the default-install case."""
         env = {
             "HOME": str(self.tmp),
             "PATH": f"{self.stub}:{os.defpath}:/usr/bin:/bin",
@@ -231,6 +261,8 @@ class _RootHarness:
         }
         if purge is not None:
             env["VENYA_PURGE_CA"] = purge
+        if purge_state is not None:
+            env["VENYA_PURGE_STATE"] = purge_state
         return _run_with_optional_tty(["/bin/bash", str(self.script)], env, answer, timeout=60)
 
     def calls(self) -> str:
@@ -362,6 +394,131 @@ def test_executor_userdel_failure_survivor_errors_nonzero() -> None:
         r = h.run()
         assert r.returncode != 0
         assert "venya user still present" in r.stdout, r.stdout
+        assert "Venya Executor uninstalled." not in r.stdout
+
+
+# --- #757: the executor state directory is kept by default, and a symlinked
+# state path is refused before anything is removed ---
+
+
+def test_executor_state_dir_kept_by_default_and_says_so() -> None:
+    """AC1/AC2 positive: no VENYA_PURGE_STATE -> /var/lib/venya stays, the run says
+    so at the removal step AND in the closing report, and no other target is kept."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        st = str(h.root / "var/lib/venya")
+        r = h.run()
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "[ERROR]" not in r.stdout, r.stdout
+        assert "Venya Executor uninstalled." in r.stdout
+        assert f"Kept {st}" in r.stdout, r.stdout
+        assert f"Left in place: {st}" in r.stdout, r.stdout
+        assert "re-run with VENYA_PURGE_STATE=yes" in r.stdout, r.stdout
+        assert f"Removed {st}" not in r.stdout
+        assert (h.root / "var/lib/venya/payload").exists(), "kept arm lost the state"
+        for d in ("opt/venya", "etc/venya", "var/log/venya"):
+            assert not (h.root / d).exists(), f"survivor: {d}"
+
+
+def test_executor_purge_state_yes_removes_the_state_dir() -> None:
+    """AC1 other arm: the explicit instruction removes it, and the run names the
+    flag it acted on instead of claiming a keep."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        st = str(h.root / "var/lib/venya")
+        r = h.run(purge_state="yes")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "[ERROR]" not in r.stdout, r.stdout
+        assert f"Removed {st} including the executor CA (VENYA_PURGE_STATE=yes)." in r.stdout, r.stdout
+        assert "Removed as asked (VENYA_PURGE_STATE=yes)" in r.stdout, r.stdout
+        assert "Left in place:" not in r.stdout
+        assert f"Kept {st}" not in r.stdout
+        assert not (h.root / "var/lib/venya").exists()
+
+
+def test_executor_purge_state_survivor_dir_reads_present() -> None:
+    """Paired negative A (root §2): with removal asked for and the rm reaching
+    nothing, a REAL directory still reads present — [ERROR], rc!=0, no claim."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        r = h.run(rm_skip="var/lib/venya", purge_state="yes")
+        assert r.returncode != 0, r.stdout
+        assert "/var/lib/venya still present after VENYA_PURGE_STATE=yes" in r.stdout, r.stdout
+        assert "Venya Executor uninstalled." not in r.stdout
+
+
+def test_executor_never_present_state_dir_gets_its_own_line() -> None:
+    """Paired negative B: a state directory that was never here is NOT reported as
+    kept and not as removed — it prints its own 'nothing to remove' line, and the
+    run still exits 0 (#758's cli-uninstaller distinction)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        st = str(h.root / "var/lib/venya")
+        shutil.rmtree(h.root / "var/lib/venya")
+        r = h.run()
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "[ERROR]" not in r.stdout, r.stdout
+        assert f"No state dir at {st} — nothing to remove." in r.stdout, r.stdout
+        assert "Left in place:" not in r.stdout
+        assert f"Kept {st}" not in r.stdout
+        assert f"Removed {st}" not in r.stdout
+
+
+def test_executor_state_dir_lost_while_keeping_is_an_error() -> None:
+    """The keep is verified too: a state directory that vanished although no removal
+    was asked for fails the run instead of printing a quiet 'Left in place'."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        h.rc.joinpath("rm-loss").write_text(str(h.root / "var/lib/venya"), encoding="utf-8")
+        r = h.run()
+        assert r.returncode != 0, r.stdout
+        assert "missing although no removal was asked for" in r.stdout, r.stdout
+        assert "Venya Executor uninstalled." not in r.stdout
+
+
+def test_executor_symlinked_state_dir_refused_before_any_removal() -> None:
+    """AC3: the case -e cannot see. A symlinked /var/lib/venya is refused by name
+    with its target, nothing is removed, and the tree behind the link survives."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        target = h.link_state("var/lib/venya", "var/lib/venya-target")
+        r = h.run()
+        assert r.returncode != 0, r.stdout
+        assert f"State path is a symlink: {h.root / 'var/lib/venya'}" in r.stdout, r.stdout
+        assert str(target) in r.stdout, r.stdout
+        assert "Nothing was removed" in r.stdout, r.stdout
+        assert "Venya Executor uninstalled." not in r.stdout
+        assert (target / "marker").exists(), "the run followed the link and emptied the target"
+        # nothing before the refusal either: the refusal sits ahead of the prompt,
+        # the units, and every removal line.
+        assert not h.calls().strip(), h.calls()
+        assert (h.root / "etc/systemd/system/venya-executor.service").exists()
+        assert (h.root / "opt/venya/payload").exists()
+
+
+def test_executor_dangling_symlink_state_dir_refused_too() -> None:
+    """-L is an lstat: a link whose target is already gone is refused too, where -e
+    alone would read 'gone' and count the path clean."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        h.link_state("var/lib/venya", "var/lib/venya-absent-target", dangling=True)
+        r = h.run()
+        assert r.returncode != 0, r.stdout
+        assert f"State path is a symlink: {h.root / 'var/lib/venya'}" in r.stdout, r.stdout
+        assert "Venya Executor uninstalled." not in r.stdout
+
+
+def test_executor_symlinked_state_subdir_refused_too() -> None:
+    """The refusal covers the path install-venya-executor.sh creates,
+    /var/lib/venya/executor, not only its parent."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        target = h.link_state("var/lib/venya/executor", "var/lib/executor-target")
+        r = h.run()
+        assert r.returncode != 0, r.stdout
+        assert "/var/lib/venya/executor" in r.stdout, r.stdout
+        assert "State path is a symlink" in r.stdout, r.stdout
+        assert (target / "marker").exists()
         assert "Venya Executor uninstalled." not in r.stdout
 
 
