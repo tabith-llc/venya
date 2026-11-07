@@ -279,16 +279,33 @@ sudo /opt/venya/.venv/bin/venya exec cert renew --cert-path /etc/venya/executor/
 the passphrase.** `cert renew` reads the incumbent key to authenticate the renewal and
 then writes the new one as an encrypted envelope, so the process must see
 `VENYA_EXECUTOR_KEY_PASSPHRASE` — the same variable the `venya-executor` service reads
-from the installer's root-only `EnvironmentFile`. Two shapes, both supported:
+from the installer's root-only `EnvironmentFile`. The CLI takes it from the process
+environment only: `venya exec cert renew --help` lists `--cert-path`, `--key-path` and
+`--ca-bundle`, and no passphrase option. So the value has to arrive as an environment
+variable, and the shape below keeps it out of the command line — a word typed after
+`sudo` becomes part of that running process's own command line, which other local
+accounts can read for as long as the command runs. Two shapes, both supported:
 
 ```bash
-# reuse what the service already has (sudo strips the environment, so pass it in):
-sudo VENYA_EXECUTOR_KEY_PASSPHRASE="$(sudo sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env)" \
-  /opt/venya/.venv/bin/venya exec cert renew
+# Reuse what the service already has. The assignment sits BEFORE `sudo`, so the shell
+# puts it in sudo's environment rather than in sudo's argument list, and `-E` passes it
+# on to the CLI. Preserving the environment has to be allowed by the local sudo policy;
+# if it is not, sudo declines and nothing runs — use the typed shape below instead.
+VENYA_EXECUTOR_KEY_PASSPHRASE="$(sudo sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env)" \
+  sudo -E /opt/venya/.venv/bin/venya exec cert renew
 
-# or run it interactively and answer the hidden prompt (the write-time ceremony)
-sudo -E /opt/venya/.venv/bin/venya exec cert renew
+# Or read it from the keyboard with echo off, then hand it over the same way. Neither
+# line below contains the passphrase, so neither copies it into a command line or into
+# shell history:
+read -rs -p 'Executor key passphrase: ' VENYA_EXECUTOR_KEY_PASSPHRASE; printf '\n' >&2
+VENYA_EXECUTOR_KEY_PASSPHRASE="$VENYA_EXECUTOR_KEY_PASSPHRASE" \
+  sudo -E /opt/venya/.venv/bin/venya exec cert renew
 ```
+
+The command also prompts on its own when the variable is unset and the terminal is
+yours, but that prompt covers the key being **written**; the incumbent encrypted key the
+renewal dials with is read from the environment alone, so answering it is not a way to
+renew an encrypted-key host.
 
 Without either, the command refuses and writes NOTHING — no directory, no staged temp,
 no half-renewed key, and no request sent (a renewal that POSTed first would replace the

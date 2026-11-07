@@ -365,13 +365,22 @@ disables interactive prompts (required for piped installs).
 ```bash
 ssh bot@$CORE_HOST
 curl -fsSL http://$BUILD_HOST_IP:8080/install-venya-core.sh | \
-  sudo VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=$DB_PASSWORD \
-       VENYA_TARBALL=http://$BUILD_HOST_IP:8080/venya-core-install.tar.gz \
-       VENYA_TARBALL_SHA256=$CORE_SHA bash -s
+  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD="$DB_PASSWORD" \
+  VENYA_TARBALL=http://$BUILD_HOST_IP:8080/venya-core-install.tar.gz \
+  VENYA_TARBALL_SHA256="$CORE_SHA" \
+  sudo -E bash -s
 sudo systemctl start venya-core
 curl -sk https://$CORE_HOST/api/v1/health
 # Expected: {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
+
+Why the assignments sit **before** `sudo` and carry `-E`: a value written after `sudo` is
+an argument of the `sudo` process, and that process lives for the whole install, so any
+local account able to read `/proc/<pid>/cmdline` sees it. An assignment in front of the
+command name is not an argument of anything — it reaches the child's environment — and
+`-E` is what carries those names through to the installer. The installer prompts for a
+missing password only when stdin is a TTY; a piped install has none, so the environment
+is the way in here (see the `VENYA_SKIP_PROMPT` note above).
 
 During the install, watch for `Downloading tarball from http://$BUILD_HOST_IP:8080/...`
 + `SHA-256 verified` in the output — that is the mechanism proving local
