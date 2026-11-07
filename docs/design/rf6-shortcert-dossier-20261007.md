@@ -6,7 +6,19 @@ Author lane: a prior worker lane (venue `work3/`, branch `feature/rf6-shortcert-
 
 Tip this dossier is re-derived against: **dev `d0d3d0d`** (`Merge branch 'bug/ca-get-ca-key-pem-unreferenced-plaintext-claim' — the unreferenced CA key accessor is retired (refs 539)`).
 Every line number below was produced by grep at that tip on the day of writing. Line numbers rot: **grep the
-symbol, never trust the pin** — including the pins in this file.
+symbol, never trust the pin** — including the pins in this file. Re-derive a count rather than trust one, and do it
+as a command: the one below prints a single number for a single file (`6` at `36fa5070`), which is why a single
+`:NNN` was never the whole answer, and why the six current site numbers are deliberately not written here:
+
+```
+git grep -c "Admin access requires valid client certificate" <face> -- \
+  packages/server/src/server/middleware/auth.py
+```
+
+A path **with its directory**, a symbol name, and a quoted string age slowly; a bare `auth.py` identifies nothing —
+`git ls-tree -r --name-only <face>` prints both `packages/server/src/server/middleware/auth.py` and
+`packages/server/src/server/routes/auth.py`. This clause was checked at **dev `36fa5070`**, 2,255 commits after the
+`d0d3d0d` pin above; the gap is the point, and it keeps growing.
 
 The dossier is **complete at 10/10 sections**: sections 1-5 (chunk 1) and 6-10 (chunk 2) landed as sequenced
 dispatches on this branch, and the chunk-3 assembly pass reconciled §1.6 to §7.1 and verified the file at dev
