@@ -460,13 +460,13 @@ venya_preupgrade_backup() {
 if [ -z "$INSTALLED_VERSION" ]; then
     info "Schema compare: no incumbent install — fresh install, nothing to compare and no refusal."
 elif [ -z "$INCOMING_VERSION" ]; then
-    warn "Schema compare: the incoming version was unreadable, so the tarball's migration set was not compared either. The version guard above refused to guess at it; this does not."
+    warn "Schema compare: the incoming version was unreadable, so the tarball's migration set was not compared either. The version guard above stepped aside for that input and this compare does the same: the run continues with no schema read, and no restore point is taken on this path."
 else
     MIG_INDEX=$(tar -xzOf "$TARBALL_FILE" --wildcards '*/packages/core/alembic/versions/*.py' 2>/dev/null \
         | grep -E '^(revision|down_revision)') || MIG_INDEX=""
     STORED_STAMP=$(sudo -u postgres psql -d venya -tA -c 'select version_num from alembic_version limit 1' 2>/dev/null | head -n1) || STORED_STAMP=""
     if [ -z "$MIG_INDEX" ]; then
-        warn "Schema compare: no alembic revisions readable in the tarball, so the schema face cannot be named. Not a refusal — but a restore point is taken before anything changes."
+        warn "Schema compare: no alembic revisions readable in the tarball, so the schema face cannot be named. Not a refusal — a restore point is taken before any migration runs."
         BACKUP_REQUIRED=yes
     else
         FACES=$(printf '%s\n' "$MIG_INDEX" | awk -v stored="$STORED_STAMP" '
@@ -493,7 +493,7 @@ else
                 ;;
             ancestor)
                 BACKUP_REQUIRED=yes
-                warn "Schema moves this run: stored $STORED_STAMP -> incoming $INCOMING_HEAD. A restore point is taken before any change, even on a same-version re-run (#750)."
+                warn "Schema moves this run: stored $STORED_STAMP -> incoming $INCOMING_HEAD. A restore point is taken before any migration runs, even on a same-version re-run (#750)."
                 ;;
             ahead)
                 if [ "${VENYA_ALLOW_AHEAD_SCHEMA:-}" = "yes" ]; then
@@ -509,7 +509,7 @@ else
                 ;;
             *)
                 BACKUP_REQUIRED=yes
-                warn "Schema compare could not name both faces (stored: ${STORED_STAMP:-<none>}; incoming head: ${INCOMING_HEAD:-<unreadable>}). Not a refusal — but a restore point is taken before anything changes."
+                warn "Schema compare could not name both faces (stored: ${STORED_STAMP:-<none>}; incoming head: ${INCOMING_HEAD:-<unreadable>}). Not a refusal — a restore point is taken before any migration runs."
                 ;;
         esac
     fi
