@@ -558,8 +558,9 @@ sessions) is untouched — secret encryption does not depend on the TLS CA.
 # --- 0. Prepare: one enrollment token per executor (§3 step 1). Note the env vars
 #        used at the original install (CORE_HOSTNAME, DB password, passphrases).
 #        The admin CA passphrase is auto-reused from the EnvironmentFile on re-run
-#        (post-fix); read it anyway if you plan to wipe admin-ca/ too:
-sudo cat /etc/venya/venya-core.env        # VENYA_ADMIN_CA_KEY_PASSPHRASE=...
+#        (post-fix); read it anyway if you plan to wipe admin-ca/ too — read that one
+#        key, not the whole file, so the other values in it never reach the screen:
+sudo sed -n 's/^VENYA_ADMIN_CA_KEY_PASSPHRASE=//p' /etc/venya/venya-core.env
 
 # --- 1. Stop the core service (nginx may stay up):
 sudo systemctl stop venya-core
