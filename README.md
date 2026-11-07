@@ -314,7 +314,7 @@ powershell -ExecutionPolicy Bypass -File install-venya-cli.ps1
 
 Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
 
-Pass the installer's variables **before** `sudo`, not after it: an assignment in front of the command name reaches the program's environment, while a word written after `sudo` is one of its arguments and stays readable in that process's command line for the whole install. `sudo -E` is what carries them through; if your local sudo policy declines to preserve the environment, sudo says so and installs nothing — use the interactive shape instead (download the script, then run it, and answer the hidden prompts).
+Pass the installer's variables **before** `sudo`, not after it: an assignment in front of the command name reaches the program's environment, while a word written after `sudo` is one of its arguments and stays readable in that process's command line for the whole install. `sudo -E` is what carries them through — without it, sudo's environment reset drops them and the installer stops with its own missing-variable error. If you would rather not use `-E`, download the script and run it, and answer the hidden prompts.
 
 Core and executor must run on separate hosts (or separate VMs on one physical machine) — see [Host Trust Model](#host-trust-model).
 

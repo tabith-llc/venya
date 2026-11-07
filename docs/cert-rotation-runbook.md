@@ -289,17 +289,18 @@ accounts can read for as long as the command runs. Two shapes, both supported:
 ```bash
 # Reuse what the service already has. The assignment sits BEFORE `sudo`, so the shell
 # puts it in sudo's environment rather than in sudo's argument list, and `-E` passes it
-# on to the CLI. Preserving the environment has to be allowed by the local sudo policy;
-# if it is not, sudo declines and nothing runs — use the typed shape below instead.
+# on to the CLI. Without `-E`, sudo's environment reset drops the name, and the command
+# then refuses and writes nothing (see the refusal note below).
 VENYA_EXECUTOR_KEY_PASSPHRASE="$(sudo sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env)" \
   sudo -E /opt/venya/.venv/bin/venya exec cert renew
 
-# Or read it from the keyboard with echo off, then hand it over the same way. Neither
-# line below contains the passphrase, so neither copies it into a command line or into
-# shell history:
+# Or work in a root shell and skip `-E` entirely: the assignment is then a prefix on the
+# command with nothing in front of it, and the passphrase is read from the keyboard with
+# echo off, so no argument list and no shell history carries it.
+sudo -i
 read -rs -p 'Executor key passphrase: ' VENYA_EXECUTOR_KEY_PASSPHRASE; printf '\n' >&2
 VENYA_EXECUTOR_KEY_PASSPHRASE="$VENYA_EXECUTOR_KEY_PASSPHRASE" \
-  sudo -E /opt/venya/.venv/bin/venya exec cert renew
+  /opt/venya/.venv/bin/venya exec cert renew
 ```
 
 The command also prompts on its own when the variable is unset and the terminal is
@@ -361,8 +362,8 @@ venya admin executor-enroll <executor-id> --output-dir /secure/enroll
 
 # 2. Transfer /secure/enroll to the executor host, then re-run the executor installer.
 #    The assignments sit before `sudo` (an argument of sudo stays readable in its command
-#    line for the whole run); `-E` passes them on, and the local sudo policy has to allow
-#    preserving the environment or sudo declines and installs nothing:
+#    line for the whole run); `-E` passes them on — without it, sudo's environment reset
+#    drops them and the installer aborts on its own missing-variable check:
 curl -fsSL <origin>/install-venya-executor.sh | \
   VENYA_SKIP_PROMPT=yes \
   VENYA_SERVER_URL=https://<core-host> \

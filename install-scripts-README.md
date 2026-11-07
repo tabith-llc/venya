@@ -32,8 +32,9 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 Installer variables go **before** `sudo`, never after it: a value written after `sudo` is one
  of its arguments and stays visible in that process's command line for the whole run, while an
  assignment in front of the command name lands in the environment instead. `sudo -E` carries them
- through; if the local sudo policy declines to preserve the environment, sudo says so and nothing
- is installed — download the script and run it interactively, and it asks with input hidden.
+ through; without `-E`, sudo's environment reset drops these names and the installer aborts with
+ its own missing-variable error (measured). If you would rather not rely on `-E`, download the
+ script and run it, and answer the hidden prompts.
 
 **Environment variables:**
 

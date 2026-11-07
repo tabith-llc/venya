@@ -53,9 +53,10 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 Write the installer's variables **before** `sudo`, not after it. An assignment in front of the
 command name goes into that process's environment; a value written after `sudo` is one of its
 arguments, and the `sudo` process lives for the whole install with its command line readable to
-other local accounts. `sudo -E` is what carries the values through — if your sudo policy declines
-to preserve the environment, sudo says so and installs nothing, in which case download the script
-and run it (the note below covers the same rule: an interactive run is prompted, with input hidden).
+other local accounts. `sudo -E` is what carries the values through — without it, sudo's environment
+reset drops them and the installer aborts with its own missing-variable error. If you would rather
+not rely on `-E`, download the script and run it: an interactive run is prompted, with input hidden
+(the note below covers the same rule).
 
 `VENYA_DB_PASSPHRASE` has NO default and is **required for unattended
 (piped) installs** — the installer aborts with an actionable error without it
