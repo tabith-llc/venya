@@ -455,9 +455,21 @@ VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt \
 # 2) Stage the installer on the executor (single line; hash-check the output):
 ssh bot@$EXEC_HOST "curl -fsSLo /tmp/install-venya-executor.sh http://$BUILD_HOST_IP:8080/install-venya-executor.sh && sha256sum /tmp/install-venya-executor.sh"
 
-# 3) One-line interactive install — `-t` forwards the TTY, so the Docker
-#    prompts appear in YOUR terminal (single quotes; substitute <EXEC_TOKEN>):
-ssh -t bot@$EXEC_HOST 'sudo VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://'"$BUILD_HOST_IP"':8080/venya-executor-install.tar.gz VENYA_TARBALL_SHA256='"$EXEC_SHA"' VENYA_SERVER_URL=https://'"$CORE_HOST"' VENYA_EXECUTOR_ID='"$EXEC_ID"' VENYA_EXECUTOR_ENROLLMENT_TOKEN=<EXEC_TOKEN> bash /tmp/install-venya-executor.sh'
+# 3) Install on the executor, typed at its own prompt. Log in first, then run the
+#    line — the assignments sit BEFORE `sudo` so the token reaches the installer as an
+#    environment variable and never as an argument, and `-E` carries it through:
+ssh -t bot@$EXEC_HOST
+VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://$BUILD_HOST_IP:8080/venya-executor-install.tar.gz \
+  VENYA_TARBALL_SHA256=$EXEC_SHA VENYA_SERVER_URL=https://$CORE_HOST VENYA_EXECUTOR_ID=$EXEC_ID \
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<EXEC_TOKEN> \
+  sudo -E bash /tmp/install-venya-executor.sh
+# Do NOT wrap that line inside `ssh -t bot@$EXEC_HOST '…'` the way step 2 wraps its curl:
+# the quoted text is an argument of your LOCAL ssh process, so the token you substitute
+# would be readable in a command line on the workstation for the whole install. Pass the
+# non-secret values that way if you like; type the token line at the guest's prompt.
+# A fully scripted alternative mints with `--output-dir`, ships that 0600 bundle to a 700
+# directory in the executor account, and reads the token from the file inside the
+# assignment — `venya admin executor-enroll` prints those exact lines.
 # Prompts appear near the end of the install:
 #   Docker username (sbx template pulls): <type username>
 #   Docker API key / access token (input hidden): <type token — not echoed>

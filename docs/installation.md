@@ -43,12 +43,19 @@ re-runs remain supported (the idempotency contract, §1).
 On the core VM (root):
 
 ```bash
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | \
   VENYA_SKIP_PROMPT=yes \
   VENYA_DB_PASSWORD=<strong-db-password> \
   VENYA_DB_PASSPHRASE=<server-encryption-passphrase> \
-  bash -s
+  sudo -E bash -s
 ```
+
+Write the installer's variables **before** `sudo`, not after it. An assignment in front of the
+command name goes into that process's environment; a value written after `sudo` is one of its
+arguments, and the `sudo` process lives for the whole install with its command line readable to
+other local accounts. `sudo -E` is what carries the values through — if your sudo policy declines
+to preserve the environment, sudo says so and installs nothing, in which case download the script
+and run it (the note below covers the same rule: an interactive run is prompted, with input hidden).
 
 `VENYA_DB_PASSPHRASE` has NO default and is **required for unattended
 (piped) installs** — the installer aborts with an actionable error without it
@@ -448,12 +455,12 @@ each core's.
 Then on the executor VM (root):
 
 ```bash
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | sudo \
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | \
   VENYA_SKIP_PROMPT=yes \
   VENYA_SERVER_URL=https://<core-host> \
   VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
-  bash -s
+  sudo -E bash -s
 # Docker credentials are REQUIRED for sandbox execution — see "Docker account
 # credentials" below (piped installs: VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY,
 # or run the downloaded script interactively for the hidden prompt).

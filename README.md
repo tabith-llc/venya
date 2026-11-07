@@ -287,17 +287,19 @@ Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Relea
 
 ```bash
 # Core server (root)
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | \
   VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> \
-  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> bash -s
+  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> \
+  sudo -E bash -s
 
 # Executor (root; enrollment token from the core admin; a Docker account is REQUIRED — sbx pulls its agent
 # template from Docker Hub. Piped installs need VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY, or download the
 # script and run it interactively for hidden-prompt entry — the key is handled stdin-only, never argv/disk.
 # See installation.md §3.)
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | sudo \
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | \
   VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
-  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
+  sudo -E bash -s
 
 # Workstation CLI (non-root; Ubuntu 24.04, Debian 13, or macOS — verified on macOS 26.6.2 arm64 and Debian 13)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
@@ -311,6 +313,8 @@ powershell -ExecutionPolicy Bypass -File install-venya-cli.ps1
 ```
 
 Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
+
+Pass the installer's variables **before** `sudo`, not after it: an assignment in front of the command name reaches the program's environment, while a word written after `sudo` is one of its arguments and stays readable in that process's command line for the whole install. `sudo -E` is what carries them through; if your local sudo policy declines to preserve the environment, sudo says so and installs nothing — use the interactive shape instead (download the script, then run it, and answer the hidden prompts).
 
 Core and executor must run on separate hosts (or separate VMs on one physical machine) — see [Host Trust Model](#host-trust-model).
 

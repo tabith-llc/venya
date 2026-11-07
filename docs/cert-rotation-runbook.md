@@ -359,13 +359,16 @@ venya admin executor-enroll <executor-id> --output-dir /secure/enroll
 #    (token TTL default 1800 s, single-use, stored hashed — server config.py,
 #     `ExecutorEnrollmentConfig.token_ttl_seconds`)
 
-# 2. Transfer /secure/enroll to the executor host, then re-run the executor installer:
-curl -fsSL <origin>/install-venya-executor.sh | sudo \
+# 2. Transfer /secure/enroll to the executor host, then re-run the executor installer.
+#    The assignments sit before `sudo` (an argument of sudo stays readable in its command
+#    line for the whole run); `-E` passes them on, and the local sudo policy has to allow
+#    preserving the environment or sudo declines and installs nothing:
+curl -fsSL <origin>/install-venya-executor.sh | \
   VENYA_SKIP_PROMPT=yes \
   VENYA_SERVER_URL=https://<core-host> \
   VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
-  bash -s
+  sudo -E bash -s
 ```
 
 The installer fetches the current CA from `/.well-known/venya-ca.crt`, updates system
@@ -571,12 +574,12 @@ sudo rm -f /var/lib/venya/ca/ca.key /var/lib/venya/ca/ca.crt
 #        /etc/venya/venya-core.env when the admin CA is preserved — passing
 #        VENYA_ADMIN_CA_PASSPHRASE explicitly still wins (and is REQUIRED if the
 #        env file was lost, or if you also wipe admin-ca/ to rotate the admin CA):
-curl -fsSL <origin>/install-venya-core.sh | sudo \
+curl -fsSL <origin>/install-venya-core.sh | \
   VENYA_SKIP_PROMPT=yes \
   VENYA_DB_PASSWORD=<original> VENYA_DB_PASSPHRASE=<original> \
   CORE_HOSTNAME=<original> \
   VENYA_ADMIN_CA_PASSPHRASE=<value from venya-core.env — optional on pre-fix-free installs, see above> \
-  bash -s
+  sudo -E bash -s
 # New CA generated; server + relay certs re-signed; system trust, well-known copy,
 # and nginx bundle (root + admin) rebuilt; the core's machine-plane admin pair is
 # re-minted on that core (it is not copied to any workstation — §0.1).
