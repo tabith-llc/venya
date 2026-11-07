@@ -378,7 +378,9 @@ Why the assignments sit **before** `sudo` and carry `-E`: a value written after 
 an argument of the `sudo` process, and that process lives for the whole install, so any
 local account able to read `/proc/<pid>/cmdline` sees it. An assignment in front of the
 command name is not an argument of anything — it reaches the child's environment — and
-`-E` is what carries those names through to the installer. The installer prompts for a
+`-E` is what carries those names through to the installer — sudo allows it where its rule matches
+the command `ALL` (the SETENV tag is implied there) and refuses it, running nothing, where the rule
+names specific commands or carries `NOSETENV`. The installer prompts for a
 missing password only when stdin is a TTY; a piped install has none, so the environment
 is the way in here (see the `VENYA_SKIP_PROMPT` note above).
 
@@ -457,7 +459,9 @@ ssh bot@$EXEC_HOST "curl -fsSLo /tmp/install-venya-executor.sh http://$BUILD_HOS
 
 # 3) Install on the executor, typed at its own prompt. Log in first, then run the
 #    line — the assignments sit BEFORE `sudo` so the token reaches the installer as an
-#    environment variable and never as an argument, and `-E` carries it through:
+#    environment variable and never as an argument, and `-E` carries it through (sudo
+#    allows this where its rule matches the command ALL; if yours refuses, drop the -E
+#    and run the installer from a `sudo -i` root shell with the same prefix shape):
 ssh -t bot@$EXEC_HOST
 VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://$BUILD_HOST_IP:8080/venya-executor-install.tar.gz \
   VENYA_TARBALL_SHA256=$EXEC_SHA VENYA_SERVER_URL=https://$CORE_HOST VENYA_EXECUTOR_ID=$EXEC_ID \

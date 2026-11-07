@@ -54,9 +54,12 @@ Write the installer's variables **before** `sudo`, not after it. An assignment i
 command name goes into that process's environment; a value written after `sudo` is one of its
 arguments, and the `sudo` process lives for the whole install with its command line readable to
 other local accounts. `sudo -E` is what carries the values through — without it, sudo's environment
-reset drops them and the installer aborts with its own missing-variable error. If you would rather
-not rely on `-E`, download the script and run it: an interactive run is prompted, with input hidden
-(the note below covers the same rule).
+reset drops them and the installer aborts with its own missing-variable error. Sudo permits `-E`
+where its rule matches the command `ALL` (its manual: "If the command matched is ALL, the SETENV
+tag is implied for that command") and refuses it with `sorry, you are not allowed to preserve the
+environment` where the rule names specific commands or carries `NOSETENV`. If it refuses, download
+the script, run `sudo -i`, and start it from that root shell with the assignments in front of the
+command — that shape needs no `-E` at all (the note below covers the prompting rule).
 
 `VENYA_DB_PASSPHRASE` has NO default and is **required for unattended
 (piped) installs** — the installer aborts with an actionable error without it

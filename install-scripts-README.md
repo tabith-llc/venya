@@ -33,8 +33,11 @@ Installer variables go **before** `sudo`, never after it: a value written after 
  of its arguments and stays visible in that process's command line for the whole run, while an
  assignment in front of the command name lands in the environment instead. `sudo -E` carries them
  through; without `-E`, sudo's environment reset drops these names and the installer aborts with
- its own missing-variable error (measured). If you would rather not rely on `-E`, download the
- script and run it, and answer the hidden prompts.
+ its own missing-variable error (measured). Sudo accepts `-E` where its rule matches the command
+ `ALL` — its manual states the SETENV tag is implied for such a rule — and refuses it with
+ `sorry, you are not allowed to preserve the environment` where the rule names specific commands
+ or carries `NOSETENV`. If it refuses: download the script, run `sudo -i`, and start it from that
+ root shell with the assignments in front of the command; that shape needs no `-E`.
 
 **Environment variables:**
 

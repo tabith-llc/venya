@@ -289,8 +289,10 @@ accounts can read for as long as the command runs. Two shapes, both supported:
 ```bash
 # Reuse what the service already has. The assignment sits BEFORE `sudo`, so the shell
 # puts it in sudo's environment rather than in sudo's argument list, and `-E` passes it
-# on to the CLI. Without `-E`, sudo's environment reset drops the name, and the command
-# then refuses and writes nothing (see the refusal note below).
+# on to the CLI. Sudo allows `-E` where its rule matches the command ALL (the SETENV tag
+# is implied there) and refuses it — "sorry, you are not allowed to preserve the
+# environment" — where the rule names specific commands or carries NOSETENV. Without `-E`,
+# the environment reset drops the name and the command refuses and writes nothing.
 VENYA_EXECUTOR_KEY_PASSPHRASE="$(sudo sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env)" \
   sudo -E /opt/venya/.venv/bin/venya exec cert renew
 
@@ -362,8 +364,9 @@ venya admin executor-enroll <executor-id> --output-dir /secure/enroll
 
 # 2. Transfer /secure/enroll to the executor host, then re-run the executor installer.
 #    The assignments sit before `sudo` (an argument of sudo stays readable in its command
-#    line for the whole run); `-E` passes them on — without it, sudo's environment reset
-#    drops them and the installer aborts on its own missing-variable check:
+#    line for the whole run); `-E` passes them on where sudo's rule matches the command ALL,
+#    and without it the environment reset drops them and the installer aborts on its own
+#    missing-variable check:
 curl -fsSL <origin>/install-venya-executor.sh | \
   VENYA_SKIP_PROMPT=yes \
   VENYA_SERVER_URL=https://<core-host> \
