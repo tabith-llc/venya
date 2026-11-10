@@ -91,7 +91,7 @@ _spec.loader.exec_module(gen)
 #: cell RE-RESOLVES all 105 cites against the live tree and asserts agreement. A merge that moves a
 #: cited symbol from here forward reddens the suite instead of quietly publishing a stale line.
 PINNED_AT: str | None = (
-    "35bc369dbe6a4c2cbf4370e29335978a2683d8a5"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
+    "8ea00b682b54cb1ca03188dda9f61a8af8c62e5f"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
 )
 
 #: Files whose churn invalidates the pins — the tree the cites point into.
