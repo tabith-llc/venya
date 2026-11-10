@@ -282,36 +282,47 @@ then writes the new one as an encrypted envelope, so the process must see
 from the installer's root-only `EnvironmentFile`. The CLI takes it from the process
 environment only: `venya exec cert renew --help` lists `--cert-path`, `--key-path` and
 `--ca-bundle`, and no passphrase option. So the value has to arrive as an environment
-variable, and the shape below keeps it out of the command line — a word typed after
+variable, and the two forms below keep it out of the command line — a word typed after
 `sudo` becomes part of that running process's own command line, which other local
-accounts can read for as long as the command runs. Two shapes, both supported:
+accounts can read for as long as the command runs. Two forms, both root shells:
 
 ```bash
-# Reuse what the service already has, with no sudo hop at all: open a root shell, read the
-# passphrase from the keyboard with echo off, and pass it as an assignment in front of the
-# command. The value reaches the CLI in that process's environment — never an argument of
-# anything, never a line of shell history.
+# Type it in a root shell — the form for when you hold the passphrase and not the file.
+# Open a root shell, read the passphrase from the keyboard with echo off, and pass it as an
+# assignment in front of the command. The value reaches the CLI in that process's
+# environment — never an argument of anything, never a line of shell history.
 sudo -i
 read -rs -p 'Executor key passphrase: ' VENYA_EXECUTOR_KEY_PASSPHRASE; printf '\n' >&2
 VENYA_EXECUTOR_KEY_PASSPHRASE="$VENYA_EXECUTOR_KEY_PASSPHRASE" \
   /opt/venya/.venv/bin/venya exec cert renew
 ```
 
-The form below pulls the stored passphrase out of the service's own env file instead of
-asking, and it works on hosts with classic `sudo` only. Ubuntu 26.04 — the tested target this
-release names — ships `sudo-rs 0.2.13`, whose stock rule is `Defaults env_reset` and which
-refuses `-E` outright with `sudo: preserving the entire environment is not supported, '-E' is
-ignored`; an assignment written in front of `sudo` there reaches the CLI as nothing at all, and
-the command refuses and writes nothing. Classic `sudo` allows `-E` where its rule matches the
-command `ALL` (the SETENV tag is implied there) and refuses it — "sorry, you are not allowed to
-preserve the environment" — where the rule names specific commands or carries `NOSETENV`. A
-passphrase is never moved after `sudo` to make that command work: an argument of the `sudo`
-process stays readable in its command line for the whole run (`#756`).
+The form below pulls the stored passphrase out of the service's own env file instead of asking
+for it, and it runs in a root shell like the one above. The `-E` handoff is deliberately not
+published here: it is host-conditional, and this release names the host where it fails. Ubuntu
+26.04 — the tested target this release names — ships `sudo-rs 0.2.13`, whose stock rule is
+`Defaults env_reset` and which refuses `-E` outright with
+`sudo: preserving the entire environment is not supported, '-E' is ignored`; an assignment written
+in front of `sudo` there reaches the CLI as nothing at all, and the command refuses and writes
+nothing. Classic `sudo` allows `-E` where its rule matches the command `ALL` (the SETENV tag is
+implied there) and refuses it — "sorry, you are not allowed to preserve the environment" — where
+the rule names specific commands or carries `NOSETENV`. Moving the passphrase after `sudo` is not
+the remedy either: an argument of the `sudo` process stays readable in its command line for the
+whole run (`#756`).
+
+A one-line shape does exist — `sudo sh -c '…'`, with the `sed` read inside the quoted script so
+the value never appears in it — and this page still does not publish one. Nested quoting around a
+secret is exactly where a stray quote turns the value into an argument, and the operator gets no
+warning when they get it wrong. Two lines in a root shell is the form that is hard to write badly.
 
 ```bash
-# Classic sudo only: reuse what the service already has.
-VENYA_EXECUTOR_KEY_PASSPHRASE="$(sudo sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env)" \
-  sudo -E /opt/venya/.venv/bin/venya exec cert renew
+# Already root, so the read needs no `sudo` either: the value is captured into the assignment in
+# front of the CLI and never becomes an argument of anything, and only the sed expression (not the
+# passphrase) is what the shell history keeps. `head -n1` matches the installer's own re-run read
+# (`install-venya-executor.sh:623`), so a hand-added duplicate line cannot join two values.
+sudo -i
+VENYA_EXECUTOR_KEY_PASSPHRASE="$(sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env | head -n1)" \
+  /opt/venya/.venv/bin/venya exec cert renew
 ```
 
 The command also prompts on its own when the variable is unset and the terminal is
