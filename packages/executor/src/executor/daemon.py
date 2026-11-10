@@ -43,6 +43,9 @@ import httpx2
 # must not be silently unavailable at runtime.
 import tomli_w  # type: ignore[import-not-found]
 from core.utils.cert_serial import canonical_serial, serial_match_key
+from core.version import (
+    canonical_release,  # leg 1196: this layer is built by setuptools, which writes the canonical spelling into its metadata
+)
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -217,14 +220,11 @@ def sweep_stale_tmp_files(
 
 
 def _dist_version() -> str:
-    """Single-sourced version (feature/version-surfaces condition 1), rendered to the
-    spelling the plate declares: this is the one setuptools-built layer (for its Rust
-    extension) and setuptools writes PEP 440 canonical form into metadata, so an
-    unrendered read says ``0.1.0b3`` where ``pyproject.toml`` says ``0.1.0beta3`` (leg 1196)."""
+    """Single-sourced version (feature/version-surfaces condition 1): dist metadata
+    (pyproject) is the only truth — never a literal. Missing metadata yields "" (falsy
+    → heartbeat omits the report; server leaves the stored column untouched), never a guess."""
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _pkg_version
-
-    from core.version import canonical_release
 
     try:
         return canonical_release(_pkg_version("executor"))
