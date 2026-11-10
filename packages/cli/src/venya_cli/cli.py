@@ -1085,11 +1085,11 @@ def _operator_error_line(exc: Exception, args: argparse.Namespace, log_path: obj
     """
     detail = str(exc)
     if detail:
-        # #247: a refusal written to be printed carries its own `Error: ` (that is the
-        # one wording `_require_https_server_url` prints, and the raise sites reuse the
-        # same string), so wrapping it a second time here is what printed
-        # `Error: Error: server URL must be https://…`. Text that already opens with the
-        # prefix is handed through as it stands; every other render is byte-identical.
+        # 247: a refusal written to be printed carries its own prefix (that is the one
+        # wording `_require_https_server_url` prints, and the raise sites reuse the same
+        # string), so wrapping it a second time here printed the operator's line with the
+        # prefix doubled. Text that already opens with `Error:` is handed through as it
+        # stands; every other render is byte-identical.
         return detail if detail.startswith("Error:") else f"Error: {detail}"
     command = _command_path(args) or "the requested command"
     where = f"cause logged to {log_path}" if log_path is not None else "no error log could be written for this run"
