@@ -286,20 +286,24 @@ See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)** — hands-on in 
 Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (core/executor: Ubuntu 26.04 LTS is the tested target; the Workstation CLI additionally runs on Debian 13, macOS, and Windows):
 
 ```bash
-# Core server (root)
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | \
-  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> \
-  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> \
-  sudo -E bash -s
+# Core server (root). At a terminal the installer asks for the DB password and the server
+# encryption passphrase with hidden input, so neither one is typed on a command line.
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh -o /tmp/install-venya-core.sh
+sudo bash /tmp/install-venya-core.sh
+# Without a terminal, open a root shell and assign the variables there instead:
+#   sudo -i
+#   VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD='<strong-db-password>' \
+#     VENYA_DB_PASSPHRASE='<server-encryption-passphrase>' bash /tmp/install-venya-core.sh
 
 # Executor (root; enrollment token from the core admin; a Docker account is REQUIRED — sbx pulls its agent
-# template from Docker Hub. Piped installs need VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY, or download the
-# script and run it interactively for hidden-prompt entry — the key is handled stdin-only, never argv/disk.
+# template from Docker Hub. The token has no hidden-prompt path in this installer, so a fresh executor is
+# installed from a root shell: sudo -i, then assign it there. Docker credentials DO prompt: run the
+# downloaded script interactively and the key is entered with echo off (stdin-only, never argv/disk).
 # See installation.md §3.)
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | \
-  VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
-  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
-  sudo -E bash -s
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh -o /tmp/install-venya-executor.sh
+sudo -i
+VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN='<token>' bash /tmp/install-venya-executor.sh
 
 # Workstation CLI (non-root; Ubuntu 24.04, Debian 13, or macOS — verified on macOS 26.6.2 arm64 and Debian 13)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
@@ -314,7 +318,21 @@ powershell -ExecutionPolicy Bypass -File install-venya-cli.ps1
 
 Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
 
-Pass the installer's variables **before** `sudo`, not after it: an assignment in front of the command name reaches the program's environment, while a word written after `sudo` is one of its arguments and stays readable in that process's command line for the whole install. `sudo -E` is what carries them through — without it, sudo's environment reset drops them and the installer stops with its own missing-variable error. Sudo allows `-E` when your rule matches the command `ALL` (the SETENV tag is implied there) and refuses it — `sorry, you are not allowed to preserve the environment` — when the rule names specific commands or carries `NOSETENV`. If it refuses, download the script, run `sudo -i` and start the installer from that root shell with the assignments in front of it; an interactive run is prompted, with input hidden.
+Where a variable goes depends on what it holds. **Control variables** — `VENYA_SKIP_PROMPT`,
+`VENYA_SERVER_URL`, `VENYA_EXECUTOR_ID`, `VENYA_TARBALL`, `VENYA_TARBALL_SHA256`, the `VENYA_PURGE_*` switches —
+are assigned to `sudo` itself (`… | sudo VENYA_SKIP_PROMPT=yes bash -s`). That is the position Ubuntu 26.04
+delivers: its `sudo` is `sudo-rs 0.2.13` with `Defaults env_reset`, and `-E` is refused outright
+(`sudo: preserving the entire environment is not supported, '-E' is ignored`), so a value written in front of
+`sudo` arrives there as nothing at all; the same command also works on hosts with classic `sudo`, which
+additionally accepts the other position when its rule matches the command `ALL` (the SETENV tag is implied
+there) and refuses `-E` with `sorry, you are not allowed to preserve the environment` where the rule names
+specific commands or carries `NOSETENV`. **Secret-bearing variables** — `VENYA_DB_PASSWORD`,
+`VENYA_DB_PASSPHRASE`, `VENYA_ADMIN_CA_KEY_PASSPHRASE`, `VENYA_CA_KEY_PASSPHRASE`,
+`VENYA_RECOVERY_CODE_PEPPER`, `VENYA_EXECUTOR_ENROLLMENT_TOKEN`, `VENYA_DOCKER_API_KEY` — never go after
+`sudo`: an argument of the `sudo` process stays readable in its command line for the whole install, which is
+what `#756` removed. They arrive at the hidden prompt, from a root shell, or — on a re-run — from the value the
+installer stored and reuses. The full rule, with the file names and modes, is in
+[`install-scripts-README.md`](install-scripts-README.md) and [docs/installation.md](docs/installation.md).
 
 Core and executor must run on separate hosts (or separate VMs on one physical machine) — see [Host Trust Model](#host-trust-model).
 

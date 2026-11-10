@@ -364,25 +364,30 @@ disables interactive prompts (required for piped installs).
 
 ```bash
 ssh bot@$CORE_HOST
-curl -fsSL http://$BUILD_HOST_IP:8080/install-venya-core.sh | \
-  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD="$DB_PASSWORD" \
-  VENYA_TARBALL=http://$BUILD_HOST_IP:8080/venya-core-install.tar.gz \
+curl -fsSL http://$BUILD_HOST_IP:8080/install-venya-core.sh -o /tmp/install-venya-core.sh
+sudo -i
+VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://$BUILD_HOST_IP:8080/venya-core-install.tar.gz \
   VENYA_TARBALL_SHA256="$CORE_SHA" \
-  sudo -E bash -s
+  VENYA_DB_PASSWORD="$(cat /home/bot/.venya-db-password)" \
+  bash /tmp/install-venya-core.sh
 sudo systemctl start venya-core
 curl -sk https://$CORE_HOST/api/v1/health
 # Expected: {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
 
-Why the assignments sit **before** `sudo` and carry `-E`: a value written after `sudo` is
-an argument of the `sudo` process, and that process lives for the whole install, so any
-local account able to read `/proc/<pid>/cmdline` sees it. An assignment in front of the
-command name is not an argument of anything — it reaches the child's environment — and
-`-E` is what carries those names through to the installer — sudo allows it where its rule matches
-the command `ALL` (the SETENV tag is implied there) and refuses it, running nothing, where the rule
-names specific commands or carries `NOSETENV`. The installer prompts for a
-missing password only when stdin is a TTY; a piped install has none, so the environment
-is the way in here (see the `VENYA_SKIP_PROMPT` note above).
+Why the shape is a root shell rather than one piped line: a value written **after** `sudo` is an argument of
+the `sudo` process, and that process lives for the whole install, so any local account able to read
+`/proc/<pid>/cmdline` sees it (`#756`) — fine for a name that holds no secret, not for one that does. A value
+written **in front of** `sudo` is not an argument of anything, but Ubuntu 26.04 — the platform this runbook
+installs on — ships `sudo-rs 0.2.13` with `Defaults env_reset` and refuses `-E` outright
+(`sudo: preserving the entire environment is not supported, '-E' is ignored`), so that position delivers
+nothing there; it is the position that works on hosts with classic `sudo` (which allows `-E` where its rule
+matches the command `ALL`, the SETENV tag being implied there, and refuses it, running nothing, where the rule
+names specific commands or carries `NOSETENV`). Inside a root shell an assignment in front of the command needs
+no `sudo` and no `-E` at all, and reading the secret from a 0600 file means the value reaches no argument list
+and no shell history — only its path does. The installer prompts for a missing password only when stdin is a
+TTY; a piped install has none, so this file-read shape is how the unattended run carries it (see the
+`VENYA_SKIP_PROMPT` note above).
 
 During the install, watch for `Downloading tarball from http://$BUILD_HOST_IP:8080/...`
 + `SHA-256 verified` in the output — that is the mechanism proving local
@@ -457,16 +462,18 @@ VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt \
 # 2) Stage the installer on the executor (single line; hash-check the output):
 ssh bot@$EXEC_HOST "curl -fsSLo /tmp/install-venya-executor.sh http://$BUILD_HOST_IP:8080/install-venya-executor.sh && sha256sum /tmp/install-venya-executor.sh"
 
-# 3) Install on the executor, typed at its own prompt. Log in first, then run the
-#    line — the assignments sit BEFORE `sudo` so the token reaches the installer as an
-#    environment variable and never as an argument, and `-E` carries it through (sudo
-#    allows this where its rule matches the command ALL; if yours refuses, drop the -E
-#    and run the installer from a `sudo -i` root shell with the same prefix shape):
+# 3) Install on the executor, from a root shell on the guest. Ubuntu 26.04's sudo-rs refuses
+#    `-E`, so assignments written before `sudo` never arrive; and the enrollment token must not
+#    be placed after `sudo`, where it would be an argument of the sudo process for the whole
+#    run (#756). Read the token from the 0600 file the enroll command writes, inside a root
+#    shell, so the value reaches no argument list and no history line:
 ssh -t bot@$EXEC_HOST
+curl -fsSL http://$BUILD_HOST_IP:8080/install-venya-executor.sh -o /tmp/install-venya-executor.sh
+sudo -i
 VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://$BUILD_HOST_IP:8080/venya-executor-install.tar.gz \
   VENYA_TARBALL_SHA256=$EXEC_SHA VENYA_SERVER_URL=https://$CORE_HOST VENYA_EXECUTOR_ID=$EXEC_ID \
-  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<EXEC_TOKEN> \
-  sudo -E bash /tmp/install-venya-executor.sh
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN="$(cat /home/bot/<token-file-from-the-enroll-command>)" \
+  bash /tmp/install-venya-executor.sh
 # Do NOT wrap that line inside `ssh -t bot@$EXEC_HOST '…'` the way step 2 wraps its curl:
 # the quoted text is an argument of your LOCAL ssh process, so the token you substitute
 # would be readable in a command line on the workstation for the whole install. Pass the
