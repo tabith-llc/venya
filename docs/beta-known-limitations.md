@@ -1061,6 +1061,42 @@ executor. This entry is removed when that leg ships; it is never softened before
 
 ---
 
+### The browser decides which authenticator answers an enrollment, and venya neither constrains that choice nor records what answered
+
+Status: known limitation in beta · Target: no decision yet — the authenticator-constraint question is unmeasured and unruled · Tracked as: no tracker row yet. It comes from finding 249 of the beta3 dogfood report set, and opening that row is a tracker act, not this page's.
+
+**Who is affected:** anyone performing the first `venya init` admin enrollment, and anyone running
+`venya enroll <token>` on their own workstation, on a machine where a password manager is present —
+a desktop app or a browser extension both count.
+
+**What the limitation is:** the registration request venya sends names no authenticator class, so
+the browser decides which one answers. Where a manager is installed it usually offers first, and its
+offer says *save this passkey*, which is what saving is for. Accept it and the credential venya
+stores is the manager's: the security key in your hand is left with nothing on it, and the PIN
+prompt the documentation describes never appears. Nothing on the venya side says so at the time —
+the server records no field naming which class of authenticator responded, and the enrollment
+request model refuses unknown fields by design (`#357`), so the fact is not simply unreported, it is
+not collected. The dogfood report notes the same choice can shape a later login on that machine,
+which is where operators tend to notice something is off.
+
+**What you do about it — and it is yours to do, today:** decline the offer. Both enrollment pages now
+carry the sentence beside the button, and the short form is: when something offers to save a
+passkey, turn that down, choose the hardware security key, and enter its PIN. If you accepted before
+you saw this, the credential the manager holds is deleted in the manager's own store, and the key is
+enrolled by running the same ceremony again with the offer declined; this entry does not promise a
+server-side delete-a-credential step, because none was checked here.
+
+**What would change it:** a registration option naming the attachment class — the shipped browser
+client already passes `authenticatorSelection` through if the server sends it, so this is a
+server-side decision, not a client rebuild — and a stored field recording which class answered. Each
+carries a measurement behind it: the browsers and managers in real use, against the key models this
+release supports, and a capability question for anyone whose laptop's own authenticator is currently
+a valid answer. That work is unruled and unmeasured, so this entry stays as a limitation with an
+operator action rather than a fix date.
+
+
+---
+
 ## How to read an entry, and how this list is maintained
 
 Each entry gives: what you will hit, whether it is fixed-targeted or open, the issue that

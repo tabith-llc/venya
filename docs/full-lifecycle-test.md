@@ -652,6 +652,11 @@ VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt VENYA_FIDO2_D
   $ADMIN_WS/.venv/bin/venya init $ADMIN_USER        # touch KEY_A when prompted; PIN needs a TTY
 ```
 
+- **At the prompt, decline a passkey.** If a password manager — a desktop app or a browser
+  extension — offers to create or save one, turn the offer down and choose the hardware key, so
+  KEY_A's PIN prompt appears. Accepting it enrolls the manager and creates nothing on KEY_A.
+  This is the ceremony-time step; the `ykman fido access change-pin` and `fido2-token -S` lines in
+  C.2 above are the separate act of **setting** the PIN on the key, done before this point.
 - Expected: `Initialization complete. User '<ADMIN_USER>' enrolled as admin.`
 - A **recovery code is printed once** — record it in secure storage (not in
   committed files, and not by pasting it into chat/session transcripts —
