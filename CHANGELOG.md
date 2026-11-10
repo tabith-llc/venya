@@ -7,6 +7,7 @@ Notable changes to Venya will be documented in this file.
 ### Breaking changes
 
 - If you call the role API yourself rather than through the CLI, the five writers now sit under `/api/v1/admin/`: `POST /api/v1/admin/roles`, `PUT /api/v1/admin/roles/{role_id}`, `DELETE /api/v1/admin/roles/{role_id}`, `POST /api/v1/admin/roles/{role_id}/members`, `DELETE /api/v1/admin/roles/{role_id}/members/{user_id}` — update the path in your caller or it reads 405 or 404 (#729)
+- Ubuntu 26.04 LTS is now the tested target for the core and the executor, and Ubuntu 24.04 is no longer a supported server/executor platform, so check the host's release with `cat /etc/os-release` before you install: the installers carry no OS-version check, so a release outside the tested target is not refused, it is simply untested (your workstation is unaffected — the Workstation CLI still runs on Ubuntu 24.04, Debian 13 and macOS)
 
 ### Added
 
@@ -43,6 +44,9 @@ Notable changes to Venya will be documented in this file.
 - A core uninstall that meets a symlinked `/var/lib/venya` or `/var/lib/venya/ca` stops before it removes anything and names where the link points, instead of printing `Venya Core uninstalled.` over a tree it never touched; a removal is now reported only after the path is proved gone (#755)
 - `VENYA_PURGE_CONFIG=yes` in the CLI uninstaller refuses a config dir that is a symlink, naming the link and its target, and prints `Removed …` only after proving the directory is gone — a config dir that was never there now says there was nothing to remove (#758)
 - Re-running the executor installer keeps the settings you added to `/etc/venya/executor.toml` and `/etc/venya/venya-executor.env` instead of rebuilding them away, and names each one it carried; a key placed inside an installer-owned table such as `[mtls]` is the one case it cannot carry, and that run says so too (#738)
+- Uninstalling an executor keeps `/var/lib/venya` — the executor CA and its enrollment state — where it used to take the directory with the rest of the service, and it now refuses a state path that is a symlink, naming the link and where it points; run it again with `VENYA_PURGE_STATE=yes` when you mean the state gone, and either way the run prints what happened only after it has proved the path's real state (#757)
+- The published install and recovery commands used to write an installer variable after `sudo`, which makes it one of sudo's arguments and keeps the value in that process's command line, readable to other local accounts, for the life of the install; they now set it before `sudo` and pipe into `sudo -E bash -s`, and `docs/cert-rotation-runbook.md` reads the one `VENYA_ADMIN_CA_KEY_PASSPHRASE` line it needs instead of printing the whole env file (#756)
+- Two sentences in `install-venya-core.sh` claimed more than the script does: the unreadable-incoming-version arm of the schema compare warns and continues, where its line said the version guard had refused, and a restore point is taken before migrations run, not before anything changes, so both lines now match the path you are on (#759)
 
 ## [0.1.0beta2] - 2026-10-28
 
