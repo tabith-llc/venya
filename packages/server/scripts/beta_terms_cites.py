@@ -192,13 +192,13 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     f"{CM}:3678": (CM, "the renew path wrote NoEncryption(): an executor private key", 1, "pin"),
     # the page prints these two as BARE `commands.py:N` on the continuation line — same file, so
     # keyed here; the guard still demands the page say a full path (see the ambiguity cell)
-    "packages/cli/src/venya_cli/commands.py:3448": (
+    "packages/cli/src/venya_cli/commands.py:3518": (
         CM,
         "NoEncryption(), an executor private key in the clear beside the cert",
         1,
         "pin",
     ),
-    "packages/cli/src/venya_cli/commands.py:3885": (
+    "packages/cli/src/venya_cli/commands.py:3955": (
         CM,
         "the renew path wrote NoEncryption(): an executor private key",
         1,
