@@ -429,7 +429,55 @@ async def main() -> None:
         await _client.close()
 
 
-def run() -> None:
+#: The MCP layer's version string, single-sourced from its own distribution
+#: metadata (``feature/version-surfaces`` condition 1 — never a literal). The
+#: canonical *rule* is not restated here on purpose: ``core.version`` owns it, and
+#: this wheel declares no dependency on ``core``, so importing it would put
+#: SQLAlchemy, argon2 and pycryptodome into the MCP wheel's metadata to print one
+#: string. That is the same trade the CLI makes — ``venya_cli.api_client`` mirrors
+#: ``server.routes.executors._version_tuple`` rather than importing it. The
+#: agreement is pinned instead by ``tests/test_mcp_version_surface_1196.py``, which
+#: compares this surface against ``core.version.canonical_release`` over a fixture
+#: set and over the live install, so a build backend that starts normalizing the
+#: spelling here fails a test rather than shipping two answers.
+_DIST_NAME = "venya-mcp"
+UNKNOWN = "unknown"
+
+
+def release_version() -> str:
+    """What ``venya-mcp --version`` answers. ``unknown`` when the installed
+    metadata is missing — never a default that could be read as a release."""
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        return _pkg_version(_DIST_NAME)
+    except PackageNotFoundError:
+        return UNKNOWN
+
+
+def _build_arg_parser():
+    """Argument surface for the ``venya-mcp`` binary (leg 1196).
+
+    Nothing read argv before this, so ``venya-mcp --version`` printed a traceback
+    out of the config load and ``--help`` started the server.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="venya-mcp",
+        description="Venya MCP server — lets an LLM drive Venya over MCP tools.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=release_version(),
+        help="Print the MCP layer's version and exit.",
+    )
+    return parser
+
+
+def run(argv: list[str] | None = None) -> None:
     """Sync console-script entry point — async main() must be awaited.
 
     Startup-precondition failures (missing or malformed config, missing CA
@@ -438,6 +486,9 @@ def run() -> None:
     mcp-ca-missing-traceback-ux #41). The TLS refusal itself is unchanged —
     this only renders the message cleanly.
     """
+    # Parsed before anything is read: an unknown flag exits 2 with usage on
+    # stderr and never reaches the config load or the stdio server.
+    _build_arg_parser().parse_args(argv)
     try:
         asyncio.run(main())
     except FileNotFoundError as e:

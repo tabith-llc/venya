@@ -8,6 +8,12 @@
 
 Ticket mcp-missing-config-traceback-ux: missing/malformed config rendered the
 documented actionable message as a raw FileNotFoundError traceback.
+
+Leg 1196 changed the CALL FORM here, not the assertion: ``run()`` now reads argv
+(it used to discard it), so a cell that wants the config path has to say "no flags"
+explicitly — ``run([])``. Each cell still asserts exit 1, the actionable message and
+zero traceback, exactly as before. Under pytest the inherited ``sys.argv`` is
+``['tests/', '-q']``, and refusing that is the new surface working.
 """
 
 import pytest
@@ -17,7 +23,7 @@ from venya_mcp.server import run
 def test_missing_config_exits_clean(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("VENYA_CONFIG", str(tmp_path / "absent.json"))
     with pytest.raises(SystemExit) as exc:
-        run()
+        run([])
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "No Venya session token found" in err
@@ -29,7 +35,7 @@ def test_malformed_config_exits_clean(tmp_path, monkeypatch, capsys):
     cfg.write_text("{not json")
     monkeypatch.setenv("VENYA_CONFIG", str(cfg))
     with pytest.raises(SystemExit) as exc:
-        run()
+        run([])
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "not valid JSON" in err
@@ -44,7 +50,7 @@ def test_missing_ca_exits_clean(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("VENYA_CA_CERT", raising=False)
     monkeypatch.delenv("VENYA_TLS_VERIFY", raising=False)
     with pytest.raises(SystemExit) as exc:
-        run()
+        run([])
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "Venya CA certificate not found" in err

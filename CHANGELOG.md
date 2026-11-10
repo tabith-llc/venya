@@ -4,6 +4,10 @@ Notable changes to Venya will be documented in this file.
 
 ## [0.1.0beta3] - 2026-11-06
 
+### New features
+
+- The two service binaries answer when you ask them: `venya-server --version`, `venya-server --help`, `venya-mcp --version` and `venya-mcp --help` now print an answer and exit 0, where the flag was ignored before (#768)
+
 ### Breaking changes
 
 - If you call the role API yourself rather than through the CLI, the five writers now sit under `/api/v1/admin/`: `POST /api/v1/admin/roles`, `PUT /api/v1/admin/roles/{role_id}`, `DELETE /api/v1/admin/roles/{role_id}`, `POST /api/v1/admin/roles/{role_id}/members`, `DELETE /api/v1/admin/roles/{role_id}/members/{user_id}` — update the path in your caller or it reads 405 or 404 (#729)
@@ -11,6 +15,7 @@ Notable changes to Venya will be documented in this file.
 
 ### Added
 
+- `venya-server --version` also names the face it was built from — a commit, a value the release stamped, or `unknown` — so two installs can be told apart without opening the tarball (#768)
 - `venya store` prints the secret's decimal id on a first store, the number a `/run/secrets/venya/<decimal-id>` redirect needs (#732 #733)
 - The CLI installer prints two answers separately: the shim exists, and whether a fresh login shell resolves `venya`, with the PATH line to add when it does not (#744)
 - `venya-mcp` gets the same login-shell check and a remedy line on the branch that printed nothing before (#744)
@@ -22,6 +27,7 @@ Notable changes to Venya will be documented in this file.
 
 ### Changed
 
+- A flag neither binary recognised used to be dropped on the floor while the service started anyway; `venya-server --whatever` and `venya-mcp --whatever` now print usage on stderr and exit 2 (#768)
 - `install-venya-executor.sh` checks that the executor name resolves from every core before it installs or builds anything; that check used to sit after a full Rust release build and stopped at registration (#745)
 - `EXECUTOR_ID` defaults to the host's own name instead of the literal `venya-exec-1`, and an unattended run prints the name it chose (#745)
 - The startup disk-encryption check finds the PostgreSQL cluster the machine actually runs — the cluster manager first, then the running server, then a single installed cluster — instead of assuming `/var/lib/postgresql/16/main` (#740)
@@ -30,6 +36,7 @@ Notable changes to Venya will be documented in this file.
 
 ### Fixed
 
+- Every layer now prints the version its own plate declares: the executor reported `0.1.0b3` where the release record says `0.1.0beta3`, because its build backend normalized the spelling on the way into the installed metadata (#768)
 - A failed API call from the CLI names the HTTP status it received, so an older CLI against a newer core reads `HTTP 405: …` where it read `Method Not Allowed` or `Unknown error` (#729)
 - The memory pin on a key engages: the buffer address reached the kernel as a 32-bit integer, so any buffer above 2 GiB was refused (#739)
 - A refused memory pin names the kernel's reason — a capability, the locked-memory limit, or neither — instead of pointing at a permission the host already grants (#739)

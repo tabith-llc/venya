@@ -6,8 +6,10 @@
 
 """Venya core package."""
 
-from importlib.metadata import version as _dist_version
+from core.version import release_version as _release_version
 
 # Single-sourced from the installed distribution metadata (RELEASES.md §1 —
-# kills the last non-derived version literal; surfaces read this string).
-__version__ = _dist_version("core")
+# kills the last non-derived version literal; surfaces read this string),
+# rendered through the one canonical form so every layer says the same thing
+# regardless of which build backend wrote its metadata.
+__version__ = _release_version("core")

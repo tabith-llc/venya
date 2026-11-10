@@ -220,12 +220,21 @@ def _dist_version() -> str:
     """Single-sourced version (feature/version-surfaces condition 1): dist
     metadata (pyproject) is the only truth — never a string literal. Missing
     metadata yields "" (falsy → heartbeat omits the report; server leaves the
-    stored column untouched), never a guessed value."""
+    stored column untouched), never a guessed value.
+
+    Rendered through the one canonical form (ticket version-reporting, leg 1196).
+    This layer is built by setuptools (for the Rust extension), which writes the
+    PEP 440 normalized spelling into its metadata — so before that render the
+    daemon reported ``0.1.0b3`` while every other layer reported ``0.1.0beta3``
+    from the same declaration.
+    """
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _pkg_version
 
+    from core.version import canonical_release
+
     try:
-        return _pkg_version("executor")
+        return canonical_release(_pkg_version("executor"))
     except PackageNotFoundError:
         return ""
 

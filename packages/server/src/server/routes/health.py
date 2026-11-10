@@ -8,8 +8,6 @@
 
 import logging
 import time
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _pkg_version
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
@@ -23,11 +21,15 @@ router = APIRouter()
 def _dist_version() -> str:
     """Single-sourced version (feature/version-surfaces condition 1): dist
     metadata (pyproject) is the only truth — never a string literal. Missing
-    metadata yields the honest signal "unknown", never a guessed value."""
-    try:
-        return _pkg_version("server")
-    except PackageNotFoundError:
-        return "unknown"
+    metadata yields the honest signal "unknown", never a guessed value.
+
+    Rendered through the one canonical form (ticket version-reporting, leg 1196)
+    so this field says the same string the plate declares and the same string the
+    other layers print, whichever build backend wrote this layer's metadata.
+    """
+    from core.version import release_version
+
+    return release_version("server")
 
 
 _SERVER_VERSION = _dist_version()
