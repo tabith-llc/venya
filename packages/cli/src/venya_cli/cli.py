@@ -35,7 +35,15 @@ def create_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="venya",
-        description="Venya — A secrets broker system for LLMs",
+        # #247: `venya --help` named VENYA_CONFIG zero times while the served install doc
+        # uses it, so an operator with a mis-pointed path had no place to learn the rule.
+        description=(
+            "Venya — A secrets broker system for LLMs. "
+            "Config: VENYA_CONFIG names the config FILE (default: ~/.config/venya/config.json, "
+            "or the platform config dir beside it). It is never a directory, and when it is set "
+            "the file it names must be readable — a path that yields no config stops there "
+            "instead of dialing the built-in default server URL."
+        ),
     )
     parser.add_argument(
         "-v",
@@ -994,7 +1002,14 @@ def _install_stderr_tee():
         env_cfg = os.environ.get("VENYA_CONFIG")
         log_dir = Path(env_cfg).parent if env_cfg else default_config_dir()
         log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        ensure_secret_dir(log_dir)
+        # #247: this advisory protects the directory venya secrets live in, so it runs
+        # on the directory of a config file that EXISTS. When the operator's
+        # VENYA_CONFIG names a path that was never found, `log_dir` is only an ancestor
+        # derived from that mistyped path — up to and including `/`, which this check
+        # used to tell the operator to chmod 0700 and break the machine. The path itself
+        # is named by the fail-closed line in commands.py; nothing is audited here.
+        if not env_cfg or Path(env_cfg).is_file():
+            ensure_secret_dir(log_dir)
         log_path = log_dir / "venya.log"
         # shortcut: single-generation rotation at 1 MiB; a real retention
         # policy only if logs ever become operationally important.
@@ -1070,7 +1085,12 @@ def _operator_error_line(exc: Exception, args: argparse.Namespace, log_path: obj
     """
     detail = str(exc)
     if detail:
-        return f"Error: {detail}"
+        # #247: a refusal written to be printed carries its own `Error: ` (that is the
+        # one wording `_require_https_server_url` prints, and the raise sites reuse the
+        # same string), so wrapping it a second time here is what printed
+        # `Error: Error: server URL must be https://…`. Text that already opens with the
+        # prefix is handed through as it stands; every other render is byte-identical.
+        return detail if detail.startswith("Error:") else f"Error: {detail}"
     command = _command_path(args) or "the requested command"
     where = f"cause logged to {log_path}" if log_path is not None else "no error log could be written for this run"
     return (

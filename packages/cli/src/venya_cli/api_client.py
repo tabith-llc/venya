@@ -53,6 +53,52 @@ def default_config_dir() -> Path:
 DEFAULT_CONFIG_DIR = default_config_dir()
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 
+# The URL used when nothing configured one. It is a fallback, never an answer: every
+# dial site refuses plaintext, so a run that reaches this value has read no server URL
+# (#247 — it must never print, or dial, in the voice of configuration).
+DEFAULT_SERVER_URL = "http://localhost:8000"
+
+
+def config_source_problem(config_file: Path) -> str | None:
+    """Why a config path that was NAMED read as nothing — or ``None`` when it read fine.
+
+    One wording, every caller reuses it: ``venya config show`` prints it and the
+    pre-ceremony gate in ``commands.run_command`` refuses on it. The named path leads,
+    because every downstream symptom of a mis-pointed ``VENYA_CONFIG`` points somewhere
+    else — a plaintext-https refusal that blames the FIDO2 transport, a mode advisory
+    about ``/`` — and the natural remedy (re-run the ceremony) costs a key touch and a
+    single-use token for an input error (#247). The idiom is the installer's own:
+    ``VENYA_HOSTS_FILE is set to '…', which is not an existing, writable regular file.``
+
+    Reads the path itself, never a caller's state, so no caller shape can turn this into
+    a false verdict.
+    """
+    if not config_file.exists():
+        cause = "does not exist"
+    elif not config_file.is_file():
+        cause = "is not a regular file"
+    else:
+        try:
+            json.loads(config_file.read_text())
+        except json.JSONDecodeError:
+            cause = "is not valid JSON"
+        except OSError as e:
+            cause = f"could not be read ({e.strerror or type(e).__name__})"
+        else:
+            return None
+    line = (
+        f"VENYA_CONFIG is set to '{config_file}', which {cause} — it must name the config "
+        f"FILE (default: {default_config_dir() / 'config.json'})"
+    )
+    # The mistake this row was measured on is pointing the variable at the DIRECTORY,
+    # because every other sentence about this state says "in ~/.config/venya". When a
+    # readable config file sits right inside it, say the path to type.
+    if config_file.is_dir():
+        sibling = config_file / "config.json"
+        if sibling.is_file():
+            line = f"{line} — did you mean '{sibling}'?"
+    return line
+
 
 def execution_timeout() -> float:
     """Read-timeout (seconds) for the long-running command-execute call.
@@ -402,22 +448,34 @@ class Config:
     """
 
     def __init__(self, config_file: Path | None = None) -> None:
+        # True only when the OPERATOR named the path (VENYA_CONFIG); a `config_file`
+        # argument is the program's own choice and is never an input error to report.
+        self.named_by_operator = False
         if config_file is None:
             env = os.environ.get("VENYA_CONFIG")
             if env:
                 config_file = Path(env)
+                self.named_by_operator = True
         self.config_file = config_file or DEFAULT_CONFIG_FILE
+        # None while the named path read; otherwise the one sentence that says why it
+        # did not (#247). `read` records that bytes were actually parsed into _data.
+        self.source_error: str | None = None
+        self.read = False
         self._data: dict[str, Any] = {}
         self._transient_server_url: str | None = None
         self._load()
 
     def _load(self) -> None:
-        """Load config from disk."""
+        """Load config from disk, and record why it yielded nothing."""
         if self.config_file.exists():
             try:
                 self._data = json.loads(self.config_file.read_text())
             except (json.JSONDecodeError, OSError):
                 self._data = {}
+            else:
+                self.read = True
+        if self.named_by_operator and not self.read:
+            self.source_error = config_source_problem(self.config_file)
 
     def save(self) -> None:
         """Save config to disk with owner-only permissions (0o600)."""
@@ -449,7 +507,7 @@ class Config:
     def server_url(self) -> str:
         if self._transient_server_url is not None:
             return self._transient_server_url
-        return self._data.get("server_url", "http://localhost:8000")
+        return self._data.get("server_url", DEFAULT_SERVER_URL)
 
     @server_url.setter
     def server_url(self, value: str) -> None:
