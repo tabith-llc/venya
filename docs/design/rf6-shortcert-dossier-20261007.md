@@ -898,7 +898,11 @@ Required properties of the refusal strings (server side; they reach the operator
 
 1. **Name the fault class, not just the outcome.** "Certificate is not yet valid according to this core's clock"
    and "certificate has expired according to this core's clock" are separate strings from the generic
-   `Admin access requires valid client certificate` (`auth.py:395`, `:405`, `:425`, `:431`, `:454`, `:481`).
+   `Admin access requires valid client certificate`, returned from **six places in one file** —
+   `packages/server/src/server/middleware/auth.py`. The count is the load-bearing fact, not the addresses: re-derive it
+   with `git grep -c "Admin access requires valid client certificate" HEAD -- packages/server/src/server/middleware/auth.py`.
+   No line numbers are cited here on purpose; this sentence carried six of them until 2026-11-07 and every one had
+   drifted to unrelated text, and six new numbers would only be the same drift on a later date.
 2. **Name NTP/clock drift as a plausible cause** in both, per ruling 4a's condition — verbatim intent: a
    not-yet-valid rejection on a cert that was minted seconds ago means *someone's clock* is the problem.
 3. **Name the direction and the delta where the server can compute them**: presented `not_before`/`not_after`,
