@@ -779,7 +779,8 @@ startup checks the session token first, then the CA, so it prints exactly one of
 (the CA file `venya setup` installs beside `config.json` is not being passed).
 There is no way to skip either one: `VENYA_TLS_VERIFY=false` is an alpha debug
 mode that warns and its shipped message says "never use in production".
-`venya-mcp` parses no flags at all — no `--version` — so `pi mcp list` and
+`venya-mcp` answers `--version` and `--help`, but takes no flag that changes how
+it runs — an unknown one exits 2 before the server starts — so `pi mcp list` and
 `/mcp` are how you read why a server did not come up; `/mcp` shows the full
 connection error and the tail of stderr from a failed stdio server. On
 401/expired: the server says what to do in its own words — *"Run the `venya` CLI

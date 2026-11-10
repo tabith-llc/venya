@@ -64,7 +64,7 @@ class TestVersionAndHelpAnswer:
         assert exc.value.code == 0
         out = capsys.readouterr().out
         assert out.strip().split()[0] == _DECLARED, out
-        assert canonical_release("0.1.0b3") in out, "the rendering must be the declared spelling, not a backend's"
+        assert canonical_release(_DECLARED) in out, "the rendering must be the declared spelling, not a backend's"
         assert "(build " in out, f"--version must also name the face: {out!r}"
         assert not loaded, "ServerConfig was constructed — a flag answer still loads the config it cannot read"
 
