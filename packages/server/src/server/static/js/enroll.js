@@ -10,7 +10,9 @@
  * Flow:
  * 1. User enters enrollment token, submits form
  * 2. POST /api/v1/enroll/browser → WebAuthn registration challenge
- * 3. startRegistration() → browser prompts for passkey creation
+ * 3. startRegistration() → the browser offers an authenticator: pick the hardware security
+ *    key and enter its PIN (decline a password-manager offer to save a passkey — accepting it
+ *    enrolls the manager, not the key)
  * 4. POST /api/v1/enroll/browser/complete → store credential, consume token
  * 5. Redirect to / on success
  */

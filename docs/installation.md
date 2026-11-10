@@ -233,7 +233,14 @@ commands then verify TLS against it automatically — no `SSL_CERT_FILE`
 needed. `venya config set-server <url>` remains for the offline case
 (URL only, no cert fetch).
 
-Touch the security key when prompted. A **recovery code is printed once** —
+Touch the security key when prompted. **When your browser or password manager offers to save a
+passkey, decline it** — choose the hardware security key, so its PIN prompt appears. A manager
+that answers first enrolls the manager: the credential is created in its store, your key is left
+with nothing, and the PIN prompt this page tells you to expect never shows. The same instruction
+is printed on the enrollment page itself, because this is a step you cannot take from a manual
+later.
+
+A **recovery code is printed once** —
 store it securely; it is the only way back if the key is lost. Migrations
 already ran at install time; `venya init` never migrates. The first-comer rule this step depends on
 is a disclosed limitation, not a bug: see [beta-known-limitations.md](beta-known-limitations.md),

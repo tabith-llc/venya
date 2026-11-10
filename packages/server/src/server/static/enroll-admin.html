@@ -26,6 +26,9 @@ SPDX-License-Identifier: BUSL-1.1
                 <input type="text" id="username-input" autocomplete="off" spellcheck="false">
             </label>
             <p>Insert FIDO2 security key, and click the Enroll Security Key button.</p>
+            <p>If your browser or password manager offers to save a passkey, <strong>decline it</strong>.
+            Choose the hardware security key and enter its PIN. Accepting the saved passkey enrolls the
+            password manager instead of your security key, and no venya credential is created for the key.</p>
             <button type="submit" id="enroll-btn" class="btn-primary">Enroll Security Key</button>
         </form>
         <div id="message" class="message" hidden></div>
