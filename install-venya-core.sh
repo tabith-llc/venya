@@ -359,6 +359,101 @@ if [ -n "${VENYA_EGRESS_ALLOW:-}" ]; then
     warn "VENYA_EGRESS_ALLOW applies to the executor installer only — ignoring on core."
 fi
 
+# --- CA key passphrase sources, and the key check BEFORE any mutation (finding 244) ----
+# Three places on a core host can hold a CA key passphrase, and one precedence reads all
+# of them: the operator's explicit env value, the live EnvironmentFile, and the file the
+# core uninstaller keeps beside a CA it preserves. The third exists because #749 keeps
+# /var/lib/venya/ca while the same run deletes /etc/venya — a preserved key whose
+# passphrase was deleted in the same act is not a preserved CA. Reinstalling over that
+# state minted a fresh passphrase, printed it above its own "Admin CA already exists -
+# preserved", and stopped at admin-cert signing with the venv built, the config half-
+# written and no unit. The check below moves that refusal in front of the service account,
+# the packages, the venv and the database, so a mismatched passphrase changes nothing.
+CORE_ENV_FILE="/etc/venya/venya-core.env"
+CA_PRESERVED_FILE="/var/lib/venya/ca/ca-key-passphrases.env"
+ROOT_CA_KEY_PATH="/var/lib/venya/ca/ca.key"
+ADMIN_CA_KEY_PATH="/var/lib/venya/ca/admin-ca/admin-ca.key"
+
+venya_ca_passphrase_source() {
+    # Answer the first file that carries line name $1, or nothing (rc 1). sed extraction,
+    # never source: one line is read, nothing else in the file is executed, and base64 '='
+    # padding survives a prefix-only substitution. A symlink is not a secret store (#755).
+    local line_name="$1" file
+    for file in "$CORE_ENV_FILE" "$CA_PRESERVED_FILE"; do
+        if [ -L "$file" ]; then
+            # stderr, deliberately: this function's stdout IS the answer, and a notice mixed
+            # into it becomes a filename to the caller (measured in the first draft of this
+            # cell: sed tried to read "[WARN] /var/lib/venya/... is a symlink ...").
+            warn "$file is a symlink — not reading a CA passphrase through it (#755)." >&2
+            continue
+        fi
+        [ -f "$file" ] || continue
+        if grep -q "^${line_name}=" "$file" 2> /dev/null; then
+            printf '%s\n' "$file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+venya_ca_passphrase_for() {
+    # $1 = a value the caller already holds (an explicit env), $2 = line name. Prints the
+    # first passphrase the precedence answers, empty when none of the three sources has it.
+    local explicit="$1" line_name="$2" source_file
+    if [ -n "$explicit" ]; then
+        printf '%s\n' "$explicit"
+        return 0
+    fi
+    source_file="$(venya_ca_passphrase_source "$line_name" || true)"
+    [ -n "$source_file" ] || return 1
+    sed -n "s/^${line_name}=//p" "$source_file" | head -n1
+}
+
+venya_ca_key_precheck() {
+    # $1 plane, $2 key path, $3 candidate passphrase, $4 knob name, $5 prompt door.
+    # Refuses when the key already exists and the candidate cannot open it. openssl is the
+    # tool this run signs the root CA with further down, and it reads the PKCS#8 encrypted
+    # key the product writes; the passphrase crosses as env to that one command, never as
+    # argv. An empty candidate on a run that CAN prompt is not a refusal: finding 244 hit
+    # the unattended door, and a human who is asked answers with the passphrase they kept.
+    local plane="$1" key_path="$2" candidate="$3" knob="$4" prompt_door="${5:-no}"
+    [ -f "$key_path" ] || return 0
+    if [ -z "$candidate" ]; then
+        if [ "$prompt_door" = "yes" ]; then
+            info "Existing ${plane} CA key at $key_path has no stored passphrase; this run prompts for one below."
+            return 0
+        fi
+        error "A ${plane} CA key exists at $key_path but this run has no passphrase for it."
+        error "Nothing has been changed. Three ways forward:"
+        error "  1. re-run with $knob set to the passphrase you kept,"
+        error "  2. restore $CA_PRESERVED_FILE — the core uninstaller writes it beside a CA it keeps, or"
+        error "  3. re-run the core uninstaller with VENYA_PURGE_CA=yes, then install fresh."
+        exit 1
+    fi
+    if ! VENYA_CA_PROBE_PASSPHRASE="$candidate" openssl pkey -in "$key_path" \
+        -passin env:VENYA_CA_PROBE_PASSPHRASE -noout > /dev/null 2>&1; then
+        error "The ${plane} CA passphrase this run resolved does not open $key_path."
+        error "Nothing has been changed. Retry with the correct passphrase ($knob), restore it"
+        error "from $CA_PRESERVED_FILE, or remove the CA with the core uninstaller's"
+        error "VENYA_PURGE_CA=yes and let a fresh install mint a matched pair."
+        exit 1
+    fi
+    info "Existing ${plane} CA key opens with the passphrase this run resolved."
+}
+
+CA_KEY_PRECHECK="$(venya_ca_passphrase_for "${VENYA_CA_KEY_PASSPHRASE:-}" VENYA_CA_KEY_PASSPHRASE || true)"
+# The prompt door, measured once: the same predicate the two passphrase blocks below use to
+# decide between asking and minting, so this check cannot refuse what that door would answer.
+CA_PROMPT_DOOR="no"
+if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+    CA_PROMPT_DOOR="yes"
+fi
+venya_ca_key_precheck "root" "$ROOT_CA_KEY_PATH" "$CA_KEY_PRECHECK" "VENYA_CA_KEY_PASSPHRASE" "$CA_PROMPT_DOOR"
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    ADMIN_CA_KEY_PRECHECK="$(venya_ca_passphrase_for "${VENYA_ADMIN_CA_PASSPHRASE:-}" VENYA_ADMIN_CA_KEY_PASSPHRASE || true)"
+    venya_ca_key_precheck "admin" "$ADMIN_CA_KEY_PATH" "$ADMIN_CA_KEY_PRECHECK" "VENYA_ADMIN_CA_PASSPHRASE" "$CA_PROMPT_DOOR"
+fi
+
 # --- Create venya service account (no password, nologin, locked) ---
 venya_create_user
 
@@ -548,17 +643,20 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     #
     # Re-run idempotency (ticket installer-rerun-admin-ca-passphrase-mismatch):
     # an existing install PRESERVES the encrypted admin CA key (has_ca guard
-    # below), so a re-run must reuse the passphrase already stored in the
-    # EnvironmentFile — regenerating the credential makes the preserved key
-    # undecryptable and aborts the run at sign_admin_cert. Precedence:
-    # explicit VENYA_ADMIN_CA_PASSPHRASE env (operator override; a WRONG value
-    # still fails loudly downstream — never silently swallowed) > stored >
-    # prompt > random. sed extraction, not source: no other line of the env
-    # file is executed, and base64 '=' padding survives the prefix-only sub.
-    if [ -z "$ADMIN_CA_PASSPHRASE" ] && [ -f /etc/venya/venya-core.env ]; then
-        ADMIN_CA_PASSPHRASE=$(sed -n 's/^VENYA_ADMIN_CA_KEY_PASSPHRASE=//p' /etc/venya/venya-core.env | head -n1)
-        if [ -n "$ADMIN_CA_PASSPHRASE" ]; then
-            info "Existing install: reusing stored admin CA passphrase from /etc/venya/venya-core.env."
+    # below), so a re-run must reuse the passphrase already stored — regenerating the
+    # credential makes the preserved key undecryptable and aborts the run at
+    # sign_admin_cert. Precedence: explicit VENYA_ADMIN_CA_PASSPHRASE env (operator
+    # override; a WRONG value still fails loudly at the pre-mutation key check above,
+    # never silently swallowed) > stored in $CORE_ENV_FILE > stored in the file a
+    # preserved CA keeps beside it (finding 244) > prompt > random. The lookup is the
+    # shared venya_ca_passphrase_source above; sed extraction, not source.
+    if [ -z "$ADMIN_CA_PASSPHRASE" ]; then
+        ADMIN_CA_PP_SOURCE="$(venya_ca_passphrase_source VENYA_ADMIN_CA_KEY_PASSPHRASE || true)"
+        if [ -n "$ADMIN_CA_PP_SOURCE" ]; then
+            ADMIN_CA_PASSPHRASE=$(sed -n 's/^VENYA_ADMIN_CA_KEY_PASSPHRASE=//p' "$ADMIN_CA_PP_SOURCE" | head -n1)
+            if [ -n "$ADMIN_CA_PASSPHRASE" ]; then
+                info "Existing install: reusing stored admin CA passphrase from $ADMIN_CA_PP_SOURCE."
+            fi
         fi
     fi
     if [ -z "$ADMIN_CA_PASSPHRASE" ]; then
@@ -891,12 +989,18 @@ install -d -m 0755 /etc/venya
 # EnvironmentFile (re-run reuse -- the encrypted ca.key is PRESERVED by the
 # CA-gen guard below, so regenerating the passphrase would make it undecryptable)
 # > TTY prompt > strong random. Generated BEFORE the EnvironmentFile write so it
-# can be delivered there and used by the CA-gen + openssl signing below.
+# can be delivered there and used by the CA-gen + openssl signing below. The two
+# stored sources are the live EnvironmentFile and, over a CA a previous uninstall
+# preserved, the passphrase file kept beside it (finding 244) — one precedence, the
+# shared venya_ca_passphrase_source above.
 CA_KEY_PASSPHRASE="${VENYA_CA_KEY_PASSPHRASE:-}"
-if [ -z "$CA_KEY_PASSPHRASE" ] && [ -f /etc/venya/venya-core.env ]; then
-    CA_KEY_PASSPHRASE=$(sed -n 's/^VENYA_CA_KEY_PASSPHRASE=//p' /etc/venya/venya-core.env | head -n1)
-    if [ -n "$CA_KEY_PASSPHRASE" ]; then
-        info "Existing install: reusing stored root CA passphrase from /etc/venya/venya-core.env."
+if [ -z "$CA_KEY_PASSPHRASE" ]; then
+    CA_KEY_PP_SOURCE="$(venya_ca_passphrase_source VENYA_CA_KEY_PASSPHRASE || true)"
+    if [ -n "$CA_KEY_PP_SOURCE" ]; then
+        CA_KEY_PASSPHRASE=$(sed -n 's/^VENYA_CA_KEY_PASSPHRASE=//p' "$CA_KEY_PP_SOURCE" | head -n1)
+        if [ -n "$CA_KEY_PASSPHRASE" ]; then
+            info "Existing install: reusing stored root CA passphrase from $CA_KEY_PP_SOURCE."
+        fi
     fi
 fi
 if [ -z "$CA_KEY_PASSPHRASE" ]; then
@@ -989,6 +1093,18 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
 fi
 chown root:venya /etc/venya/venya-core.env
 chmod 0640 /etc/venya/venya-core.env
+
+# Finding 244, the other half: the copy kept beside a preserved CA exists only to survive
+# the uninstall that deleted /etc/venya. Now that this run has written both passphrases
+# back to $CORE_ENV_FILE, a second plaintext copy would be a second file to audit and a
+# second file to go stale if an operator ever rotates one. The core uninstaller writes it
+# again whenever it keeps a CA, so removing it here loses nothing.
+if [ -L "$CA_PRESERVED_FILE" ]; then
+    warn "$CA_PRESERVED_FILE is a symlink — not touching it (#755)."
+elif [ -f "$CA_PRESERVED_FILE" ]; then
+    rm -f "$CA_PRESERVED_FILE"
+    info "Removed $CA_PRESERVED_FILE — the passphrases now live in $CORE_ENV_FILE (0640 root:venya)."
+fi
 
 # .env holds the DB password + passphrase — always root/venya-only, even without mTLS.
 chmod 600 "$INSTALL_DIR/.env"

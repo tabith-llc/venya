@@ -101,7 +101,7 @@ Key environment variables (all optional):
 | `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-19 (`3c74b80`, first shipped 2026-09-20 on the pre-beta alpha line, tag `v0.1.0alpha12` — that line is withdrawn by owner order 2026-10-18, so the tag names the release that proved it, not one to install from) and a **15-character minimum** refused by the installer before any mutation, the same floor the core enforces at boot; 64 is the length Venya guarantees to support, not an enforced maximum; on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts, and a re-run reusing a stored passphrase under the floor refuses at that gate |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | admin client-cert enforcement |
-| `VENYA_ADMIN_CA_PASSPHRASE` | auto-generated | stored in `/etc/venya/venya-core.env` (0640) |
+| `VENYA_ADMIN_CA_PASSPHRASE` | auto-generated | stored in `/etc/venya/venya-core.env` (0640), and reused from it on a re-run. The two CA-key passphrases (`VENYA_CA_KEY_PASSPHRASE` and this one) travel with the CA when the core uninstaller keeps it: they are copied to `/var/lib/venya/ca/ca-key-passphrases.env` (0600 root) before `/etc/venya` is removed, so a later unattended reinstall can still open the CA it finds there. `VENYA_PURGE_CA=yes` removes both together, and a reinstall that can find no passphrase stops before it changes anything (#749, #244) |
 
 Verify:
 
@@ -809,7 +809,13 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstal
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstall-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
 ```
 
-The core uninstaller also drops the PostgreSQL database and role. The executor
+The core uninstaller also drops the PostgreSQL database and role. It **keeps
+`/var/lib/venya/ca`** — the estate CA and its keys — and copies the two CA-key
+passphrases from `/etc/venya/venya-core.env` to
+`/var/lib/venya/ca/ca-key-passphrases.env` (0600 root) in the same act, because a
+kept key whose passphrase was deleted cannot be installed over; the run prints the
+path it left behind (`#749`, `#244`). Remove the CA and its passphrase deliberately
+with `VENYA_PURGE_CA=yes`. The executor
 uninstaller **keeps `/var/lib/venya`** — the executor CA and its enrollment state —
 and says so in its own output; remove it deliberately with
 `VENYA_PURGE_STATE=yes` (`#757`). Either of them refuses to run against a state

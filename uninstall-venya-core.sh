@@ -17,6 +17,11 @@ set -euo pipefail
 #   - /opt/venya, /etc/venya, /var/log/venya
 #   - /var/lib/venya, except /var/lib/venya/ca (see VENYA_PURGE_CA below)
 #   - /var/backups/venya (pre-upgrade pg_dump snapshots from installer re-runs)
+#
+# When the CA is kept, the two CA-key passphrase lines from
+# /etc/venya/venya-core.env are copied to /var/lib/venya/ca/ca-key-passphrases.env
+# (0600 root) before anything is removed, because an encrypted key whose passphrase
+# was just deleted is not a preserved CA. VENYA_PURGE_CA=yes removes both together.
 #   - /var/www/.well-known/venya-ca.crt
 #   - Venya CA trust-store entries (+ update-ca-certificates)
 #   - PostgreSQL database + role (venya)
@@ -102,6 +107,46 @@ if [ -n "$STATE_TYPE_REFUSED" ]; then
     exit 1
 fi
 
+# --- Finding 244: keep what unlocks the CA this run keeps -------------------------------
+# /etc/venya/venya-core.env holds the two CA-key passphrases and this script removes
+# /etc/venya, while #749 keeps /var/lib/venya/ca. The default run therefore used to leave
+# an encrypted CA key whose passphrase had just been deleted: the published unattended
+# reinstall minted a fresh passphrase beside its own "Admin CA already exists - preserved"
+# and stopped at admin-cert signing, with the venv built and no unit. Both lines are
+# carried into the directory that survives, BEFORE anything is removed, and the run stops
+# before touching state when that cannot be done. VENYA_PURGE_CA=yes takes the CA and the
+# passphrase down together, so the purge arm needs none of this.
+CA_PRESERVED_FILE="/var/lib/venya/ca/ca-key-passphrases.env"
+CORE_ENV_FILE="/etc/venya/venya-core.env"
+CA_PRESERVED_STATE="no"
+CA_PRESERVED_LINES=0
+if [ "$PURGE_CA" != "yes" ] && [ "$CA_PRESENT" = "yes" ]; then
+    if [ -L "$CORE_ENV_FILE" ]; then
+        error "Passphrase source is a symlink: $CORE_ENV_FILE — refusing to read a CA key passphrase through it (#755)."
+        error "Nothing was removed: put the real file back, or re-run with VENYA_PURGE_CA=yes to remove the CA with everything else."
+        exit 1
+    fi
+    if [ -f "$CORE_ENV_FILE" ] && grep -qE '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CORE_ENV_FILE" 2> /dev/null; then
+        if ! ( umask 077
+            grep -E '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CORE_ENV_FILE" > "$CA_PRESERVED_FILE" ); then
+            rm -f "$CA_PRESERVED_FILE" 2> /dev/null || true
+            error "Could not preserve the CA key passphrases at $CA_PRESERVED_FILE."
+            error "Nothing was removed. Either copy $CORE_ENV_FILE aside and re-run, or re-run with"
+            error "VENYA_PURGE_CA=yes to remove the CA as well — a kept CA you cannot open is the state this fixes."
+            exit 1
+        fi
+        chmod 0600 "$CA_PRESERVED_FILE"
+        chown root:root "$CA_PRESERVED_FILE"
+        CA_PRESERVED_LINES="$(grep -cE '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CA_PRESERVED_FILE" 2> /dev/null || true)"
+        CA_PRESERVED_STATE="yes"
+    elif [ -f "$CA_PRESERVED_FILE" ]; then
+        # A second uninstall over a CA an earlier run already preserved: nothing new to carry.
+        CA_PRESERVED_STATE="already"
+    else
+        CA_PRESERVED_STATE="absent"
+    fi
+fi
+
 if [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
     # #399: read on a closed/EOF stdin aborts under set -e with zero output.
     # Gate the non-TTY case loudly first, before any removal — same contract
@@ -119,6 +164,14 @@ if [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
     else
         echo "/var/lib/venya/ca (the estate CA) is kept. Set VENYA_PURGE_CA=yes"
         echo "to remove it."
+        if [ "$CA_PRESERVED_STATE" = "yes" ]; then
+            echo "So are its key passphrases: $CA_PRESERVED_FILE ($CA_PRESERVED_LINES line(s), 0600 root)."
+        elif [ "$CA_PRESERVED_STATE" = "already" ]; then
+            echo "Its key passphrases were preserved by an earlier run: $CA_PRESERVED_FILE."
+        elif [ "$CA_PRESERVED_STATE" = "absent" ]; then
+            echo "No CA key passphrase is on this machine, so none can be kept: a reinstall"
+            echo "over this CA must supply VENYA_CA_KEY_PASSPHRASE and VENYA_ADMIN_CA_PASSPHRASE."
+        fi
     fi
     read -r -p "Proceed? [y/N] " answer
     [[ "$answer" =~ ^[Yy] ]] || { info "Aborted."; exit 0; }
@@ -220,6 +273,18 @@ else
         error "$(basename "$leftover") still present at $leftover — inspect manually."
         VERIFY_FAILED=1
     done < <(find /var/lib/venya -mindepth 1 -maxdepth 1 ! -name ca 2> /dev/null || true)
+    # Finding 244: the CA and the material that opens it are kept as one pair, so the pair
+    # is verified as one pair. A preserved key with no preserved passphrase is the state
+    # this run exists to prevent, and a broad mode is the state #606/#610 prevent.
+    if [ "$CA_PRESERVED_STATE" = "yes" ] || [ "$CA_PRESERVED_STATE" = "already" ]; then
+        if [ ! -f "$CA_PRESERVED_FILE" ]; then
+            error "ca-key-passphrases.env missing at $CA_PRESERVED_FILE — the preserved CA cannot be opened."
+            VERIFY_FAILED=1
+        elif [ "$(stat -c '%a' "$CA_PRESERVED_FILE" 2> /dev/null)" != "600" ]; then
+            error "$CA_PRESERVED_FILE is not mode 0600 — a CA key passphrase is not broadly readable."
+            VERIFY_FAILED=1
+        fi
+    fi
 fi
 if [ "$PG_WAS_ACTIVE" = "1" ]; then
     DB_PRESENT="$(sudo -u postgres psql -tAc "SELECT count(*) FROM pg_database WHERE datname='venya';" 2> /dev/null)" || DB_PRESENT="probe-failed"
@@ -249,6 +314,16 @@ if [ "$PURGE_CA" = "yes" ]; then
     echo "Removed as asked (VENYA_PURGE_CA=yes): /var/lib/venya"
 elif [ "$CA_PRESENT" = "yes" ]; then
     echo "Left in place: /var/lib/venya/ca (the estate CA)."
-    echo "To remove it deliberately, re-run with VENYA_PURGE_CA=yes."
+    if [ "$CA_PRESERVED_STATE" = "yes" ]; then
+        echo "Left in place: $CA_PRESERVED_FILE ($CA_PRESERVED_LINES passphrase line(s), 0600 root) — the"
+        echo "material that opens that CA's keys, kept beside it so an unattended reinstall"
+        echo "can read it. Remove it and the CA becomes unreadable."
+    elif [ "$CA_PRESERVED_STATE" = "already" ]; then
+        echo "Already preserved by an earlier run: $CA_PRESERVED_FILE (0600 root)."
+    elif [ "$CA_PRESERVED_STATE" = "absent" ]; then
+        warn "No CA key passphrase found on this machine ($CORE_ENV_FILE is gone), so none was kept:"
+        warn "the CA stays encrypted and unreadable to a reinstall that does not supply its passphrase."
+    fi
+    echo "To remove the CA and its preserved passphrase deliberately, re-run with VENYA_PURGE_CA=yes."
 fi
 echo "Kept (shared infrastructure): nginx + postgresql packages."

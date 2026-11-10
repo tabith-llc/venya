@@ -19,6 +19,19 @@ An upgrade is **re-running the installer over the existing install** —
 in-place, same host, same paths. Data, stored secrets, and the CA stack are
 preserved.
 
+A **reinstall after a default uninstall** is a different state, and the CA is the
+reason it needs saying: that uninstall removes `/opt/venya`, `/etc/venya`, the
+database and the service account, and keeps `/var/lib/venya/ca`. The core
+installer reads a CA-key passphrase from `/etc/venya/venya-core.env` where it
+finds one, and otherwise from `/var/lib/venya/ca/ca-key-passphrases.env` (0600
+root), which the core uninstaller writes beside a CA it keeps (`#749`, `#244`).
+When neither carries a passphrase and the run is unattended, it stops before the
+service account, the packages, the venv and the database, and prints the three
+ways forward: re-run with `VENYA_CA_KEY_PASSPHRASE` and
+`VENYA_ADMIN_CA_PASSPHRASE`, restore that file, or uninstall once more with
+`VENYA_PURGE_CA=yes` and let a fresh install mint a matched pair. A refusal that
+leaves a half-built core behind is not an outcome this path offers.
+
 One credential is not preserved: every run of the core installer mints a **new**
 machine-plane admin credential at `/etc/venya/admin/` on that core. That pair is
 the core's own and it is not copied to workstations, so nothing on a workstation
@@ -100,7 +113,9 @@ tag-exact tarball, `venya-common.sh`, and the checksum sidecar.
 An upgrade re-run needs **no secrets** — the stored DB password, passphrase,
 and pepper are reused from `/opt/venya/.env` (a fresh install needs
 `VENYA_DB_PASSWORD`/`VENYA_DB_PASSPHRASE`; see
-[installation.md](installation.md) §1). The one exception is the passphrase
+[installation.md](installation.md) §1). A reinstall over a CA a previous
+uninstall preserved is unattended on the same terms: the two CA-key passphrases
+come from the file kept beside that CA (`#244`). The one exception is the passphrase
 floor: a re-run whose STORED `VENYA_DB__PASSPHRASE` is under 15 Unicode code
 points refuses at the installer's pre-mutation gate, because carrying it forward
 would boot on a KEK the core now rejects. That is a deliberate reinstall (or a
