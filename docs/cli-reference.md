@@ -89,6 +89,7 @@ the path named, and no built-in server URL is printed in its place.
   - [`venya exec audit`](#venya-exec-audit)
   - [`venya exec status`](#venya-exec-status)
   - [`venya exec list`](#venya-exec-list)
+  - [`venya exec availability`](#venya-exec-availability)
 - [`venya config`](#venya-config) *(group)*
   - [`venya config show`](#venya-config-show)
   - [`venya config set-server`](#venya-config-set-server)
@@ -1208,6 +1209,7 @@ Subcommands:
 - [`venya exec audit`](#venya-exec-audit) — View executor audit log
 - [`venya exec status`](#venya-exec-status) — Show executor registration status
 - [`venya exec list`](#venya-exec-list) — List registered executors with heartbeat-reported versions (admin)
+- [`venya exec availability`](#venya-exec-availability) — Show which executors are online (session, role: read — no client certificate)
 
 ### `venya exec register`
 
@@ -1384,6 +1386,25 @@ venya exec list [OPTIONS]
 ```bash
 venya exec list  # registered executors with heartbeat-reported versions (NULL renders 'unknown (pre-B daemon)')
 venya exec list --json  # same listing as raw JSON
+```
+
+### `venya exec availability`
+
+Show which executors are online (session, role: read — no client certificate)
+
+```
+venya exec availability [OPTIONS]
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `--json` | no | flag | false (flag) | Output raw JSON |
+
+**Examples**
+
+```bash
+venya exec availability  # which executors are ONLINE right now — precondition: a login session (role: read), no client certificate
+venya exec availability --json  # the raw availability envelope, machine-readable
 ```
 
 ## `venya config`

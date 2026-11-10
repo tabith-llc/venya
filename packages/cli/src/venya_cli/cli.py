@@ -866,6 +866,23 @@ def create_parser() -> argparse.ArgumentParser:
     )
     exec_list_parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
+    # exec availability
+    exec_availability_parser = exec_subparsers.add_parser(
+        "availability",
+        help="Show which executors are online (session, role: read — no client certificate)",
+        description=(
+            "Executor availability from the core's read-role roster view: one row per "
+            "registered executor with its online flag, last heartbeat, status and version. "
+            "Precondition: a login session with role read or above (`venya login`) — no "
+            "admin client certificate is needed or used. `online` is the server's answer "
+            "(a heartbeat inside the last 60 seconds; a stamp ahead of this reading is NOT "
+            "online, #549), displayed here and never recomputed. For the full canonical "
+            "certificates (the serial `admin revoke-executor` takes) use `exec list` "
+            "(admin)."
+        ),
+    )
+    exec_availability_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
     # config
     config_parser = subparsers.add_parser("config", help="Manage CLI configuration")
     config_sub = config_parser.add_subparsers(dest="config_command")
