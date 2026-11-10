@@ -49,6 +49,10 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
   sudo VENYA_SKIP_PROMPT=yes bash -s
 ```
 
+That piped shape is a **re-run** shape for a core: an existing install supplies its stored secrets, and a fresh
+one stops at the installer's own missing-variable line until they arrive from a terminal or a root shell, as at
+the top of this section.
+
 That is the shape Ubuntu 26.04 — the tested target this release names — actually delivers. Its `sudo` is
 `sudo-rs 0.2.13`, the stock rule is `Defaults env_reset`, and `-E` is refused outright:
 `sudo: preserving the entire environment is not supported, '-E' is ignored`. An assignment written *in front of*
@@ -111,25 +115,31 @@ Installs the Venya Executor daemon on a fresh VM. Includes:
 
 **Usage:**
 ```bash
-```bash
-# At a terminal — the enrollment token is asked for with hidden input, so it never reaches
-# a command line or a log. Mint it immediately before the run: tokens are single-use, ~30 minutes.
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh -o /tmp/install-venya-executor.sh
-sudo bash /tmp/install-venya-executor.sh
-```
-
-```bash
-# No terminal: control variables go to sudo itself (see the rule under the core install above);
-# the token goes in a root shell, because a token written after `sudo` sits in that process's
-# command line for the whole install.
+# A fresh executor. The enrollment token has no prompt path in this installer — it is required in the
+# environment before anything is written — so a root shell is the shape that carries it without putting the
+# token in sudo's command line. Mint the token immediately before the run: single-use, ~30 minutes.
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh -o /tmp/install-venya-executor.sh
 sudo -i
 VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
-  bash /tmp/install-venya-executor.sh        # then type the token at the prompt, or assign it here
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN='<token>' bash /tmp/install-venya-executor.sh
+```
+
+`VENYA_SERVER_URL` is required on every run and is not a secret. `VENYA_EXECUTOR_ID` may be left out only when
+there is a terminal to answer the confirmation with: unattended, it defaults to the host's own name and prints
+that it did (`#745`). Typing the token in the root shell leaves it in that shell's history, which is the cost of
+the shape; there is no hidden prompt for a token today.
+
+```bash
+# Re-run of an executor that already holds its client certificate — no token needed, and the installer asks
+# for what it does need with hidden input (the executor key passphrase, and the Docker API key).
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh -o /tmp/install-venya-executor.sh
+sudo VENYA_SERVER_URL=https://<core-host> bash /tmp/install-venya-executor.sh
 ```
 
 ```bash
-# Control variables only, piped — this form is what Ubuntu 26.04 delivers.
+# Control variables only, piped — this is the position Ubuntu 26.04 delivers. It carries no token, so it is
+# the re-run shape for an executor that already holds its client certificate; a fresh one needs the root-shell
+# shape above.
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | \
   sudo VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> bash -s
 ```

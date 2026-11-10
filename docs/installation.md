@@ -489,16 +489,31 @@ each core's.
 Then on the executor VM (root):
 
 ```bash
+# A fresh executor: the enrollment token has no prompt path in this installer — it is required in the
+# environment before anything is written — so a root shell is the shape that carries it without putting the
+# token in sudo's command line. Mint the token immediately before the run: single-use, ~30 minutes.
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh -o /tmp/install-venya-executor.sh
-sudo VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
-  bash /tmp/install-venya-executor.sh
+sudo -i
+VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN='<token>' bash /tmp/install-venya-executor.sh
+```
+
+```bash
+# Re-run of an executor that already holds its client certificate: no token is needed, and at a terminal the
+# installer asks with hidden input for the executor key passphrase and the Docker API key.
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh -o /tmp/install-venya-executor.sh
+sudo VENYA_SERVER_URL=https://<core-host> bash /tmp/install-venya-executor.sh
 # Docker credentials are REQUIRED for sandbox execution — see "Docker account
 # credentials" below (piped installs: VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY,
 # or run the downloaded script interactively for the hidden prompt).
 ```
 
-Mint the enrollment token immediately before the run and let the installer ask for it: it is a secret, so it
-does not go after `sudo`, and tokens are single-use with a roughly thirty-minute TTL.
+`VENYA_SERVER_URL` is required on every run and is not a secret, so it is assigned to `sudo`. A token written
+after `sudo` is an argument of the `sudo` process and stays readable in its command line for the whole install,
+which is why the fresh-install shape above opens a root shell instead (`#756`); the cost there is that the token
+lands in that root shell's history, and there is no hidden prompt for a token today. `VENYA_EXECUTOR_ID` may be
+left out only when a terminal is there to confirm the answer: unattended it defaults to the host's own name and
+says so (`#745`).
 
 **Deferred registration (bootstrap token file).** If install-time registration
 does not run (core unreachable → CA not installed), the installer writes the
