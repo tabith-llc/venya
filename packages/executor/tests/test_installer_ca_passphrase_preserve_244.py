@@ -266,9 +266,42 @@ def test_uninstaller_refuses_before_touching_state_when_the_sink_is_a_symlink(tm
     assert "Nothing was removed" in out.stdout
     assert "VENYA_PURGE_CA=yes" in out.stdout, "the refusal names the remedies, not just the error"
     assert "MUTATED" not in out.stdout, "the run stops before the mutation sentinel"
-    assert "Left in place" not in out.stdout, "no report claims a CA that was not kept as stated"
+    # Nit N-3 (leg 1213): the lifted region ENDS above the script's `Left in place` lines,
+    # so asserting the string's absence in THIS run's stdout could never fail. The claim
+    # is real but its mechanism is the exit: the refusal is ABOVE every report print in
+    # the shipped file, so assert the order in the full script instead.
+    text = _source(UNINSTALLER)
+    assert 0 < text.index("refusing to write a CA key passphrase through it") < text.index("Left in place:")
     assert canary.read_text(encoding="utf-8") == "CANARY-ORIGINAL-CONTENT\n", "the link target keeps its bytes"
     assert sink.is_symlink(), "the refusal names the link, it does not delete or follow it"
+
+
+def test_uninstaller_replaces_a_preexisting_regular_sink_file_on_a_fresh_inode(tmp_path):
+    """Paired negative, D-2 (leg 1213): `>` truncates and REUSES the inode already at the
+    destination, so a regular file the directory's owning account created and still holds
+    open takes both passphrase lines and then passes every end-state check the block
+    makes. The write must land on a fresh inode: house #381 form, mv -T variant."""
+    _env_file(tmp_path, f"VENYA_CA_KEY_PASSPHRASE={GOOD_PP}\nVENYA_ADMIN_CA_KEY_PASSPHRASE={ADMIN_PP}\n")
+    sink = tmp_path / "ca" / "ca-key-passphrases.env"
+    sink.parent.mkdir(parents=True, exist_ok=True)
+    sink.write_text("OLD\n", encoding="utf-8")
+    inode_before = sink.stat().st_ino
+    with sink.open("r+", encoding="utf-8") as held:  # the descriptor opened before the run
+        out = _uninstall_run(tmp_path, purge="no", ca_present="yes")
+        assert out.returncode == 0, out.stdout
+        assert "KEPT=yes LINES=2" in out.stdout
+        held.seek(0)
+        seen = held.read()
+    assert sink.stat().st_ino != inode_before, "the preserved file is created fresh, not written into"
+    assert "PASSPHRASE" not in seen, "a descriptor opened before the run never sees the carried lines"
+    assert seen == "OLD\n", "the pre-existing inode keeps exactly its own bytes"
+    assert sink.read_text(encoding="utf-8") == (
+        f"VENYA_CA_KEY_PASSPHRASE={GOOD_PP}\nVENYA_ADMIN_CA_KEY_PASSPHRASE={ADMIN_PP}\n"
+    ), "the new inode holds the carried pair"
+    assert sorted(p.name for p in (tmp_path / "ca").iterdir()) == [
+        "ca-key-passphrases.env"
+    ], "the fresh temp name is consumed by the rename — no stray file left in the CA dir"
+    assert oct(sink.stat().st_mode & 0o777) == "0o600"
 
 
 def test_uninstaller_pair_verify_refuses_a_symlinked_sink_without_following_it(tmp_path):

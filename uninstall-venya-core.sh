@@ -137,16 +137,34 @@ if [ "$PURGE_CA" != "yes" ] && [ "$CA_PRESENT" = "yes" ]; then
         exit 1
     fi
     if [ -f "$CORE_ENV_FILE" ] && grep -qE '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CORE_ENV_FILE" 2> /dev/null; then
-        if ! ( umask 077
-            grep -E '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CORE_ENV_FILE" > "$CA_PRESERVED_FILE" ); then
-            rm -f "$CA_PRESERVED_FILE" 2> /dev/null || true
+        # D-2 (leg 1213): create, do not write into. `> $CA_PRESERVED_FILE` is
+        # O_CREAT|O_TRUNC on whatever name already sits there — a regular file the
+        # directory's owning account created and still holds open keeps its inode,
+        # takes both passphrase lines, and then passes every end-state check below,
+        # while that reader gets them back. So: write to a fresh unpredictable name,
+        # set mode and owner while the name is ours alone, and land it with mv -T.
+        # rename(2) REPLACES the destination rather than following it, which also
+        # closes the swap window between the -L guard above and this write (probes
+        # D/E at leg 1213). The #381 fresh-inode form in install-venya-core.sh is
+        # this same guarantee; the rm -f there is enough for a root-owned path, and
+        # mv -T is the form for one this account shares a directory with.
+        CA_PRESERVED_TMP="$(mktemp "$CA_PRESERVED_FILE.XXXXXX" 2> /dev/null || true)"
+        if [ -z "$CA_PRESERVED_TMP" ]; then
+            error "Could not create a fresh passphrase file beside $CA_PRESERVED_FILE."
+            error "Nothing was removed. Either copy $CORE_ENV_FILE aside and re-run, or re-run with"
+            error "VENYA_PURGE_CA=yes to remove the CA as well — a kept CA you cannot open is the state this fixes."
+            exit 1
+        fi
+        if ! grep -E '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CORE_ENV_FILE" > "$CA_PRESERVED_TMP" \
+            || ! chmod 0600 "$CA_PRESERVED_TMP" \
+            || ! chown root:root "$CA_PRESERVED_TMP" \
+            || ! mv -T "$CA_PRESERVED_TMP" "$CA_PRESERVED_FILE"; then
+            rm -f "$CA_PRESERVED_TMP" 2> /dev/null || true
             error "Could not preserve the CA key passphrases at $CA_PRESERVED_FILE."
             error "Nothing was removed. Either copy $CORE_ENV_FILE aside and re-run, or re-run with"
             error "VENYA_PURGE_CA=yes to remove the CA as well — a kept CA you cannot open is the state this fixes."
             exit 1
         fi
-        chmod 0600 "$CA_PRESERVED_FILE"
-        chown root:root "$CA_PRESERVED_FILE"
         CA_PRESERVED_LINES="$(grep -cE '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CA_PRESERVED_FILE" 2> /dev/null || true)"
         CA_PRESERVED_STATE="yes"
     elif [ -f "$CA_PRESERVED_FILE" ]; then
