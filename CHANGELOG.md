@@ -36,6 +36,7 @@ Notable changes to Venya will be documented in this file.
 
 ### Fixed
 
+- The enrollment pages now tell you to decline a passkey your password manager offers, so the PIN prompt for your security key appears instead of a credential saved somewhere else
 - Every layer now prints the version its own plate declares: the executor reported `0.1.0b3` where the release record says `0.1.0beta3`, because its build backend normalized the spelling on the way into the installed metadata (#768)
 - A failed API call from the CLI names the HTTP status it received, so an older CLI against a newer core reads `HTTP 405: …` where it read `Method Not Allowed` or `Unknown error` (#729)
 - The memory pin on a key engages: the buffer address reached the kernel as a 32-bit integer, so any buffer above 2 GiB was refused (#739)
