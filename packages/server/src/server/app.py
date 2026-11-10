@@ -712,12 +712,45 @@ def start_metrics_server(metrics_port: str | None = None) -> tuple[Any, Any] | N
     return httpd, thread
 
 
-def main() -> None:
-    """Run the server."""
+def _build_arg_parser():
+    """The server binary's argument surface (ticket version-reporting, leg 1196).
+
+    Before this existed nothing read argv, so `venya-server --version` printed a
+    traceback and `venya-server --help` started the service. Unknown flags exit 2
+    with usage on stderr and never reach the boot path.
+    """
+    import argparse
+
+    from core.version import version_line
+
+    parser = argparse.ArgumentParser(
+        prog="venya-server",
+        description="Venya core server — the secrets broker backend.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=version_line("server"),
+        help="Print the server version and the face it was built from, then exit.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Run the server.
+
+    ``argv`` exists for tests and for an explicit caller; when it is ``None``
+    argparse reads the process argv, which is what the console script does.
+    """
     import logging
     import os
 
     import uvicorn
+
+    # Parsed FIRST, on purpose: a mistyped flag must be refused here, before any
+    # config is read and before the serve path starts. `--version` and `--help`
+    # exit 0 inside parse_args and never reach ServerConfig().
+    _build_arg_parser().parse_args(argv)
 
     config = ServerConfig()
 

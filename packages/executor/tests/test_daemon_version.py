@@ -8,7 +8,8 @@
 carries the single-sourced dist version; the daemon binary answers --version.
 """
 
-from importlib.metadata import version as pkg_version
+import tomllib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx2
@@ -16,7 +17,16 @@ import pytest
 
 from executor.config import ExecutorConfig
 
-EXECUTOR_VERSION = pkg_version("executor")
+#: The truth this file asserts against is the **declaration**, read from the plate —
+#: not ``importlib.metadata.version("executor")``. That was the old comparator, and it
+#: is the thing that was wrong: this layer is built by setuptools (for its Rust
+#: extension), which writes the PEP 440 normalized spelling into metadata, so the
+#: surface and the release record disagreed while both faithfully reported their own
+#: source. Asserting against the plate makes the check independent of both.
+#: (ticket version-reporting, leg 1196)
+EXECUTOR_VERSION = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))[
+    "project"
+]["version"]
 
 
 class TestHeartbeatPayloadVersion:
