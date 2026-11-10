@@ -449,7 +449,8 @@ dies within one poll.
 - Poll of the public list every main-loop iteration (~30 s): matches own
   serial (`revoked_serials`) OR own executor_id (`revoked_identities` —
   distinct TERMINAL warning naming the new-executor_id remedy). Endpoint (no
-  auth): `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list`
+  auth): `curl -sS https://<core-host>/api/v1/executors/certs/revocation-list`
+  (on the core or an executor host — both carry the Venya CA in their system trust store)
 - Heartbeat response `revoked` flag is consumed too (fast stop between polls;
   advisory — the poll stays authoritative).
 - On detection: the daemon logs, sets `revoked`, and performs an ORDERLY stop —
@@ -623,7 +624,7 @@ curl -fsSL <origin>/install-venya-core.sh | sudo VENYA_SKIP_PROMPT=yes CORE_HOST
 # re-minted on that core (it is not copied to any workstation — §0.1).
 
 # --- 4. Verify the core:
-curl -sk https://<core-host>/api/v1/health
+curl -sS https://<core-host>/api/v1/health
 # expect: {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
 
 # --- 5. Every executor: re-install with a fresh token (§3). Runtime re-registration
@@ -648,8 +649,8 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 
 | Check | Command | Expected |
 |---|---|---|
-| Core health | `curl -sk https://<core-host>/api/v1/health` | `{"status":"ok","version":"<server-version>","checks":{"ca":"ok","admin_ca":"ok"}}` |
-| Revocation list reachable | `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list` | JSON list (public endpoint) |
+| Core health | `curl -sS https://<core-host>/api/v1/health` | `{"status":"ok","version":"<server-version>","checks":{"ca":"ok","admin_ca":"ok"}}` |
+| Revocation list reachable | `curl -sS https://<core-host>/api/v1/executors/certs/revocation-list` (on the core or an executor host) | JSON list (public endpoint) |
 | Executor cert expiry | `sudo /opt/venya/.venv/bin/venya exec cert status` (on executor) | remaining days > 3 |
 | Executor registered/ONLINE | `venya admin list` / `venya exec status` | executor ONLINE |
 | CA keypair pairing after restore | §5 openssl diff | `PAIRING OK` |

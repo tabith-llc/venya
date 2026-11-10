@@ -136,7 +136,8 @@ Key environment variables (all optional):
 Verify:
 
 ```bash
-curl -sk https://<core-host>/api/v1/health
+curl -sS https://<core-host>/api/v1/health
+# (no -k needed: the core installer puts the Venya CA in this host's system trust store)
 # {"status":"ok","version":"<server-version>","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
 
@@ -439,7 +440,8 @@ it from the output instead of looking for a file.
 - Or the cert-only API path directly:
 
 ```bash
-sudo -u venya curl -sk -X POST \
+sudo -u venya curl -sS -X POST \
+  --cacert /var/lib/venya/ca/ca.crt \
   --cert /etc/venya/admin/admin.crt --key /etc/venya/admin/admin.key \
   https://<core-host>/api/v1/admin/executors/<executor-id>/enroll
 # → {"enrollment_token": "enrl_exec_...", "expires_in_seconds": 1800, ...}
