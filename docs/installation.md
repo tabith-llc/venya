@@ -797,7 +797,11 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstal
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstall-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
 ```
 
-The core uninstaller also drops the PostgreSQL database and role. Shared
+The core uninstaller also drops the PostgreSQL database and role. The executor
+uninstaller **keeps `/var/lib/venya`** — the executor CA and its enrollment state —
+and says so in its own output; remove it deliberately with
+`VENYA_PURGE_STATE=yes` (`#757`). Either of them refuses to run against a state
+directory that is a symlink, before removing anything (`#755`, `#757`). Shared
 infrastructure (nginx/postgres/sbx packages) is kept; revoking a removed
 executor's certificate is a core-side admin operation. Uninstallers are
 **self-contained** — they embed their own helpers and fetch nothing at runtime,
