@@ -2918,7 +2918,10 @@ def cmd_exec_group(client: APIClient, args: Any) -> int:
     """Dispatch executor lifecycle subcommands."""
     exec_command = getattr(args, "exec_command", None)
     if exec_command is None:
-        print("Error: exec subcommand required (register, cert, heartbeat, audit, status, list)", file=sys.stderr)
+        print(
+            "Error: exec subcommand required (register, cert, heartbeat, audit, status, list, availability)",
+            file=sys.stderr,
+        )
         return 1
 
     if exec_command == "register":
@@ -2933,6 +2936,8 @@ def cmd_exec_group(client: APIClient, args: Any) -> int:
         return executor_status(args)
     elif exec_command == "list":
         return executor_list(client, args)
+    elif exec_command == "availability":
+        return executor_availability(client, args)
     else:
         print(f"Unknown exec command: {exec_command}", file=sys.stderr)
         return 1
@@ -3044,6 +3049,71 @@ def executor_list(client: APIClient, args: Any) -> int:
         return 0
     except Exception as e:
         print(f"List failed: {e}", file=sys.stderr)
+        return 1
+
+
+def executor_availability(client: APIClient, args: Any) -> int:
+    """Render the read-role availability view of the executor roster (beta3, O964).
+
+    Calls `GET /api/v1/executors` — the session-authorized roster the availability route
+    already serves — so a read-role operator with no client certificate can ask the CLI
+    "what is online". `exec list` deliberately STAYS on the admin route: its contract is
+    the canonical serial for `admin revoke-executor` (#682/#481); this verb ADDS a path,
+    it moves nothing. The CLI is a pure display client of the route's `online` boolean:
+    the two-sided heartbeat window (#549 site 2) is single-sourced in the server, and a
+    second implementation here would be free to disagree with the answer that routes work.
+    """
+    try:
+        result = client.get("/api/v1/executors")
+        executors = result.get("executors", [])
+
+        # --json: byte-exact passthrough of the API envelope. BEFORE the empty check:
+        # an empty roster must still emit parseable JSON — same ordering as executor_list
+        # and executor_audit (ticket exec-audit-json-empty-case-unparseable).
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if not executors:
+            print("No executors found.")
+            return 0
+
+        headers = ["EXECUTOR_ID", "HOSTNAME", "ONLINE", "LAST_HEARTBEAT", "STATUS", "VERSION"]
+        rows = []
+        for e in executors:
+            rows.append(
+                [
+                    e.get("id", ""),
+                    e.get("hostname") or "-",
+                    # displayed, never recomputed: the server owns what `online` means
+                    "online" if e.get("online") else "offline",
+                    e.get("last_heartbeat") or "never",
+                    e.get("status") or "-",
+                    e.get("version") or "unknown (pre-B daemon)",
+                ]
+            )
+
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(cell))
+
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*headers))
+        print(fmt.format(*["-" * w for w in widths]))
+        for row in rows:
+            print(fmt.format(*row))
+        return 0
+    except APIClientAuthenticationError as e:
+        # #729 discipline: a 401 surfaces as a NAMED refusal with its remedy, not a
+        # traceback. The remedy for this verb is a session, not a certificate.
+        print(
+            f"Availability failed: {e} — this verb needs a login session (role: read); run `venya login`.",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as e:
+        print(f"Availability failed: {e}", file=sys.stderr)
         return 1
 
 

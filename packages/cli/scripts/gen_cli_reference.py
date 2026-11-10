@@ -368,6 +368,13 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         ),
         (["exec", "list", "--json"], "same listing as raw JSON"),
     ],
+    ("exec", "availability"): [
+        (
+            ["exec", "availability"],
+            "which executors are ONLINE right now — precondition: a login session (role: read), no client certificate",
+        ),
+        (["exec", "availability", "--json"], "the raw availability envelope, machine-readable"),
+    ],
     ("config", "show"): [
         (["config", "show"], "current CLI config (server URL, stored token state)"),
     ],

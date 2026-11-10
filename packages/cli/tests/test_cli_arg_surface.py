@@ -282,7 +282,10 @@ EXPECTED_SUBCOMMAND_COUNTS: dict[tuple[str, ...], int] = {
     # exec 5→6: `exec list` added by feature/version-surfaces (ruling
     # condition 6 — deliberate interlock update, cli-reference regenerated
     # in the same commit).
-    ("exec",): 6,
+    # exec 6→7: `exec availability` added by leg 1220 (beta3 O964 — the session-role
+    # path to the availability view; deliberate interlock update, cli-reference
+    # regenerated in the same commit).
+    ("exec",): 7,
     ("exec", "cert"): 3,
     ("config",): 3,
     ("credential",): 3,
