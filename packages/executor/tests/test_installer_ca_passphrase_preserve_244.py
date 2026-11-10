@@ -45,6 +45,8 @@ PRECHECK_END = (
     'venya_ca_key_precheck "admin" "$ADMIN_CA_KEY_PATH" "$ADMIN_CA_KEY_PRECHECK" '
     '"VENYA_ADMIN_CA_PASSPHRASE" "$CA_PROMPT_DOOR"\nfi\n'
 )
+VERIFY_START = 'if [ "$CA_PRESERVED_STATE" = "yes" ] || [ "$CA_PRESERVED_STATE" = "already" ]; then'
+VERIFY_END = "            VERIFY_FAILED=1\n        fi\n    fi\n"
 
 #: shipped absolute path -> the tmp_path equivalent the harness runs against
 UNINSTALL_PATHS = {
@@ -89,6 +91,11 @@ def uninstall_region() -> str:
 
 def precheck_region() -> str:
     return _region(_source(INSTALLER), PRECHECK_START, PRECHECK_END, "install-venya-core.sh", INSTALL_PATHS)
+
+
+def verify_region() -> str:
+    """The closing pair-verification block, lifted from the shipped script (no paths inside it)."""
+    return _region(_source(UNINSTALLER), VERIFY_START, VERIFY_END, "uninstall-venya-core.sh (verify)", {})
 
 
 def _encrypted_key(path: Path, passphrase: str) -> None:
@@ -243,6 +250,49 @@ def test_uninstaller_refuses_before_touching_state_when_the_source_is_a_symlink(
     assert not (tmp_path / "ca" / "ca-key-passphrases.env").exists()
 
 
+def test_uninstaller_refuses_before_touching_state_when_the_sink_is_a_symlink(tmp_path):
+    """Paired negative, D-1 (leg 1206): the write side of #755. A `>` follows a symlinked
+    destination, so a link planted at the preserved-file name by the service account would
+    take both passphrases outside the CA directory — refuse on lstat before any removal."""
+    _env_file(tmp_path, f"VENYA_CA_KEY_PASSPHRASE={GOOD_PP}\nVENYA_ADMIN_CA_KEY_PASSPHRASE={ADMIN_PP}\n")
+    canary = tmp_path / "outside-the-ca-dir"
+    canary.write_text("CANARY-ORIGINAL-CONTENT\n", encoding="utf-8")
+    sink = tmp_path / "ca" / "ca-key-passphrases.env"
+    sink.parent.mkdir(parents=True, exist_ok=True)
+    sink.symlink_to(canary)
+    out = _uninstall_run(tmp_path, purge="no", ca_present="yes")
+    assert out.returncode == 1, out.stdout
+    assert "refusing to write a CA key passphrase through it" in out.stdout
+    assert "Nothing was removed" in out.stdout
+    assert "VENYA_PURGE_CA=yes" in out.stdout, "the refusal names the remedies, not just the error"
+    assert "MUTATED" not in out.stdout, "the run stops before the mutation sentinel"
+    assert "Left in place" not in out.stdout, "no report claims a CA that was not kept as stated"
+    assert canary.read_text(encoding="utf-8") == "CANARY-ORIGINAL-CONTENT\n", "the link target keeps its bytes"
+    assert sink.is_symlink(), "the refusal names the link, it does not delete or follow it"
+
+
+def test_uninstaller_pair_verify_refuses_a_symlinked_sink_without_following_it(tmp_path):
+    """Reporting half of D-1: [ -f ] and stat -c '%a' both FOLLOW a link, so the pair check
+    must test -L first — a 0600 target outside the CA dir must not certify as the pair."""
+    victim = tmp_path / "victim"
+    victim.write_text("x\n", encoding="utf-8")
+    victim.chmod(0o600)
+    sink = tmp_path / "ca" / "ca-key-passphrases.env"
+    sink.parent.mkdir(parents=True, exist_ok=True)
+    sink.symlink_to(victim)
+    body = f"""
+CA_PRESERVED_FILE="$TEST_CA_DIR/ca-key-passphrases.env"
+CA_PRESERVED_STATE="already"
+VERIFY_FAILED=0
+{verify_region()}
+echo "VERIFY_FAILED=$VERIFY_FAILED"
+"""
+    out = _harness(body, tmp_path, _dirs(tmp_path))
+    assert out.returncode == 0, out.stdout
+    assert "VERIFY_FAILED=1" in out.stdout, "a symlinked sink is refused, not certified through the link"
+    assert "is a symlink" in out.stdout
+
+
 def test_uninstaller_reports_already_preserved_on_a_second_run(tmp_path):
     """No /etc/venya left, the kept file there: the host is still uninstallable, and hears the truth."""
     kept = tmp_path / "ca" / "ca-key-passphrases.env"
@@ -303,7 +353,7 @@ def test_installer_refuses_a_wrong_passphrase_before_any_mutation(tmp_path):
     out = _precheck_run(tmp_path, extra_env={"TEST_VENYA_CA_KEY_PASSPHRASE": WRONG_PP})
     assert out.returncode == 1, out.stdout
     assert "does not open" in out.stdout
-    assert "Nothing has been changed" in out.stdout
+    assert "Nothing else has been changed" in out.stdout
     assert "VENYA_PURGE_CA=yes" in out.stdout
     assert "MUTATED" not in out.stdout, "the refusal lands before the mutation sentinel"
 

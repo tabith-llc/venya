@@ -424,7 +424,7 @@ venya_ca_key_precheck() {
             return 0
         fi
         error "A ${plane} CA key exists at $key_path but this run has no passphrase for it."
-        error "Nothing has been changed. Three ways forward:"
+        error "Nothing else has been changed. Three ways forward:"
         error "  1. re-run with $knob set to the passphrase you kept,"
         error "  2. restore $CA_PRESERVED_FILE — the core uninstaller writes it beside a CA it keeps, or"
         error "  3. re-run the core uninstaller with VENYA_PURGE_CA=yes, then install fresh."
@@ -433,7 +433,7 @@ venya_ca_key_precheck() {
     if ! VENYA_CA_PROBE_PASSPHRASE="$candidate" openssl pkey -in "$key_path" \
         -passin env:VENYA_CA_PROBE_PASSPHRASE -noout > /dev/null 2>&1; then
         error "The ${plane} CA passphrase this run resolved does not open $key_path."
-        error "Nothing has been changed. Retry with the correct passphrase ($knob), restore it"
+        error "Nothing else has been changed. Retry with the correct passphrase ($knob), restore it"
         error "from $CA_PRESERVED_FILE, or remove the CA with the core uninstaller's"
         error "VENYA_PURGE_CA=yes and let a fresh install mint a matched pair."
         exit 1

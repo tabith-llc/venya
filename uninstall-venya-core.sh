@@ -126,6 +126,16 @@ if [ "$PURGE_CA" != "yes" ] && [ "$CA_PRESENT" = "yes" ]; then
         error "Nothing was removed: put the real file back, or re-run with VENYA_PURGE_CA=yes to remove the CA with everything else."
         exit 1
     fi
+    # The destination needs the same test as the source: a shell `>` follows a symlinked
+    # destination (open O_WRONLY|O_CREAT|O_TRUNC on the resolved path), the directory is
+    # service-account-owned with no sticky bit, and this script runs as root — so an
+    # unguarded write here could land both passphrases outside the CA directory, truncate
+    # whatever the link named, and the chmod/chown below would act on that target too.
+    if [ -L "$CA_PRESERVED_FILE" ]; then
+        error "Passphrase destination is a symlink: $CA_PRESERVED_FILE — refusing to write a CA key passphrase through it (#755)."
+        error "Nothing was removed: remove the link, or re-run with VENYA_PURGE_CA=yes to remove the CA with everything else."
+        exit 1
+    fi
     if [ -f "$CORE_ENV_FILE" ] && grep -qE '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CORE_ENV_FILE" 2> /dev/null; then
         if ! ( umask 077
             grep -E '^VENYA_(ADMIN_)?CA_KEY_PASSPHRASE=' "$CORE_ENV_FILE" > "$CA_PRESERVED_FILE" ); then
@@ -277,7 +287,13 @@ else
     # is verified as one pair. A preserved key with no preserved passphrase is the state
     # this run exists to prevent, and a broad mode is the state #606/#610 prevent.
     if [ "$CA_PRESERVED_STATE" = "yes" ] || [ "$CA_PRESERVED_STATE" = "already" ]; then
-        if [ ! -f "$CA_PRESERVED_FILE" ]; then
+        if [ -L "$CA_PRESERVED_FILE" ]; then
+            # The reporting half of the same guard: [ -f ] and stat -c '%a' both FOLLOW a
+            # symlink, so a planted link at this name would certify its target as the
+            # preserved pair. Refuse on lstat before anything follows it.
+            error "$CA_PRESERVED_FILE is a symlink — cannot verify the preserved passphrase through it (#755)."
+            VERIFY_FAILED=1
+        elif [ ! -f "$CA_PRESERVED_FILE" ]; then
             error "ca-key-passphrases.env missing at $CA_PRESERVED_FILE — the preserved CA cannot be opened."
             VERIFY_FAILED=1
         elif [ "$(stat -c '%a' "$CA_PRESERVED_FILE" 2> /dev/null)" != "600" ]; then
