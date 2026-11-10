@@ -648,6 +648,15 @@ def generate() -> str:
     out.append(
         "(server URL, access token) under `~/.config/venya` (Linux), `~/Library/Application Support/venya` (macOS), `%APPDATA%\\venya` (Windows)."
     )
+    # #247: the reference named the config DIRECTORY everywhere and the variable that
+    # points at the FILE nowhere, which is how a mis-pointed path goes unnoticed.
+    out.append(
+        "`VENYA_CONFIG` overrides that location and must name the config **file** — not the directory holding it."
+    )
+    out.append(
+        "When it is set, the file it names is the one read; a path that yields no readable file stops the command with"
+    )
+    out.append("the path named, and no built-in server URL is printed in its place.")
     out.append("")
     out.append("## Contents")
     out.append("")

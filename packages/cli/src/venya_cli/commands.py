@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
 
 from .api_client import (
     DEFAULT_CONFIG_FILE,
+    DEFAULT_SERVER_URL,
     APIClient,
     APIClientAuthenticationError,
     APIClientError,
@@ -233,6 +234,19 @@ def run_command(args: Any) -> int:
     # skipped: the APIClient construction above already ran, so
     # cert-without-key, key-without-cert and a nonexistent cert path keep
     # raising exactly as before.
+    # #247: a path the operator NAMED that read as nothing leaves every later stage
+    # dialing a URL nobody typed, and each of them blames the wrong subsystem — the
+    # refusal calls it a FIDO2 transport problem, the mode advisory calls it the
+    # filesystem root. The most likely operator response (re-run the ceremony) burns a
+    # key touch and a single-use enrollment token on an input error. So the gate sits
+    # where the ceremony is chosen, not at the top of dispatch: the verbs that legitimately
+    # ESTABLISH a config (`init`, `setup`, `login`, `enroll`, `config set-server`, a fresh
+    # role dir) are the same ones for which an absent file is the expected before-state, and
+    # a purely-local admin command reads no server URL at all, so neither is stopped.
+    # The remaining condition is the one that makes this an input error rather than a
+    # preference: the URL about to be dialed is the built-in default, which nobody typed —
+    # an operator who gave `--server-url` or VENYA_SERVER_URL supplied the value themselves
+    # and keeps reaching the dial path (the paired negative this leg must not break).
     admin_local_no_request = command == "admin" and getattr(args, "admin_command", None) in _ADMIN_LOCAL_NO_REQUEST
     admin_mtls_exempt = command == "admin" and getattr(client, "has_admin_mtls", False) and not admin_cert_renew
     if admin_mtls_exempt and not client.config.access_token:
@@ -242,6 +256,11 @@ def run_command(args: Any) -> int:
         and not admin_local_no_request
         and not client.config.access_token
     ):
+        if client.config.server_url == DEFAULT_SERVER_URL and isinstance(client.config.source_error, str):
+            print(f"Error: {client.config.source_error}", file=sys.stderr)
+            print("Nothing was sent and no security key was touched.", file=sys.stderr)
+            client.close()
+            return 1
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
@@ -2447,10 +2466,32 @@ def cmd_config(client: APIClient, args: Any) -> int:
 
 
 def cmd_config_show(client: APIClient) -> int:
-    """Show current configuration."""
+    """Show current configuration.
+
+    #247 / AC1, AC3: the resolved config path is named in every row, and a path the
+    operator NAMED that read as nothing is answered with the path and the cause and with
+    NO server URL line at all — a value the CLI invented must not be printed in the voice
+    of configuration, and rc stays non-zero. When the CLI legitimately continues, the
+    default is marked as a default. Nothing here dials, and no verb that WRITES a config
+    (`init`, `setup`, `config set-server`, a fresh role dir) passes through this refusal,
+    so the repair the error line points at is never blocked by it.
+    """
     config = client.config
+    # isinstance, not truthiness: a command body handed an injected client object must not
+    # have a mock's attribute printed as the operator's config error.
+    problem = config.source_error if isinstance(config.source_error, str) else None
+    if problem:
+        print(f"Error: {problem}", file=sys.stderr)
+        print(f"  Config File: {config.config_file}")
+        return 1
+    if config.server_url != DEFAULT_SERVER_URL:
+        source_note = ""
+    elif config.read:
+        source_note = " (built-in default — the config file sets no server URL)"
+    else:
+        source_note = " (built-in default — no config file read)"
     print("Venya CLI Configuration:")
-    print(f"  Server URL: {config.server_url}")
+    print(f"  Server URL: {config.server_url}{source_note}")
     if config.access_token:
         print("  Access Token: [set] (expires soon — run 'venya run' to refresh)")
     else:
@@ -2465,7 +2506,7 @@ def cmd_config_show(client: APIClient) -> int:
     else:
         print("  CA: [not set]")
     print(f"  Config File: {config.config_file}")
-    return 0
+    return 1 if problem else 0
 
 
 def cmd_config_set_server(client: APIClient, args: Any) -> int:

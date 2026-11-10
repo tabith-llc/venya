@@ -18,6 +18,9 @@ and exits `1`.
 
 **Config:** `venya config show|set-server|clear-token` manage the per-user config file
 (server URL, access token) under `~/.config/venya` (Linux), `~/Library/Application Support/venya` (macOS), `%APPDATA%\venya` (Windows).
+`VENYA_CONFIG` overrides that location and must name the config **file** — not the directory holding it.
+When it is set, the file it names is the one read; a path that yields no readable file stops the command with
+the path named, and no built-in server URL is printed in its place.
 
 ## Contents
 
