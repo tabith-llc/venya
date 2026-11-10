@@ -43,9 +43,7 @@ import httpx2
 # must not be silently unavailable at runtime.
 import tomli_w  # type: ignore[import-not-found]
 from core.utils.cert_serial import canonical_serial, serial_match_key
-from core.version import (
-    canonical_release,  # leg 1196: this layer is built by setuptools, which writes the canonical spelling into its metadata
-)
+from core.version import canonical_release  # leg 1196 render (see core.version)
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -220,9 +218,9 @@ def sweep_stale_tmp_files(
 
 
 def _dist_version() -> str:
-    """Single-sourced version (feature/version-surfaces condition 1): dist metadata
-    (pyproject) is the only truth — never a literal. Missing metadata yields "" (falsy
-    → heartbeat omits the report; server leaves the stored column untouched), never a guess."""
+    """Single-sourced version (condition 1): dist metadata is the only truth, never a literal;
+    missing metadata yields "" (falsy → the heartbeat omits the report, the stored column is
+    untouched). Setuptools-built layer, so the read is rendered to the spelling its plate declares."""
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _pkg_version
 
