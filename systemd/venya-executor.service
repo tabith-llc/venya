@@ -54,9 +54,22 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 PrivateDevices=true
 
-# Seccomp: deny dangerous syscall groups (executor never needs these)
-# Full JSON profile at /etc/venya/systemd/venya-executor.seccomp (reference)
-SystemCallFilter=~@cpu-emulation @debug @module @mount @obsolete @swap @chroot @keyring @clock @ptrace
+# Seccomp: deny the syscall groups the executor never needs.
+# Two entries below are single syscalls rather than groups, and that is deliberate.
+# @chroot and @ptrace are not systemd filter groups on any systemd this fleet ships to,
+# and the loader drops a name it does not know without failing the unit — it prints
+# "Unknown system call group, ignoring: @chroot" and builds the filter without it, so a
+# deny written in a dropped name states a guarantee it does not deliver. chroot sits
+# inside @mount and ptrace inside @debug already (see `systemd-analyze syscall-filter
+# @mount`), so the filter the kernel installs is the same before and after this line; the
+# names are kept so the guarantee outlives any future tidy-up of those two groups.
+# packages/executor/tests/test_unit_seccomp_group_names_246.py passes this file through
+# `systemd-analyze verify` and fails the suite on any name the platform drops.
+# Reference profile: systemd/venya-executor.seccomp in the install tree
+# (/opt/venya/systemd by default), installed 0600 as
+# /etc/systemd/system/venya-executor.seccomp. It documents the intended set; the
+# SystemCallFilter line below is what systemd enforces for this unit.
+SystemCallFilter=~@cpu-emulation @debug @module @mount @obsolete @swap chroot @keyring @clock ptrace
 SystemCallErrorNumber=EPERM
 
 [Install]
