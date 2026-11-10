@@ -360,6 +360,29 @@ def test_the_two_scripts_name_one_preserved_path():
     assert written == read == "/var/lib/venya/ca/ca-key-passphrases.env"
 
 
+def test_carry_block_sets_mode_and_owner_on_the_temp_name_before_it_lands():
+    """ACT 0 (leg 1220): the D-2 guarantee is that chmod/chown act on OUR fresh name while
+    it is still ours, and only then does mv -T publish it onto the destination. The suite
+    was proven to read green against a chain-order mutant, so this line-order check over
+    the shipped bytes is what makes the ordering a claim the repo can falsify."""
+    text = _source(UNINSTALLER)
+    write = text.index('> "$CA_PRESERVED_TMP"')
+    chmod = text.index('chmod 0600 "$CA_PRESERVED_TMP"')
+    chown = text.index('chown root:root "$CA_PRESERVED_TMP"')
+    land = text.index('mv -T "$CA_PRESERVED_TMP" "$CA_PRESERVED_FILE"')
+    assert write < chmod < chown < land, "mode and owner must be set before the rename lands the name"
+
+
+def test_755_state_path_loop_runs_before_the_finding_244_carry_block():
+    """ACT 0 (leg 1220): the linked-CA-directory refusal (:99 loop) is the only thing
+    covering a symlinked /var/lib/venya/ca, and the reachability argument for the carry
+    block rests on it having already exited. Precedence is asserted by line order over
+    the shipped bytes — cheap, and the peer's reachability run is currently the only
+    other proof it holds."""
+    text = _source(UNINSTALLER)
+    assert 0 < text.index("for state_path in") < text.index(UNINSTALL_START)
+
+
 # ------------------------------------------------------------------ the installer side
 
 
