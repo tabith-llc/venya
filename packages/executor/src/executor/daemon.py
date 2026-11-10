@@ -217,17 +217,10 @@ def sweep_stale_tmp_files(
 
 
 def _dist_version() -> str:
-    """Single-sourced version (feature/version-surfaces condition 1): dist
-    metadata (pyproject) is the only truth — never a string literal. Missing
-    metadata yields "" (falsy → heartbeat omits the report; server leaves the
-    stored column untouched), never a guessed value.
-
-    Rendered through the one canonical form (ticket version-reporting, leg 1196).
-    This layer is built by setuptools (for the Rust extension), which writes the
-    PEP 440 normalized spelling into its metadata — so before that render the
-    daemon reported ``0.1.0b3`` while every other layer reported ``0.1.0beta3``
-    from the same declaration.
-    """
+    """Single-sourced version (feature/version-surfaces condition 1), rendered to the
+    spelling the plate declares: this is the one setuptools-built layer (for its Rust
+    extension) and setuptools writes PEP 440 canonical form into metadata, so an
+    unrendered read says ``0.1.0b3`` where ``pyproject.toml`` says ``0.1.0beta3`` (leg 1196)."""
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _pkg_version
 

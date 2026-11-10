@@ -23,10 +23,8 @@ def _dist_version() -> str:
     metadata (pyproject) is the only truth — never a string literal. Missing
     metadata yields the honest signal "unknown", never a guessed value.
 
-    Rendered through the one canonical form (ticket version-reporting, leg 1196)
-    so this field says the same string the plate declares and the same string the
-    other layers print, whichever build backend wrote this layer's metadata.
-    """
+    Rendered through the canonical form so this field says what the plate
+    declares, whichever build backend wrote this layer's metadata (leg 1196)."""
     from core.version import release_version
 
     return release_version("server")
