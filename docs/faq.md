@@ -92,7 +92,8 @@ today is stated once in the [rotation runbook](cert-rotation-runbook.md). Flags:
 ## Deployment
 
 **What platforms are supported?**
-Ubuntu 24.04 LTS is the tested server/executor target. Workstation CLI:
+Ubuntu 26.04 LTS is the tested target for core and executor. Ubuntu 24.04 is no longer a supported
+server/executor platform. Workstation CLI:
 Linux and macOS (install-venya-cli.sh), and Windows 10 1903+/11
 (install-venya-cli.ps1, machine-wide, admin-run for the install only — daily
 use is unelevated; FIDO2 ceremonies go through the Windows platform API and

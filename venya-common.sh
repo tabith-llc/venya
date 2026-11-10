@@ -533,8 +533,8 @@ venya_create_venv() {
     # venya_install_python314 for details).
     #
     # --python 3.14 is explicit: uv's discovery order is not guaranteed to
-    # prefer the managed Python (UV_PYTHON_INSTALL_DIR) over system Python
-    # (3.12 on Ubuntu 24.04). The codebase uses compression.zstd (PEP 784,
+    # prefer the managed Python (UV_PYTHON_INSTALL_DIR) over the distro's system
+    # Python. The codebase uses compression.zstd (PEP 784,
     # Python 3.14+), so a wrong Python version would fail at runtime.
     #
     # UV_NO_PROGRESS + < /dev/null prevent the progress-display hang in
