@@ -23,10 +23,21 @@ Installs the Venya Core server on a fresh VM. Includes:
 
 **Usage:**
 ```bash
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | \
   VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> \
-  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> bash -s
+  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> \
+  sudo -E bash -s
 ```
+
+Installer variables go **before** `sudo`, never after it: a value written after `sudo` is one
+ of its arguments and stays visible in that process's command line for the whole run, while an
+ assignment in front of the command name lands in the environment instead. `sudo -E` carries them
+ through; without `-E`, sudo's environment reset drops these names and the installer aborts with
+ its own missing-variable error (measured). Sudo accepts `-E` where its rule matches the command
+ `ALL` — its manual states the SETENV tag is implied for such a rule — and refuses it with
+ `sorry, you are not allowed to preserve the environment` where the rule names specific commands
+ or carries `NOSETENV`. If it refuses: download the script, run `sudo -i`, and start it from that
+ root shell with the assignments in front of the command; that shape needs no `-E`.
 
 **Environment variables:**
 
@@ -63,9 +74,10 @@ Installs the Venya Executor daemon on a fresh VM. Includes:
 
 **Usage:**
 ```bash
-curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | sudo \
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | \
   VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
-  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
+  sudo -E bash -s
 ```
 
 Docker credentials are REQUIRED for sandbox execution (`VENYA_DOCKER_USERNAME`

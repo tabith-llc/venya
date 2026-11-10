@@ -279,16 +279,36 @@ sudo /opt/venya/.venv/bin/venya exec cert renew --cert-path /etc/venya/executor/
 the passphrase.** `cert renew` reads the incumbent key to authenticate the renewal and
 then writes the new one as an encrypted envelope, so the process must see
 `VENYA_EXECUTOR_KEY_PASSPHRASE` — the same variable the `venya-executor` service reads
-from the installer's root-only `EnvironmentFile`. Two shapes, both supported:
+from the installer's root-only `EnvironmentFile`. The CLI takes it from the process
+environment only: `venya exec cert renew --help` lists `--cert-path`, `--key-path` and
+`--ca-bundle`, and no passphrase option. So the value has to arrive as an environment
+variable, and the shape below keeps it out of the command line — a word typed after
+`sudo` becomes part of that running process's own command line, which other local
+accounts can read for as long as the command runs. Two shapes, both supported:
 
 ```bash
-# reuse what the service already has (sudo strips the environment, so pass it in):
-sudo VENYA_EXECUTOR_KEY_PASSPHRASE="$(sudo sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env)" \
-  /opt/venya/.venv/bin/venya exec cert renew
+# Reuse what the service already has. The assignment sits BEFORE `sudo`, so the shell
+# puts it in sudo's environment rather than in sudo's argument list, and `-E` passes it
+# on to the CLI. Sudo allows `-E` where its rule matches the command ALL (the SETENV tag
+# is implied there) and refuses it — "sorry, you are not allowed to preserve the
+# environment" — where the rule names specific commands or carries NOSETENV. Without `-E`,
+# the environment reset drops the name and the command refuses and writes nothing.
+VENYA_EXECUTOR_KEY_PASSPHRASE="$(sudo sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env)" \
+  sudo -E /opt/venya/.venv/bin/venya exec cert renew
 
-# or run it interactively and answer the hidden prompt (the write-time ceremony)
-sudo -E /opt/venya/.venv/bin/venya exec cert renew
+# Or work in a root shell and skip `-E` entirely: the assignment is then a prefix on the
+# command with nothing in front of it, and the passphrase is read from the keyboard with
+# echo off, so no argument list and no shell history carries it.
+sudo -i
+read -rs -p 'Executor key passphrase: ' VENYA_EXECUTOR_KEY_PASSPHRASE; printf '\n' >&2
+VENYA_EXECUTOR_KEY_PASSPHRASE="$VENYA_EXECUTOR_KEY_PASSPHRASE" \
+  /opt/venya/.venv/bin/venya exec cert renew
 ```
+
+The command also prompts on its own when the variable is unset and the terminal is
+yours, but that prompt covers the key being **written**; the incumbent encrypted key the
+renewal dials with is read from the environment alone, so answering it is not a way to
+renew an encrypted-key host.
 
 Without either, the command refuses and writes NOTHING — no directory, no staged temp,
 no half-renewed key, and no request sent (a renewal that POSTed first would replace the
@@ -342,13 +362,17 @@ venya admin executor-enroll <executor-id> --output-dir /secure/enroll
 #    (token TTL default 1800 s, single-use, stored hashed — server config.py,
 #     `ExecutorEnrollmentConfig.token_ttl_seconds`)
 
-# 2. Transfer /secure/enroll to the executor host, then re-run the executor installer:
-curl -fsSL <origin>/install-venya-executor.sh | sudo \
+# 2. Transfer /secure/enroll to the executor host, then re-run the executor installer.
+#    The assignments sit before `sudo` (an argument of sudo stays readable in its command
+#    line for the whole run); `-E` passes them on where sudo's rule matches the command ALL,
+#    and without it the environment reset drops them and the installer aborts on its own
+#    missing-variable check:
+curl -fsSL <origin>/install-venya-executor.sh | \
   VENYA_SKIP_PROMPT=yes \
   VENYA_SERVER_URL=https://<core-host> \
   VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
-  bash -s
+  sudo -E bash -s
 ```
 
 The installer fetches the current CA from `/.well-known/venya-ca.crt`, updates system
@@ -538,8 +562,9 @@ sessions) is untouched — secret encryption does not depend on the TLS CA.
 # --- 0. Prepare: one enrollment token per executor (§3 step 1). Note the env vars
 #        used at the original install (CORE_HOSTNAME, DB password, passphrases).
 #        The admin CA passphrase is auto-reused from the EnvironmentFile on re-run
-#        (post-fix); read it anyway if you plan to wipe admin-ca/ too:
-sudo cat /etc/venya/venya-core.env        # VENYA_ADMIN_CA_KEY_PASSPHRASE=...
+#        (post-fix); read it anyway if you plan to wipe admin-ca/ too — read that one
+#        key, not the whole file, so the other values in it never reach the screen:
+sudo sed -n 's/^VENYA_ADMIN_CA_KEY_PASSPHRASE=//p' /etc/venya/venya-core.env
 
 # --- 1. Stop the core service (nginx may stay up):
 sudo systemctl stop venya-core
@@ -554,12 +579,12 @@ sudo rm -f /var/lib/venya/ca/ca.key /var/lib/venya/ca/ca.crt
 #        /etc/venya/venya-core.env when the admin CA is preserved — passing
 #        VENYA_ADMIN_CA_PASSPHRASE explicitly still wins (and is REQUIRED if the
 #        env file was lost, or if you also wipe admin-ca/ to rotate the admin CA):
-curl -fsSL <origin>/install-venya-core.sh | sudo \
+curl -fsSL <origin>/install-venya-core.sh | \
   VENYA_SKIP_PROMPT=yes \
   VENYA_DB_PASSWORD=<original> VENYA_DB_PASSPHRASE=<original> \
   CORE_HOSTNAME=<original> \
   VENYA_ADMIN_CA_PASSPHRASE=<value from venya-core.env — optional on pre-fix-free installs, see above> \
-  bash -s
+  sudo -E bash -s
 # New CA generated; server + relay certs re-signed; system trust, well-known copy,
 # and nginx bundle (root + admin) rebuilt; the core's machine-plane admin pair is
 # re-minted on that core (it is not copied to any workstation — §0.1).
