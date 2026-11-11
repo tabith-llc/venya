@@ -10,6 +10,7 @@
 explicit NULL label (condition 3).
 """
 
+import sys
 from importlib.metadata import version as pkg_version
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -38,6 +39,54 @@ class TestVersionFlag:
         parser = create_parser()
         args = parser.parse_args([])
         assert args.command is None
+
+
+class TestVersionSurfaceNamesTheFace:
+    """R-2876: the CLI answer carries the build face too, with the version still first."""
+
+    def test_version_flag_prints_the_release_then_a_face(self, capsys):
+        parser = create_parser()
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["--version"])
+        assert exc.value.code == 0
+        printed = capsys.readouterr().out.strip()
+        assert printed.split()[0] == CLI_VERSION, printed
+        assert "(build " in printed, f"no build face on the CLI surface: {printed!r}"
+
+    def test_a_stated_release_is_printed_verbatim(self, monkeypatch):
+        """``VENYA_BUILD_COMMIT`` is an explicit statement, so it is the first token of
+        the face field — the same priority ``core.version.build_identity`` applies."""
+        from venya_cli.api_client import cli_version_line
+
+        monkeypatch.setenv("VENYA_BUILD_COMMIT", "beef12345 built by the release recipe")
+        assert cli_version_line() == f"{CLI_VERSION} (build beef12345)"
+
+    def test_the_stamp_beside_core_is_read_without_importing_core(self, monkeypatch, tmp_path):
+        """The route a stamped install takes, and the isolation guarantee at once.
+
+        A stand-in package directory holding only ``BUILD_COMMIT`` is found on the
+        path, and ``core`` is NOT loaded to read it: ``venya_cli`` must stay standalone
+        (``test_capability_isolation.py``), so this is a path lookup, not a dependency.
+        """
+        from venya_cli import api_client
+
+        (tmp_path / "core").mkdir()
+        (tmp_path / "core" / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "core" / "BUILD_COMMIT").write_text("beef12345 stamped at the cut\n", encoding="utf-8")
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "core", raising=False)
+        assert api_client.build_face() == "beef12345"
+        assert "core" not in sys.modules, "reading the stamp imported core — the CLI is standalone"
+
+    def test_no_statement_and_no_stamp_names_no_sha(self, monkeypatch):
+        """The paired negative R-2876 is gated on: with neither route present the face
+        is ``unknown``, never a clean-looking number this layer cannot prove."""
+        from venya_cli import api_client
+
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.setattr(api_client, "BUILD_COMMIT_FILENAME", "no-such-stamp-1225")
+        assert api_client.cli_version_line() == f"{CLI_VERSION} (build unknown)"
 
 
 class TestExecListRendering:

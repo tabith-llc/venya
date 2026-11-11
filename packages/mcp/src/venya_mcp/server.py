@@ -13,9 +13,12 @@ Communicates over stdin/stdout using the MCP protocol.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
+import os
 import sys
+from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.session import ServerSession
@@ -445,8 +448,8 @@ UNKNOWN = "unknown"
 
 
 def release_version() -> str:
-    """What ``venya-mcp --version`` answers. ``unknown`` when the installed
-    metadata is missing — never a default that could be read as a release."""
+    """What ``venya-mcp --version`` answers for the release name. ``unknown`` when the
+    installed metadata is missing — never a default that could be read as a release."""
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _pkg_version
 
@@ -454,6 +457,50 @@ def release_version() -> str:
         return _pkg_version(_DIST_NAME)
     except PackageNotFoundError:
         return UNKNOWN
+
+
+#: The two places a release states which build it shipped. The names are the recipe's;
+#: ``core.version`` owns the rule that applies them.
+BUILD_COMMIT_ENV = "VENYA_BUILD_COMMIT"
+BUILD_COMMIT_FILENAME = "BUILD_COMMIT"
+
+
+def build_face() -> str:
+    """Which build this install came from, or ``unknown``.
+
+    This wheel declares no dependency on ``core`` (importing it would pull SQLAlchemy,
+    argon2 and pycryptodome into this wheel's metadata to print one string), so the
+    answer is read from the two places a release puts it — the ``VENYA_BUILD_COMMIT``
+    statement and the ``BUILD_COMMIT`` stamp installed beside ``core``'s modules.
+    ``find_spec`` locates a package, it does not load one, so nothing in ``core`` runs
+    here. With neither present the answer is ``unknown``: the surface admits it cannot
+    tell rather than printing a clean-looking sha it cannot prove. Agreement across the
+    four binaries is pinned by
+    ``packages/core/tests/test_version_rendering_1196.py::test_a_stamped_face_prints_identically_on_every_binary``.
+    """
+    stated = (os.environ.get(BUILD_COMMIT_ENV) or "").strip()
+    if stated:
+        return stated.split()[0]
+    try:
+        spec = importlib.util.find_spec("core")
+        locations = list(spec.submodule_search_locations or []) if spec else []
+    except (ImportError, ValueError, AttributeError):
+        locations = []
+    for location in locations:
+        try:
+            tokens = (Path(location) / BUILD_COMMIT_FILENAME).read_text(encoding="utf-8").split()
+        except OSError:
+            continue
+        if tokens:
+            return tokens[0]
+    return UNKNOWN
+
+
+def version_surface() -> str:
+    """The full ``venya-mcp --version`` answer: the release name, then the face this
+    build came from, with the version still the FIRST token (leg 1196's contract, R-2876).
+    """
+    return f"{release_version()} (build {build_face()})"
 
 
 def _build_arg_parser():
@@ -471,8 +518,8 @@ def _build_arg_parser():
     parser.add_argument(
         "--version",
         action="version",
-        version=release_version(),
-        help="Print the MCP layer's version and exit.",
+        version=version_surface(),
+        help="Print the MCP layer's version and the face it was built from, then exit.",
     )
     return parser
 

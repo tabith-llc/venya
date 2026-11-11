@@ -17,6 +17,7 @@ Token model (per plan section 5.1):
 """
 
 import hashlib
+import importlib.util
 import logging
 import os
 import re
@@ -144,6 +145,50 @@ def cli_version() -> str:
         return _pkg_version("venya-cli")
     except PackageNotFoundError:
         return "unknown"
+
+
+#: The two faces a stamped install can be read from. The names are the release
+#: recipe's, not this layer's; ``core.version`` documents the rule it applies.
+BUILD_COMMIT_ENV = "VENYA_BUILD_COMMIT"
+BUILD_COMMIT_FILENAME = "BUILD_COMMIT"
+
+
+def build_face() -> str:
+    """Which build this install came from, or ``unknown``.
+
+    A workstation CLI is standalone by a shipped rule (no ``core.*`` import, top-level
+    or function-level, ``tests/test_capability_isolation.py``), so the answer is read
+    from the two places a release puts it — the ``VENYA_BUILD_COMMIT`` statement and
+    the ``BUILD_COMMIT`` stamp installed beside ``core``'s modules — and nothing in
+    ``core`` is imported or executed to get it. ``find_spec`` locates a package; it
+    does not load one. Absent both, the answer is ``unknown``, never a sha this layer
+    cannot prove. Agreement across the four binaries is pinned by
+    ``packages/core/tests/test_version_rendering_1196.py::test_a_stamped_face_prints_identically_on_every_binary``.
+    """
+    stated = (os.environ.get(BUILD_COMMIT_ENV) or "").strip()
+    if stated:
+        return stated.split()[0]
+    try:
+        spec = importlib.util.find_spec("core")
+        locations = list(spec.submodule_search_locations or []) if spec else []
+    except (ImportError, ValueError, AttributeError):
+        locations = []
+    for location in locations:
+        try:
+            tokens = (Path(location) / BUILD_COMMIT_FILENAME).read_text(encoding="utf-8").split()
+        except OSError:
+            continue
+        if tokens:
+            return tokens[0]
+    return "unknown"
+
+
+def cli_version_line() -> str:
+    """The full answer ``venya --version`` gives: the release name the plate declares,
+    then the face this build came from. The version stays the FIRST token, so a caller
+    that parses it reads what it always read (leg 1196's contract, R-2876).
+    """
+    return f"{cli_version()} (build {build_face()})"
 
 
 _PRE_CANONICAL = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc"}

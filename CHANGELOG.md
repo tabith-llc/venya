@@ -15,7 +15,8 @@ Notable changes to Venya will be documented in this file.
 
 ### Added
 
-- `venya-server --version` also names the face it was built from — a commit, a value the release stamped, or `unknown` — so two installs can be told apart without opening the tarball (#768)
+- Every binary names the face it was built from, not just the server: `venya --version`, `venya-server --version`, `venya-mcp --version` and `venya-executor --version` all answer with the release name first and then a commit, a value the release stamped, or `unknown` — so two installs can be told apart without opening the tarball, and an unstamped one says so (#768)
+- `venya exec list` and the executor heartbeat report the executor's version exactly as before — a bare version string — so a caller that parses that field reads the same token it always read (#768)
 - `venya store` prints the secret's decimal id on a first store, the number a `/run/secrets/venya/<decimal-id>` redirect needs (#732 #733)
 - The CLI installer prints two answers separately: the shim exists, and whether a fresh login shell resolves `venya`, with the PATH line to add when it does not (#744)
 - `venya-mcp` gets the same login-shell check and a remedy line on the branch that printed nothing before (#744)

@@ -51,13 +51,18 @@ class TestHeartbeatPayloadVersion:
 
 class TestDaemonVersionFlag:
     def test_version_flag_prints_metadata_and_exits_zero(self, capsys):
+        """R-2876: the daemon binary names the face too, version first. The heartbeat
+        payload above stays the bare version — that field is a wire value the server
+        stores and compares, not a printed line."""
         from executor.daemon import main
 
         with patch("sys.argv", ["venya-executor", "--version"]):
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
-        assert EXECUTOR_VERSION in capsys.readouterr().out
+        printed = capsys.readouterr().out.strip()
+        assert printed.split()[0] == EXECUTOR_VERSION, printed
+        assert "(build " in printed, f"no build face on the daemon surface: {printed!r}"
 
 
 class TestDaemonDeadFlagsRemoved:

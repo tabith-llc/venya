@@ -10,7 +10,7 @@ import argparse
 import sys
 from datetime import UTC
 
-from venya_cli.api_client import cli_version as _cli_version
+from venya_cli.api_client import cli_version_line as _cli_version_line
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -54,8 +54,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"{_cli_version()}",
-        help="Print the CLI version and exit",
+        version=_cli_version_line(),
+        help="Print the CLI version and the face it was built from, then exit",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
