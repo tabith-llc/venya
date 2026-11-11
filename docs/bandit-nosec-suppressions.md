@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**78 suppression lines across 27 files.**
+**80 suppression lines across 28 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -74,6 +74,8 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/server/scripts/gen_beta_terms_pins.py` | `return eval(compile(ast.Expression(v), "<manifest-value>", "eval"), vars(mod))  # nosec B307 — own AST nodes` |
 | `packages/server/scripts/gen_beta_terms_pins.py` | `key = eval(compile(ast.Expression(k), "<manifest-key>", "eval"), vars(mod))  # nosec B307 — own AST nodes` |
 | `packages/server/scripts/gen_beta_terms_pins.py` | `key = eval(compile(ast.Expression(k), "<k>", "eval"), vars(mod))  # nosec B307 — own AST nodes` |
+| `packages/server/scripts/gen_install_script_hashes.py` | `import subprocess  # nosec B404 — own git reads, fixed argv` |
+| `packages/server/scripts/gen_install_script_hashes.py` | `out = subprocess.run(  # nosec B603 B607 — fixed argv, git on PATH, own repo` |
 | `packages/server/src/server/audit_lifecycle.py` | `ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit event name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/audit_lifecycle.py` | `ENROLLMENT_TOKEN_REVOKED = "enrollment_token_revoked"  # nosec B105 — audit event name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/audit_lifecycle.py` | `EXECUTOR_ENROLLMENT_TOKEN_CREATED = "executor_enrollment_token_created"  # nosec B105 — audit event name, not a password` | <!-- pragma: allowlist secret -->
