@@ -158,21 +158,24 @@ def build_face() -> str:
 
     A workstation CLI is standalone by a shipped rule (no ``core.*`` import, top-level
     or function-level, ``tests/test_capability_isolation.py``), so the answer is read
-    from the two places a release puts it — the ``VENYA_BUILD_COMMIT`` statement and
-    the ``BUILD_COMMIT`` stamp installed beside ``core``'s modules — and nothing in
-    ``core`` is imported or executed to get it. ``find_spec`` locates a package; it
-    does not load one. Absent both, the answer is ``unknown``, never a sha this layer
-    cannot prove. Agreement across the four binaries is pinned by
+    from the places a release puts it — the ``VENYA_BUILD_COMMIT`` statement, then a
+    ``BUILD_COMMIT`` beside this package's own modules, then one beside ``core``'s —
+    and nothing in ``core`` is imported or executed to get it: ``find_spec`` locates a
+    package, it does not load one. The own-package route is what a workstation install
+    takes, where no ``core`` is present at all. Absent every route, the answer is
+    ``unknown``, never a sha this layer cannot prove. Agreement across the four binaries is pinned by
     ``packages/core/tests/test_version_rendering_1196.py::test_a_stamped_face_prints_identically_on_every_binary``.
     """
     stated = (os.environ.get(BUILD_COMMIT_ENV) or "").strip()
     if stated:
         return stated.split()[0]
+    locations: list[Path] = [Path(__file__).resolve().parent]
     try:
         spec = importlib.util.find_spec("core")
-        locations = list(spec.submodule_search_locations or []) if spec else []
+        if spec:
+            locations.extend(Path(entry) for entry in spec.submodule_search_locations or [])
     except (ImportError, ValueError, AttributeError):
-        locations = []
+        pass
     for location in locations:
         try:
             tokens = (Path(location) / BUILD_COMMIT_FILENAME).read_text(encoding="utf-8").split()
