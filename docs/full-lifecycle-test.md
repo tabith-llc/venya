@@ -371,7 +371,7 @@ VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://$BUILD_HOST_IP:8080/venya-core-instal
   VENYA_DB_PASSWORD="$(cat /home/bot/.venya-db-password)" \
   bash /tmp/install-venya-core.sh
 sudo systemctl start venya-core
-curl -sk https://$CORE_HOST/api/v1/health
+curl -sS https://$CORE_HOST/api/v1/health
 # Expected: {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
 
@@ -549,8 +549,10 @@ $ADMIN_WS/
 ### C.0 Pre-flight (no keys attached)
 
 ```bash
-curl -sk https://$CORE_HOST/api/v1/health                        # ok JSON
-curl -sk https://$CORE_HOST/.well-known/venya-ca.crt -o /tmp/venya-ca.crt
+curl -sSk https://$CORE_HOST/.well-known/venya-ca.crt -o /tmp/venya-ca.crt
+# Bootstrap fetch only: this request cannot verify against the very anchor it is
+# fetching (trust-on-first-use) — the fingerprint cross-check below bounds it.
+curl -sS --cacert /tmp/venya-ca.crt https://$CORE_HOST/api/v1/health          # ok JSON
 VENYA_CONFIG=$ADMIN_WS/config.json $ADMIN_WS/.venv/bin/venya config set-server https://$CORE_HOST
 # full matrix: repeat set-server for $USER_WS
 ```

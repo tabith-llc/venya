@@ -201,13 +201,9 @@ class TestInfrastructure:
         """Phase 2: Verify core health."""
         # Retry loop — Nginx may return 502 before backend is ready
         for attempt in range(6):
-            result = subprocess.run(
-                ["curl", "-sk", "https://venya-core-1/api/v1/health"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
+            # Verified check, run ON the core: the core installer puts the Venya CA
+            # into this guest's system trust store, so no -k and no explicit anchor.
+            result = _ssh(CORE, "curl -sS https://venya-core-1/api/v1/health")
             if result.returncode == 0 and ('"status":"ok"' in result.stdout or '"status": "ok"' in result.stdout):
                 break
             time.sleep(5)
@@ -243,28 +239,25 @@ class TestInfrastructure:
         """Phase 2: Positive admin mTLS test."""
         result = _ssh(
             CORE,
-            "sudo curl -sk --cacert /var/lib/venya/admin-ca/admin-ca.crt "
+            "sudo curl -sS --cacert /var/lib/venya/ca/ca.crt "
             "--cert /etc/venya/admin/admin.crt "
             "--key /etc/venya/admin/admin.key "
-            "https://localhost/api/v1/admin/users",
+            "https://venya-core-1/api/v1/admin/users",
         )
         assert result.returncode == 0
         assert "200" in result.stdout or '"users"' in result.stdout
 
     def test_phase2_admin_mtls_negative(self):
-        """Phase 2: Negative admin mTLS test (no cert)."""
-        result = subprocess.run(
-            [
-                "curl",
-                "-sk",
-                "--cacert",
-                "/var/lib/venya/admin-ca/admin-ca.crt",
-                "https://venya-core-1/api/v1/admin/users",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
+        """Phase 2: Negative admin mTLS test (no cert).
+
+        Runs on the core: the anchor lives only under /var/lib/venya (0700
+        venya — read via sudo there), and the workstation running this harness
+        has no copy of it. Verified against the CA that actually signed the
+        server cert (the root CA, not the admin CA).
+        """
+        result = _ssh(
+            CORE,
+            "sudo curl -sS --cacert /var/lib/venya/ca/ca.crt " "https://venya-core-1/api/v1/admin/users",
         )
         assert result.returncode == 0
         # Should be rejected (403 or similar)

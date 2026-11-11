@@ -355,7 +355,7 @@ pkill -f 'python3 -m http.server 8080'
 
 ```bash
 sudo systemctl start venya-core
-curl -sk https://<core-hostname>/api/v1/health
+curl -sS https://<core-hostname>/api/v1/health
 # Expected: {"status":"ok","version":"<server-version>","checks":{...}}
 # (bare /health serves the identical payload as an alias)
 ```

@@ -143,7 +143,7 @@ and a `PROOF-OF-FRESH-BYTES` line further down. Both are recorded in
 post-#587 build at the time of writing. Verify afterwards:
 
 ```bash
-curl -sk https://<core-host>/api/v1/health
+curl -sS https://<core-host>/api/v1/health
 # {"status":"ok","version":"0.1.0alpha16","checks":{"ca":"ok","admin_ca":"ok"}}
 
 sudo -u postgres psql -d venya -t -c "SELECT version_num FROM alembic_version;"
