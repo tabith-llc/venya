@@ -17,6 +17,7 @@ Token model (per plan section 5.1):
 """
 
 import hashlib
+import importlib.util
 import logging
 import os
 import re
@@ -144,6 +145,58 @@ def cli_version() -> str:
         return _pkg_version("venya-cli")
     except PackageNotFoundError:
         return "unknown"
+
+
+#: The two faces a stamped install can be read from. The names are the release
+#: recipe's, not this layer's; ``core.version`` documents the rule it applies.
+BUILD_COMMIT_ENV = "VENYA_BUILD_COMMIT"
+BUILD_COMMIT_FILENAME = "BUILD_COMMIT"
+
+
+def build_face() -> str:
+    """Which build this install came from, or ``unknown``.
+
+    A workstation CLI is standalone by a shipped rule (no ``core.*`` import, top-level
+    or function-level, ``tests/test_capability_isolation.py``), so the answer is read
+    from the places a release puts it — the ``VENYA_BUILD_COMMIT`` statement, then a
+    ``BUILD_COMMIT`` beside this package's own modules, then one beside ``core``'s —
+    and nothing in ``core`` is imported or executed to get it: ``find_spec`` locates a
+    package, it does not load one. The own-package route is what a workstation install
+    takes, where no ``core`` is present at all. Absent every route, the answer is
+    ``unknown``, never a sha this layer cannot prove. Agreement across the four binaries is pinned by
+    ``packages/core/tests/test_version_rendering_1196.py::test_a_stamped_face_prints_identically_on_every_binary``.
+    """
+    stated = (os.environ.get(BUILD_COMMIT_ENV) or "").strip()
+    if stated:
+        return stated.split()[0]
+    locations: list[Path] = [Path(__file__).resolve().parent]
+    try:
+        spec = importlib.util.find_spec("core")
+        if spec:
+            locations.extend(Path(entry) for entry in spec.submodule_search_locations or [])
+    except (ImportError, ValueError, AttributeError):
+        pass
+    for location in locations:
+        try:
+            tokens = (Path(location) / BUILD_COMMIT_FILENAME).read_text(encoding="utf-8").split()
+        except (OSError, UnicodeDecodeError):
+            # A stamp that cannot be read, or cannot be decoded, is not an answer and is
+            # not a reason to stop the tool: `UnicodeDecodeError` is a `ValueError`, so
+            # `OSError` alone would let it climb out of `--version` — and this layer
+            # builds its parser for every command, so it would brick the CLI with it
+            # (ticket #768, leg 1237's B1). Try the next route, then answer `unknown`.
+            continue
+        if tokens:
+            return tokens[0]
+    return "unknown"
+
+
+def cli_version_line() -> str:
+    """The full answer ``venya --version`` gives: the release name the plate declares,
+    then the face this build came from. The version stays the FIRST token, so a caller
+    that parses it reads what it always read (leg 1196's contract, R-2876).
+    """
+    return f"{cli_version()} (build {build_face()})"
 
 
 _PRE_CANONICAL = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc"}

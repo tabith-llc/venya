@@ -261,7 +261,7 @@ assumption is not:
   executor restricted to your core host(s).
 - **Retire everything derived from the CA** by rotating the certificate authority —
   [cert-rotation-runbook.md](cert-rotation-runbook.md), whose custody path
-  (`venya admin split-ca-key`, `packages/cli/src/venya_cli/cli.py:424`) is the break-glass
+  (`venya admin split-ca-key`, `packages/cli/src/venya_cli/cli.py:440`) is the break-glass
   half. This is the heavy, fleet-wide answer, not the routine one.
 
 **A revoked core relay-client credential is refused at this door, and do not read short-lived

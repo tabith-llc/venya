@@ -13,9 +13,12 @@ Communicates over stdin/stdout using the MCP protocol.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
+import os
 import sys
+from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.session import ServerSession
@@ -445,8 +448,8 @@ UNKNOWN = "unknown"
 
 
 def release_version() -> str:
-    """What ``venya-mcp --version`` answers. ``unknown`` when the installed
-    metadata is missing — never a default that could be read as a release."""
+    """What ``venya-mcp --version`` answers for the release name. ``unknown`` when the
+    installed metadata is missing — never a default that could be read as a release."""
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _pkg_version
 
@@ -454,6 +457,57 @@ def release_version() -> str:
         return _pkg_version(_DIST_NAME)
     except PackageNotFoundError:
         return UNKNOWN
+
+
+#: The two places a release states which build it shipped. The names are the recipe's;
+#: ``core.version`` owns the rule that applies them.
+BUILD_COMMIT_ENV = "VENYA_BUILD_COMMIT"
+BUILD_COMMIT_FILENAME = "BUILD_COMMIT"
+
+
+def build_face() -> str:
+    """Which build this install came from, or ``unknown``.
+
+    This wheel declares no dependency on ``core`` (importing it would pull SQLAlchemy,
+    argon2 and pycryptodome into this wheel's metadata to print one string), so the
+    answer is read from the places a release puts it — the ``VENYA_BUILD_COMMIT``
+    statement, then a ``BUILD_COMMIT`` beside this package's own modules, then one
+    beside ``core``'s. ``find_spec`` locates a package, it does not load one, so
+    nothing in ``core`` runs here. With no route present the answer is ``unknown``:
+    the surface admits it cannot tell rather than printing a clean-looking sha it
+    cannot prove. Agreement across the
+    four binaries is pinned by
+    ``packages/core/tests/test_version_rendering_1196.py::test_a_stamped_face_prints_identically_on_every_binary``.
+    """
+    stated = (os.environ.get(BUILD_COMMIT_ENV) or "").strip()
+    if stated:
+        return stated.split()[0]
+    locations: list[Path] = [Path(__file__).resolve().parent]
+    try:
+        spec = importlib.util.find_spec("core")
+        if spec:
+            locations.extend(Path(entry) for entry in spec.submodule_search_locations or [])
+    except (ImportError, ValueError, AttributeError):
+        pass
+    for location in locations:
+        try:
+            tokens = (Path(location) / BUILD_COMMIT_FILENAME).read_text(encoding="utf-8").split()
+        except (OSError, UnicodeDecodeError):
+            # A stamp that cannot be read, or cannot be decoded, is not an answer and is
+            # not a reason to stop this server: `UnicodeDecodeError` is a `ValueError`, so
+            # `except OSError` alone would let it climb out of the binary (ticket #768,
+            # leg 1237's B1). Try the next route, then answer `unknown`.
+            continue
+        if tokens:
+            return tokens[0]
+    return UNKNOWN
+
+
+def version_surface() -> str:
+    """The full ``venya-mcp --version`` answer: the release name, then the face this
+    build came from, with the version still the FIRST token (leg 1196's contract, R-2876).
+    """
+    return f"{release_version()} (build {build_face()})"
 
 
 def _build_arg_parser():
@@ -468,11 +522,24 @@ def _build_arg_parser():
         prog="venya-mcp",
         description="Venya MCP server — lets an LLM drive Venya over MCP tools.",
     )
+
+    class _VersionAction(argparse._VersionAction):
+        """Answer ``--version`` when it is used, not while this parser is built.
+
+        ``run`` builds the parser before the config load, so a version string produced at
+        construction would let one unreadable stamp stop the MCP server and its ``--help``
+        too (ticket #768, leg 1237's B1). Printed plain: the help formatter wraps a long
+        face at terminal width, and a wrapped face breaks the first-token rule.
+        """
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            parser._print_message(f"{version_surface()}\n", sys.stdout)
+            parser.exit()
+
     parser.add_argument(
         "--version",
-        action="version",
-        version=release_version(),
-        help="Print the MCP layer's version and exit.",
+        action=_VersionAction,
+        help="Print the MCP layer's version and the face it was built from, then exit.",
     )
     return parser
 

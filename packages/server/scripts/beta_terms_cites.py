@@ -183,7 +183,7 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
         "pin",
     ),
     f"{A}:203-206": (A, "dropped expired certs at the outer TLS layer", 1, "exempt"),
-    "packages/cli/src/venya_cli/cli.py:424": (L, '"split-ca-key"', 1, "pin"),
+    "packages/cli/src/venya_cli/cli.py:440": (L, '"split-ca-key"', 1, "pin"),
     "packages/executor/src/executor/config.py:422": (CFG, "relay_client_ids: list[str] = Field(", 1, "pin"),
     # ---- the two live NoEncryption() writers and the four comments
     "packages/cli/src/venya_cli/commands.py:2249": (CM, "NoEncryption(): an admin private key in the clear", 1, "pin"),

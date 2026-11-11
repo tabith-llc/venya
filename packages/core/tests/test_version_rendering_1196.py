@@ -111,6 +111,27 @@ class TestBinariesAnswerIdentically:
         "venya": "venya-cli",
     }
 
+    def test_a_stamped_face_prints_identically_on_every_binary(self):
+        """R-2876, the whole set in one run: when the release states a face, every
+        binary answers the same two facts — the declared release, then that face —
+        and no layer restates the rule to do it.
+
+        The statement is passed to each subprocess rather than set in this process,
+        so what is compared is four printed lines, not four calls to one function.
+        """
+        import os
+
+        env = {**os.environ, "VENYA_BUILD_COMMIT": "cafe1234"}
+        for binary, dist in sorted(self._BINARIES.items()):
+            script = Path(sys.executable).parent / binary
+            out = subprocess.run(
+                [str(script), "--version"], capture_output=True, text=True, timeout=60, check=False, env=env
+            )
+            assert out.returncode == 0, f"{binary} --version exited {out.returncode}: {out.stderr}"
+            assert (
+                out.stdout.strip() == f"{_declared(_PLATES[dist])} (build cafe1234)"
+            ), f"{binary} printed {out.stdout.strip()!r}"
+
     @pytest.mark.parametrize("binary,dist", sorted(_BINARIES.items()))
     def test_version_flag_prints_the_declaration_and_exits_zero(self, binary, dist):
         script = Path(sys.executable).parent / binary
@@ -123,20 +144,24 @@ class TestBinariesAnswerIdentically:
         assert printed == _declared(_PLATES[dist]), f"{binary} printed {out.stdout.strip()!r}"
         assert "Traceback" not in out.stdout
 
-    def test_the_server_answer_also_names_a_face(self):
-        """Item 3: a commit or build identifier is reachable from a running install.
+    @pytest.mark.parametrize("binary,dist", sorted(_BINARIES.items()))
+    def test_every_binary_answer_also_names_a_face(self, binary, dist):
+        """Item 3, now for the whole set (R-2876): a commit or build identifier is
+        reachable from a running install, on every binary and not just the server.
 
         The line is version-then-face, and the face is whatever ``build_identity``
         can prove. This venue is a git checkout, so it must be a sha prefix — and if
         the tree is dirty it must say so rather than look clean.
         """
-        script = Path(sys.executable).parent / "venya-server"
+        script = Path(sys.executable).parent / binary
+        assert script.is_file(), f"{binary} is not installed in this venue — {script}"
         out = subprocess.run([str(script), "--version"], capture_output=True, text=True, timeout=60, check=False)
+        assert out.returncode == 0, f"{binary} --version exited {out.returncode}: {out.stderr}"
         line = out.stdout.strip()
-        assert "(build " in line, line
+        assert "(build " in line, f"{binary} printed no face: {line!r}"
         face = line.split("(build ", 1)[1].rstrip(")")
-        declared = _declared(_PLATES["root"])
-        assert line.startswith(f"{declared} (build ")
+        declared = _declared(_PLATES[dist])
+        assert line.startswith(f"{declared} (build "), f"{binary} printed {line!r}"
         token = face.removesuffix("+dirty")
         assert token == UNKNOWN or (
             len(token) >= 7 and all(c in "0123456789abcdef" for c in token)
@@ -185,3 +210,33 @@ class TestBuildIdentityIsHonest:
             lambda: tmp_path / core_version.BUILD_COMMIT_FILENAME,
         )
         assert core_version.build_identity() == "cafe123"
+
+    def test_a_malformed_stamp_is_refused_not_propagated(self, monkeypatch, tmp_path):
+        """B1 (leg 1237): a stamp that is not UTF-8 must not climb out of ``--version``.
+
+        ``UnicodeDecodeError`` is a ``ValueError``, so the pre-existing ``except OSError``
+        did not catch it — and the reader sits in a path every command takes. Here the
+        stamp is unreadable AND the repository route is taken away, so the only honest
+        answer left is ``unknown``. The cell fails if the exception escapes.
+        """
+        import core.version as core_version
+
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.setattr(core_version, "_git", lambda cwd, *args: None)
+        (tmp_path / "BUILD_COMMIT").write_bytes(b"\xff\xfe not utf-8 at all")
+        monkeypatch.setattr(core_version, "_stamp_path", lambda: tmp_path / core_version.BUILD_COMMIT_FILENAME)
+        assert core_version.build_identity() == UNKNOWN
+
+    def test_the_surface_says_unknown_when_no_route_exists(self, monkeypatch):
+        """The paired negative for R-2876, at the printed line rather than the helper.
+
+        With no variable, no stamp and no repository, ``venya-server --version`` must
+        print the honest signal — a surface that always looks like a release is worse
+        than one that admits it cannot tell.
+        """
+        import core.version as core_version
+
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.setattr(core_version, "_git", lambda cwd, *args: None)
+        monkeypatch.setattr(core_version, "BUILD_COMMIT_FILENAME", "no-such-stamp-1225")
+        assert core_version.version_line("core").endswith(f"(build {UNKNOWN})")

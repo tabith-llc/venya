@@ -721,7 +721,7 @@ def _build_arg_parser():
     """
     import argparse
 
-    from core.version import version_line
+    from core.version import VersionAction, version_line
 
     parser = argparse.ArgumentParser(
         prog="venya-server",
@@ -729,8 +729,8 @@ def _build_arg_parser():
     )
     parser.add_argument(
         "--version",
-        action="version",
-        version=version_line("server"),
+        action=VersionAction,
+        source=lambda: version_line("server"),
         help="Print the server version and the face it was built from, then exit.",
     )
     return parser

@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 from core.version import canonical_release
-from venya_mcp.server import release_version, run
+from venya_mcp.server import release_version, run, version_surface
 
 _ROOT = Path(__file__).resolve().parents[3]
 _DECLARED = tomllib.loads((_ROOT / "packages/mcp/pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
@@ -47,10 +47,14 @@ def _config_was_read(monkeypatch) -> list:
 
 class TestMcpArgSurface:
     def test_version_prints_the_declared_release_and_exits_zero(self, capsys):
+        """Leg 1196's contract, widened by R-2876: the release name stays the FIRST
+        token, and the face the build came from rides beside it."""
         with pytest.raises(SystemExit) as exc:
             run(["--version"])
         assert exc.value.code == 0
-        assert capsys.readouterr().out.strip() == _DECLARED
+        printed = capsys.readouterr().out.strip()
+        assert printed.split()[0] == _DECLARED, printed
+        assert "(build " in printed, f"no build face on the MCP surface: {printed!r}"
 
     def test_help_answers_without_starting_the_stdio_server(self, monkeypatch, capsys):
         started = _config_was_read(monkeypatch)
@@ -106,6 +110,73 @@ class TestTheAnswerIsCanonical:
             f"venya-mcp answers {answer!r}, which core.version would render as "
             f"{canonical_release(answer)!r} — this layer is now disagreeing with the plates"
         )
+
+
+class TestTheFaceIsHonest:
+    """The face is read from the two places a release states it, never restated here,
+    and never invented (R-2876). These are the paired negatives the leg is gated on."""
+
+    def test_a_stated_release_is_printed_verbatim(self, monkeypatch):
+        monkeypatch.setenv("VENYA_BUILD_COMMIT", "beef12345 built by the release recipe")
+        assert version_surface() == f"{_DECLARED} (build beef12345)"
+
+    def test_the_stamp_beside_core_is_read_without_importing_core(self, monkeypatch, tmp_path):
+        """A stand-in package dir holding only ``BUILD_COMMIT`` is found on the path and
+        read; ``core`` is not loaded to do it — this wheel declares no dependency on it."""
+        import venya_mcp.server as mcp_server
+
+        (tmp_path / "core").mkdir()
+        (tmp_path / "core" / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "core" / "BUILD_COMMIT").write_text("beef12345 stamped at the cut\n", encoding="utf-8")
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "core", raising=False)
+        assert mcp_server.build_face() == "beef12345"
+        assert "core" not in sys.modules, "reading the stamp imported core"
+
+    def test_a_malformed_stamp_is_refused_not_propagated(self, monkeypatch, tmp_path):
+        """B1 (leg 1237): ``UnicodeDecodeError`` is a ``ValueError``, so an
+        ``except OSError`` alone lets a non-UTF-8 stamp climb out of the binary."""
+        import venya_mcp.server as mcp_server
+
+        (tmp_path / "core").mkdir()
+        (tmp_path / "core" / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "core" / "BUILD_COMMIT").write_bytes(b"\xff\xfe not utf-8 at all")
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "core", raising=False)
+        assert mcp_server.build_face() == "unknown"
+
+    def test_the_answer_is_not_read_until_the_flag_is_used(self, monkeypatch, capsys):
+        """``run`` builds this parser before the config load, so a version string built
+        at construction would let one bad file stop the MCP server and its ``--help``."""
+        import venya_mcp.server as mcp_server
+
+        def boom() -> str:
+            raise AssertionError("the version surface was read while building the parser")
+
+        monkeypatch.setattr(mcp_server, "version_surface", boom)
+        with pytest.raises(SystemExit) as exc:
+            mcp_server.run(["--help"])
+        assert exc.value.code == 0
+        assert "usage: venya-mcp" in capsys.readouterr().out
+
+    def test_no_statement_and_no_stamp_names_no_sha(self, monkeypatch):
+        """A surface that always looks like a release is worse than one that admits it
+        cannot tell: with neither route present the answer is ``unknown``."""
+        import venya_mcp.server as mcp_server
+
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.setattr(mcp_server, "BUILD_COMMIT_FILENAME", "no-such-stamp-1225")
+        assert mcp_server.version_surface() == f"{_DECLARED} (build unknown)"
+
+    def test_the_printed_line_keeps_the_version_first(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            run(["--version"])
+        assert exc.value.code == 0
+        printed = capsys.readouterr().out.strip()
+        assert printed.split()[0] == _DECLARED, printed
+        assert printed.endswith(")") and " (build " in printed, printed
 
 
 class TestBinaryOnThePath:

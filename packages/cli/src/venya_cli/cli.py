@@ -10,7 +10,24 @@ import argparse
 import sys
 from datetime import UTC
 
-from venya_cli.api_client import cli_version as _cli_version
+from venya_cli.api_client import cli_version_line
+
+
+class _VersionAction(argparse._VersionAction):
+    """``venya --version`` answers when the flag is used, not while the parser is built.
+
+    ``create_parser`` runs for EVERY command, so a version string built there means an
+    unreadable stamp would stop ``--help``, ``config show`` and ``exec status`` too —
+    a version surface must not be able to brick the tool it describes (ticket #768,
+    leg 1237's B1). The line is printed plain rather than through the help formatter,
+    which would wrap a long build face and break the first-token rule.
+
+    A local class, not an import: this package must stay standalone from ``core``.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser._print_message(f"{cli_version_line()}\n", sys.stdout)
+        parser.exit()
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -53,9 +70,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--version",
-        action="version",
-        version=f"{_cli_version()}",
-        help="Print the CLI version and exit",
+        action=_VersionAction,
+        help="Print the CLI version and the face it was built from, then exit",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")

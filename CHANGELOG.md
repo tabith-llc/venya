@@ -15,7 +15,8 @@ Notable changes to Venya will be documented in this file.
 
 ### Added
 
-- `venya-server --version` also names the face it was built from — a commit, a value the release stamped, or `unknown` — so two installs can be told apart without opening the tarball (#768)
+- Every binary names the face it was built from, not just the server: `venya --version`, `venya-server --version`, `venya-mcp --version` and `venya-executor --version` all answer with the release name first and then a commit, a value the release stamped, or `unknown` — so two installs can be told apart without opening the tarball, and an unstamped one says so (#768)
+- `venya exec list` and the executor heartbeat report the executor's version exactly as before — a bare version string — so a caller that parses that field reads the same token it always read (#768)
 - `venya store` prints the secret's decimal id on a first store, the number a `/run/secrets/venya/<decimal-id>` redirect needs (#732 #733)
 - The CLI installer prints two answers separately: the shim exists, and whether a fresh login shell resolves `venya`, with the PATH line to add when it does not (#744)
 - `venya-mcp` gets the same login-shell check and a remedy line on the branch that printed nothing before (#744)
@@ -36,6 +37,7 @@ Notable changes to Venya will be documented in this file.
 
 ### Fixed
 
+- A build face you cannot read no longer stops the tool that reads it: `--version` answers `unknown` when the stamp beside the install is not text, and `--help` and every subcommand answer too, because the version line is now built when you ask for it rather than every time the program starts (#768)
 - The enrollment pages now tell you to decline a passkey your password manager offers, so the PIN prompt for your security key appears instead of a credential saved somewhere else
 - Every layer now prints the version its own plate declares: the executor reported `0.1.0b3` where the release record says `0.1.0beta3`, because its build backend normalized the spelling on the way into the installed metadata (#768)
 - A failed API call from the CLI names the HTTP status it received, so an older CLI against a newer core reads `HTTP 405: …` where it read `Method Not Allowed` or `Unknown error` (#729)
