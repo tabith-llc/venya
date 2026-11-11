@@ -457,6 +457,44 @@ class TestRelayDialTrustStore:
         assert ctx.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
         assert ctx.minimum_version == ssl.TLSVersion.TLSv1_2
 
+    def test_the_dial_floor_is_product_set_not_library_inherited(self, tmp_path, monkeypatch):
+        """Paired negative to the flag cell above — the floor must be the product's statement.
+
+        #501 measured the opposite: the dial never set ``minimum_version``, so the floor was
+        whatever the linked OpenSSL happened to default — TRUE on interpreters that ship a
+        TLSv1.2 default, silently FALSE on the declared target (Ubuntu 26.04's system Python
+        links a library that gives none). Two witnesses, and the cell says which one it used:
+
+        * discriminating face — if this interpreter's bare client context does NOT floor at
+          TLSv1_2, a product-built context that DOES can only be product-set;
+        * non-discriminating face — if the bare context already floors there, behavior cannot
+          tell inheritance from assignment, so the builder's own source must carry the
+          assignment line.
+
+        Deleting the product line reddens this cell on EITHER interpreter: on the target face by
+        behavior (bare and dial both floorless), on a defaulting face by the source witness.
+        """
+        import inspect
+
+        from server.routes import executors
+
+        venya = _venya_ca(tmp_path, monkeypatch)
+        app, _backend = _relay_app(str(venya.ca_dir))
+        ctx = _relay_dial_context(app, monkeypatch)
+        assert ctx is not None
+        bare = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if bare.minimum_version != ssl.TLSVersion.TLSv1_2:
+            assert ctx.minimum_version == ssl.TLSVersion.TLSv1_2, (
+                f"this interpreter inherits floor {bare.minimum_version!r}; the dial must "
+                "still floor at TLSv1_2 because the PRODUCT sets it"
+            )
+        else:
+            src = inspect.getsource(executors._build_relay_ssl_context)
+            assert "ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2" in src, (
+                "this interpreter cannot discriminate inheritance from assignment; "
+                "the builder itself must set the floor"
+            )
+
     def test_relay_without_an_anchor_is_503_not_the_system_store(self, tmp_path, monkeypatch):
         """Fail-closed posture kept: an anchor-less core answers 503 rather than
         dialing on the host store — the CLI/executor `else: load_default_certs()`

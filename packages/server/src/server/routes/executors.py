@@ -674,6 +674,12 @@ def _build_relay_ssl_context(
     """
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ssl_ctx.verify_flags |= ssl.VERIFY_X509_STRICT | ssl.VERIFY_X509_PARTIAL_CHAIN
+    # #501 (measured on the declared target, refs relay-dial floor finding): floor the DIAL at
+    # TLSv1.2 in product code, the same posture the executor's listen side sets in
+    # ``executor.relay_listener``. A bare client context inherits its floor from whichever
+    # OpenSSL the interpreter links, and Ubuntu 26.04's system Python links one that gives
+    # none — the guard cell must not ride a library default.
+    ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ssl_ctx.load_verify_locations(cafile=ca_cert_path)
     if crl_capath is not None:
         # #586 Slice 1 (owner ruling 2026-10-13, "if its a stronger connection-time
