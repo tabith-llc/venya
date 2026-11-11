@@ -58,39 +58,39 @@ HE = "install-venya-executor.sh"
 MANIFEST: dict[str, tuple[str, str, int, str]] = {
     # ---- #586 entry: the dial door
     "packages/server/src/server/routes/executors.py:641": (E, "def _build_relay_ssl_context", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:689-690": (E, "VERIFY_CRL_CHECK_LEAF", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:715": (E, "def _ensure_dial_crl_store", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:695-696": (E, "VERIFY_CRL_CHECK_LEAF", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:721": (E, "def _ensure_dial_crl_store", 1, "pin"),
     f"{E}:1979": (E, "crl_capath = _ensure_dial_crl_store(request, db)", 1, "pin"),
     f"{E}:1994": (E, "ssl_ctx = _build_relay_ssl_context", 1, "pin"),
     f"{E}:789": (E, "Executor certificate revoked", 1, "pin"),
     f"{E}:699": (E, "_STALE_LIST_DETAIL = REVOCATION_UNAVAILABLE_DETAIL", 1, "pin"),
     f"{E}:1987": (E, "Server TLS misconfiguration", 1, "pin"),
     # ---- the `.../executors.py:N` short forms the #586 entry prints
-    "packages/server/src/server/routes/executors.py:2111": (
+    "packages/server/src/server/routes/executors.py:2117": (
         E,
         "crl_capath = await _dial_crl_store_offloaded(request, db)",
         1,
         "pin",
     ),
-    "packages/server/src/server/routes/executors.py:2126": (E, "ssl_ctx = _build_relay_ssl_context", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:837": (E, "Executor certificate revoked", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:712": (
+    "packages/server/src/server/routes/executors.py:2132": (E, "ssl_ctx = _build_relay_ssl_context", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:843": (E, "Executor certificate revoked", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:718": (
         E,
         "_STALE_LIST_DETAIL = REVOCATION_UNAVAILABLE_DETAIL",
         1,
         "pin",
     ),
-    "packages/server/src/server/routes/executors.py:2119": (E, "Server TLS misconfiguration", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:2125": (E, "Server TLS misconfiguration", 1, "pin"),
     ":1997": (E, "Server TLS misconfiguration", 2, "pin"),
     "packages/server/src/server/routes/executors.py:676": (E, "VERIFY_X509_STRICT", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:719-724": (
+    "packages/server/src/server/routes/executors.py:725-730": (
         E,
         "refuse everything until a properly refreshed list arrives",
         1,
         "pin",
     ),
-    "packages/server/src/server/routes/executors.py:2100-2102": (E, "Scope note (ruled boundary)", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:1696": (
+    "packages/server/src/server/routes/executors.py:2106-2108": (E, "Scope note (ruled boundary)", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:1702": (
         E,
         "is_online = 0.0 <= delta.total_seconds() < 60",
         1,
@@ -221,7 +221,7 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     f"{TCF}:55": (TCF, "assert ADMIN_SHORT_CERT_LIFETIME_SECONDS == 3600", 1, "pin"),
     "packages/server/src/server/routes/admin.py:1077": (AD, "executor's next heartbeat (~30 s)", 1, "pin"),
     f"{HL}:78": (HL, "def _check_ca", 1, "pin"),
-    "packages/server/src/server/routes/executors.py:823": (E, "def _dial_crl_verdict_for", 1, "pin"),
+    "packages/server/src/server/routes/executors.py:829": (E, "def _dial_crl_verdict_for", 1, "pin"),
     "executors.py:702": (E, "def _ensure_dial_crl_store", 1, "pin"),
     "executors.py:628": (E, "def _build_relay_ssl_context", 1, "pin"),
     "executors.py:1571": (E, "is_online = 0.0 <= delta.total_seconds() < 60", 1, "pin"),
