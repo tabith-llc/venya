@@ -179,7 +179,12 @@ def build_face() -> str:
     for location in locations:
         try:
             tokens = (Path(location) / BUILD_COMMIT_FILENAME).read_text(encoding="utf-8").split()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # A stamp that cannot be read, or cannot be decoded, is not an answer and is
+            # not a reason to stop the tool: `UnicodeDecodeError` is a `ValueError`, so
+            # `OSError` alone would let it climb out of `--version` — and this layer
+            # builds its parser for every command, so it would brick the CLI with it
+            # (ticket #768, leg 1237's B1). Try the next route, then answer `unknown`.
             continue
         if tokens:
             return tokens[0]

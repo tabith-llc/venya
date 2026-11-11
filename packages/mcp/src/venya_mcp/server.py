@@ -492,7 +492,11 @@ def build_face() -> str:
     for location in locations:
         try:
             tokens = (Path(location) / BUILD_COMMIT_FILENAME).read_text(encoding="utf-8").split()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # A stamp that cannot be read, or cannot be decoded, is not an answer and is
+            # not a reason to stop this server: `UnicodeDecodeError` is a `ValueError`, so
+            # `except OSError` alone would let it climb out of the binary (ticket #768,
+            # leg 1237's B1). Try the next route, then answer `unknown`.
             continue
         if tokens:
             return tokens[0]
@@ -518,10 +522,23 @@ def _build_arg_parser():
         prog="venya-mcp",
         description="Venya MCP server — lets an LLM drive Venya over MCP tools.",
     )
+
+    class _VersionAction(argparse._VersionAction):
+        """Answer ``--version`` when it is used, not while this parser is built.
+
+        ``run`` builds the parser before the config load, so a version string produced at
+        construction would let one unreadable stamp stop the MCP server and its ``--help``
+        too (ticket #768, leg 1237's B1). Printed plain: the help formatter wraps a long
+        face at terminal width, and a wrapped face breaks the first-token rule.
+        """
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            parser._print_message(f"{version_surface()}\n", sys.stdout)
+            parser.exit()
+
     parser.add_argument(
         "--version",
-        action="version",
-        version=version_surface(),
+        action=_VersionAction,
         help="Print the MCP layer's version and the face it was built from, then exit.",
     )
     return parser

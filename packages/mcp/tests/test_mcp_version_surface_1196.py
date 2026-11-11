@@ -134,6 +134,33 @@ class TestTheFaceIsHonest:
         assert mcp_server.build_face() == "beef12345"
         assert "core" not in sys.modules, "reading the stamp imported core"
 
+    def test_a_malformed_stamp_is_refused_not_propagated(self, monkeypatch, tmp_path):
+        """B1 (leg 1237): ``UnicodeDecodeError`` is a ``ValueError``, so an
+        ``except OSError`` alone lets a non-UTF-8 stamp climb out of the binary."""
+        import venya_mcp.server as mcp_server
+
+        (tmp_path / "core").mkdir()
+        (tmp_path / "core" / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "core" / "BUILD_COMMIT").write_bytes(b"\xff\xfe not utf-8 at all")
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "core", raising=False)
+        assert mcp_server.build_face() == "unknown"
+
+    def test_the_answer_is_not_read_until_the_flag_is_used(self, monkeypatch, capsys):
+        """``run`` builds this parser before the config load, so a version string built
+        at construction would let one bad file stop the MCP server and its ``--help``."""
+        import venya_mcp.server as mcp_server
+
+        def boom() -> str:
+            raise AssertionError("the version surface was read while building the parser")
+
+        monkeypatch.setattr(mcp_server, "version_surface", boom)
+        with pytest.raises(SystemExit) as exc:
+            mcp_server.run(["--help"])
+        assert exc.value.code == 0
+        assert "usage: venya-mcp" in capsys.readouterr().out
+
     def test_no_statement_and_no_stamp_names_no_sha(self, monkeypatch):
         """A surface that always looks like a release is worse than one that admits it
         cannot tell: with neither route present the answer is ``unknown``."""

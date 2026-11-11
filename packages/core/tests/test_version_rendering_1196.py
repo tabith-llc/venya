@@ -211,6 +211,22 @@ class TestBuildIdentityIsHonest:
         )
         assert core_version.build_identity() == "cafe123"
 
+    def test_a_malformed_stamp_is_refused_not_propagated(self, monkeypatch, tmp_path):
+        """B1 (leg 1237): a stamp that is not UTF-8 must not climb out of ``--version``.
+
+        ``UnicodeDecodeError`` is a ``ValueError``, so the pre-existing ``except OSError``
+        did not catch it — and the reader sits in a path every command takes. Here the
+        stamp is unreadable AND the repository route is taken away, so the only honest
+        answer left is ``unknown``. The cell fails if the exception escapes.
+        """
+        import core.version as core_version
+
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.setattr(core_version, "_git", lambda cwd, *args: None)
+        (tmp_path / "BUILD_COMMIT").write_bytes(b"\xff\xfe not utf-8 at all")
+        monkeypatch.setattr(core_version, "_stamp_path", lambda: tmp_path / core_version.BUILD_COMMIT_FILENAME)
+        assert core_version.build_identity() == UNKNOWN
+
     def test_the_surface_says_unknown_when_no_route_exists(self, monkeypatch):
         """The paired negative for R-2876, at the printed line rather than the helper.
 

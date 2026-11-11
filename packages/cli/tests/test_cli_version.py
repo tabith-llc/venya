@@ -79,6 +79,37 @@ class TestVersionSurfaceNamesTheFace:
         assert api_client.build_face() == "beef12345"
         assert "core" not in sys.modules, "reading the stamp imported core — the CLI is standalone"
 
+    def test_a_malformed_stamp_is_refused_not_propagated(self, monkeypatch, tmp_path):
+        """The same class at this layer: a non-UTF-8 stamp must not stop the CLI."""
+        from venya_cli import api_client
+
+        (tmp_path / "core").mkdir()
+        (tmp_path / "core" / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "core" / "BUILD_COMMIT").write_bytes(b"\xff\xfe not utf-8 at all")
+        monkeypatch.delenv("VENYA_BUILD_COMMIT", raising=False)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.delitem(sys.modules, "core", raising=False)
+        assert api_client.build_face() == "unknown"
+
+    def test_building_the_parser_reads_nothing(self, monkeypatch):
+        """The other half of B1: the version answer must not be needed to BUILD a parser.
+
+        ``create_parser`` runs for every command, so a stamp read inside it would put
+        ``--help``, ``config show`` and ``exec status`` behind a file they never asked
+        for. Making the answer raise proves nothing else calls it: if the read were
+        still in construction, this cell dies before argparse is even built.
+        """
+        import venya_cli.cli as cli_module
+
+        def boom() -> str:
+            raise AssertionError("the version surface was read while building the parser")
+
+        monkeypatch.setattr(cli_module, "cli_version_line", boom)
+        parser = cli_module.create_parser()
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["--help"])
+        assert exc.value.code == 0
+
     def test_no_statement_and_no_stamp_names_no_sha(self, monkeypatch):
         """The paired negative R-2876 is gated on: with neither route present the face
         is ``unknown``, never a clean-looking number this layer cannot prove."""

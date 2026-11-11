@@ -43,7 +43,7 @@ import httpx2
 # must not be silently unavailable at runtime.
 import tomli_w  # type: ignore[import-not-found]
 from core.utils.cert_serial import canonical_serial, serial_match_key
-from core.version import canonical_release, version_line  # leg 1196 render (see core.version)
+from core.version import VersionAction, canonical_release, version_line  # leg 1196 render (see core.version)
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -2526,10 +2526,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Venya Executor Daemon")
     parser.add_argument(
         "--version",
-        action="version",
-        # The full answer (release name + build face), version first; the heartbeat
-        # wire field above stays the bare version, which is what the server stores.
-        version=version_line("executor"),
+        # Rendered when the flag is used, never while this parser is built: a daemon
+        # start must not pay a stamp read and a git probe, and a stamp it cannot read
+        # must not stop the daemon (leg 1237's B1). The heartbeat wire field above
+        # stays the bare version, which is what the server stores.
+        action=VersionAction,
+        source=lambda: version_line("executor"),
     )
     parser.add_argument(
         "--config",

@@ -27,9 +27,11 @@ repository answers ``unknown``, and a dirty working tree says so.
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import subprocess  # nosec B404 — the build-face answer reads `git` beside the artifact; same system-tool seam as utils/disk_encryption.py
+import sys
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -129,7 +131,11 @@ def build_identity() -> str:
     if stamp.is_file():
         try:
             tokens = stamp.read_text(encoding="utf-8").split()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # A stamp that cannot be decoded is not an answer, and it is not a reason to
+            # stop the tool that reads it: `UnicodeDecodeError` is a `ValueError`, so
+            # `except OSError` alone let it climb out of `--version` and past every
+            # command that builds a parser (ticket #768, leg 1237's B1).
             tokens = []
         if tokens:
             return tokens[0]
@@ -146,3 +152,38 @@ def version_line(dist_name: str) -> str:
     anything that parses it reads the same string it always read.
     """
     return f"{release_version(dist_name)} (build {build_identity()})"
+
+
+class VersionAction(argparse._VersionAction):
+    """An argparse ``--version`` action that renders when the flag is used.
+
+    Why not ``action="version", version=version_line(...)``: that answer is built while
+    the parser is being CONSTRUCTED, so every invocation of a binary — ``--help``, a
+    subcommand, a daemon start — pays a file read and a ``git`` probe, and a failure
+    inside that read stops the tool before it can do anything else. A version surface
+    must not be able to brick the thing it describes (ticket #768, leg 1237's B1), so the
+    line is produced here, when it is asked for.
+
+    Printed plain, not through the help formatter: the formatter wraps at terminal width,
+    and a wrapped face breaks the rule that the version is the first token.
+
+    ``source`` is the caller's own answer, so this class invents nothing — ``core.version``
+    renders for the layers that depend on core, and a standalone layer passes its reader.
+    """
+
+    def __init__(
+        self,
+        option_strings,
+        version=None,
+        dest=argparse.SUPPRESS,
+        default=argparse.SUPPRESS,
+        help=None,
+        *,
+        source,
+    ):
+        super().__init__(option_strings, version=version, dest=dest, default=default, help=help)
+        self.source = source
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser._print_message(f"{self.source()}\n", sys.stdout)
+        parser.exit()
