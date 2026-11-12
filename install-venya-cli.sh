@@ -225,9 +225,10 @@ if [ "$(uname -s)" = "Darwin" ]; then
     # physical run could only score the banner. A FIDO device is identified by HID
     # usage page 0xF1D0, which ioreg -l prints in decimal as 61904; 61440 is 0xF000
     # and must not answer for a key, exactly as a keyboard must not on Linux.
-    # macOS has no per-device file permission to test: IOKit HID is opened by the
-    # console user with no udev rule and no root, so the honest statement is made
-    # once, on the path where a key was actually seen.
+    # macOS has no per-device file permission to test, and none is invented here:
+    # the shipped design grants IOKit HID to an ordinary user process, so the only
+    # honest statement is that there is no gate to clear — made once, on the path
+    # where a key was actually seen.
     # VENYA_IOREG_FILE names a saved "ioreg -r -c IOHIDDevice -l" dump so the cells
     # can drive both branches without a Mac; the default is the live call.
     if [ -n "${VENYA_IOREG_FILE:-}" ]; then
@@ -238,7 +239,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     HID_FIDO_COUNT="$(printf '%s\n' "$HID_IOREG_OUT" | grep -c '"PrimaryUsagePage" = 61904' || true)"
     if [ "${HID_FIDO_COUNT:-0}" -gt 0 ]; then
         info "FIDO2 key visible via IOKit HID — usage page 0xF1D0 matched $HID_FIDO_COUNT node(s)."
-        info "macOS needs no udev rule and no root for it — plug in the security key before first venya login/enroll."
+        info "macOS has no per-device permission to check here — no udev rule and no root step is needed for IOKit HID."
     fi
 else
     # A security key is identified by its HID usage page (0xF1D0), not by the mere
