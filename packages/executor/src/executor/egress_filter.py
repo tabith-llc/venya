@@ -41,7 +41,10 @@ DEFAULT_ALLOWLIST_PATH = Path("/etc/venya/egress-allowlist.txt")
 # fixed part the shape needs. Both close faces are matched from the same
 # transport, and the control still holds: the allowed resolver reaches the
 # protocol on the same path. A match below is only ever a named SHAPE: the
-# notice says what the failure is consistent with, never what caused it.
+# notice claims the sandbox path as the closer ONLY where the policy file never
+# admitted the destination it names — see `egress_deny_notice`, where the listed
+# and no-destination arms stop at the shape, because review 1307 measured a
+# permitted destination closing from a real peer in exactly these words.
 DENY_SIGNATURES: tuple[str, ...] = (
     "kex_exchange_identification",
     "connection closed by remote host",
@@ -53,6 +56,18 @@ DENY_SIGNATURES: tuple[str, ...] = (
     "name or service not known",
     "temporary failure in name resolution",
 )
+
+# Two-word prose can carry the close phrase without any socket: review 1307
+# measured `worker: the client-side connection closed by our own idle timer`
+# (rc 1, no network event) matching the generic entry. The transport face the
+# entry was added for always names the port the client printed
+# (`Connection closed by <address> port <n>`, measured both directions there),
+# so for these entries only, a match requires the port token as well. This is
+# a token test, not a wording test: the pair cell proves a prose line WITH a
+# port token still matches, and the guard leaves every other entry — the kex
+# form, the remote-host form, timeouts, unreachable, DNS shapes — untouched.
+PORT_PROVEN_SIGNATURES: frozenset[str] = frozenset({"connection closed by"})
+_PORT_SHAPE = " port "
 
 #: Commands that put a remote host in plain sight in their own arguments. A bare
 #: dotted token counts as a destination only behind one of these, because
@@ -97,12 +112,20 @@ def find_deny_signature(stderr: str) -> str | None:
     """The first deny shape the output carries, or None.
 
     Case-insensitive: the guests write these in both cases (`Name or service not
-    known` and `name or service not known` are the same failure).
+    known` and `name or service not known` are the same failure). An entry in
+    ``PORT_PROVEN_SIGNATURES`` must also find `` port `` in the line — the
+    transport proof — or it is skipped and the scan continues.
     """
     if not stderr:
         return None
     lowered = stderr.lower()
-    return next((signature for signature in DENY_SIGNATURES if signature in lowered), None)
+    for signature in DENY_SIGNATURES:
+        if signature not in lowered:
+            continue
+        if signature in PORT_PROVEN_SIGNATURES and _PORT_SHAPE not in lowered:
+            continue
+        return signature
+    return None
 
 
 def _plausible_host(value: str | None) -> str | None:
@@ -373,8 +396,15 @@ def egress_deny_notice(
 
     The caller-visible half of the fail-closed default: the text carries the
     destination the command asked for, which fail-closed arm the policy file is
-    in, whether that file names the destination, and whose words the guest is
-    quoting. It claims nothing beyond that — never a value, never file contents.
+    in, and whether that file names the destination. The causal sentence — the
+    sandbox path closed this, not the peer — is claimed ONLY where the policy
+    can support it: a destination the file never admitted, because no other
+    path carried those bytes. Where the file DOES name the destination, and
+    where none could be read, the line stops at the shape, the names, the
+    counts and the path: a permitted destination can close exactly this way
+    from a real peer (measured, review 1307), and an in-sandbox refusal arrives
+    in close wording, so naming a closer there would guess. It claims nothing
+    beyond that — never a value, never file contents.
     """
     if returncode == 0:
         return None
@@ -388,20 +418,32 @@ def egress_deny_notice(
             "No destination could be read from this command, so this line names the policy "
             "file instead of blaming one host."
         )
+        closer = (
+            " This line names the shape the output carries and the state of the policy file; "
+            "it does not say which side closed the connection."
+        )
     elif any(_entry_names(entry, destination) for entry in entries):
         target = (
             f"The destination this command names, {destination}, is carried by that file, so this "
-            f"is not a missing-entry denial: the sandbox closed a path it had been given."
+            f"is not a missing-entry denial."
+        )
+        closer = (
+            " A path the file admitted can close from the peer's side exactly as it closes from "
+            "the sandbox path, and an in-sandbox refusal arrives in close wording, so this line "
+            "does not say which side closed the connection."
         )
     else:
         target = (
             f"{destination}, the destination this command names, is not listed by it, so the "
             f"sandbox was never given a path to it."
         )
+        closer = (
+            " The text above is the sandbox network path closing the connection, not a message "
+            "from the peer, so it is not evidence that the destination refused you."
+        )
     return (
         f"venya: exit {returncode} with the shape of a sandbox egress denial (matched: {signature}). "
         f"{_allowlist_state(egress, entries)} {target} The file is read once, when the sandbox is "
-        f"created, and the only resolver address the policy allows is {egress.dns_resolver}. The text "
-        f"above is the sandbox network path closing the connection, not a message from the peer, so "
-        f"it is not evidence that the destination refused you."
+        f"created, and the only resolver address the policy allows is {egress.dns_resolver}."
+        f"{closer}"
     )
