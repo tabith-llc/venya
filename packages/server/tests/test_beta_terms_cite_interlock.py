@@ -77,10 +77,17 @@ _spec.loader.exec_module(gen)
 #: been. Set by running the generator at the cut commit (`--write`) and filling this in from ITS
 #: OWN stdout, in the same changeset. It is no longer ``None``: the generator ran at `25ece37`
 #: (`d3897ec`, 105 cites re-pinned, manifest 96 -> 93 keys). At the face named below `--write`
-#: reported `re-pinned 105 cites and re-keyed 4 manifest keys at 35bc369d…` — 4 coordinates moved
-#: because the `audit` help line and the fresh-store print shifted `cli.py` by 6 lines and
-#: `commands.py` by 4, and the other 101 re-resolved to the lines they already printed; the
-#: coordinates are exact there BY VERIFICATION, not by inheritance. Earlier strikes: the
+#: reported `re-pinned 104 cites and re-keyed 9 manifest keys at ff555b20…`. The live count reads
+#: 104 where the previous strike reported 105, and `--check` on the face BEFORE `--write` already
+#: printed 104 — this changeset re-pins, it does not drop a cite; nobody should read the count
+#: difference as inherited from this strike without checking the page's dated block. What moved is
+#: the `daemon.py` half, in two classes: +16 past the boot guard inserted in `start()`
+#: (`2209 -> 2225`, `2221 -> 2237`, `2245 -> 2261`, `2260 -> 2276`) and +2 before it
+#: (`250 -> 252`, `256 -> 258`, `1405 -> 1407`, `1948 -> 1950`) from the egress/resolver leg; every
+#: other cite re-resolved to the line it already printed, exact by verification rather than
+#: inheritance. Earlier strikes: `35bc369d` (`--write` reported `re-pinned 105 cites and re-keyed 4
+#: manifest keys` — the `audit` help line and the fresh-store print shifted `cli.py` by 6 lines and
+#: `commands.py` by 4); the
 #: `v0.1.0beta2` cut against `f1eb83d4` (`--check` rc 0, `would change: False`, 105 cites, manifest
 #: 93/93 keys at that face); the beta1 strike was `e8f19821`, the face the beta1 cut commit was
 #: written on.
@@ -91,7 +98,7 @@ _spec.loader.exec_module(gen)
 #: cell RE-RESOLVES all 105 cites against the live tree and asserts agreement. A merge that moves a
 #: cited symbol from here forward reddens the suite instead of quietly publishing a stale line.
 PINNED_AT: str | None = (
-    "2611fca2f6950a6240a58830b79c750c4950f91c"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
+    "ff555b2059ec1a9bd976c90848d3d1c137318885"  # pragma: allowlist secret — a git commit sha at the house form used by test_serial_cap_64_676.py:34 and test_admin_revoke_already_revoked_262.py:30; not a credential
 )
 
 #: Files whose churn invalidates the pins — the tree the cites point into.
