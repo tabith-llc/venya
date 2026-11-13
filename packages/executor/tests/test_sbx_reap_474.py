@@ -310,6 +310,9 @@ class TestBootReap:
 
         with (
             patch.object(daemon_mod, "require_supported_sbx", return_value="0.46.0"),
+            # #312 item 3a: new boot precondition; the guard's own face is in
+            # test_sbx_runtime_socket_startup_refusal_312.py.
+            patch.object(daemon_mod, "require_runtime_isolated_sandbox", return_value="clean"),
             patch.object(daemon_mod, "sweep_workspace_base", return_value=0),
             patch.object(daemon_mod, "reap_orphan_sandboxes", side_effect=lambda: calls.append("reap") or 0),
             patch.object(daemon_mod, "sweep_stale_tmp_files", return_value=0),
@@ -340,6 +343,9 @@ class TestBootReap:
 
         with (
             patch.object(daemon_mod, "require_supported_sbx", return_value="0.46.0"),
+            # #312 item 3a: new boot precondition; the guard's own face is in
+            # test_sbx_runtime_socket_startup_refusal_312.py.
+            patch.object(daemon_mod, "require_runtime_isolated_sandbox", return_value="clean"),
             patch.object(daemon_mod, "sweep_workspace_base", return_value=0),
             patch.object(daemon_mod, "sweep_stale_tmp_files", return_value=0),
             patch.object(daemon_mod, "reap_orphan_sandboxes", return_value=1),

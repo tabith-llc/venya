@@ -135,7 +135,13 @@ class TestDaemonStartGuardWiring:
         d.reaper = MagicMock()
         sentinel = RuntimeError("past-the-sbx-gate")
         d.cert_manager.register.side_effect = sentinel
-        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+        # #312 item 3a: the runtime-isolation guard sits beside this one and is
+        # stubbed here so this cell measures ONLY the version floor; its own face
+        # is test_sbx_runtime_socket_startup_refusal_312.py.
+        with (
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
+        ):
             with pytest.raises(RuntimeError) as exc:
                 d.start()
         assert exc.value is sentinel
