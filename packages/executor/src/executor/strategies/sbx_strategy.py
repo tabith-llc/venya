@@ -378,8 +378,7 @@ def rt_probe_argv() -> list[str]:
     write, no network, no state, nothing that could consume or alter anything.
     """
     tests = "; ".join(
-        f'if [ -e "{p}" ]; then if [ -w "{p}" ]; then echo "{_RT_TAG} W {p}"; '
-        f'else echo "{_RT_TAG} P {p}"; fi; fi'
+        f'if [ -e "{p}" ]; then if [ -w "{p}" ]; then echo "{_RT_TAG} W {p}"; ' f'else echo "{_RT_TAG} P {p}"; fi; fi'
         for p in RUNTIME_SOCKET_PATHS
     )
     return ["sh", "-c", f"id -Gn; {tests}"]
@@ -421,17 +420,32 @@ def parse_runtime_probe(stdout: str) -> RuntimeProbe:
     return RuntimeProbe(groups=groups, writable=writable, present=present)
 
 
-def require_runtime_isolated_sandbox(memory_mb: int, timeout: float | None = None) -> str:
+def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | None = None) -> str:
     """Create one throwaway sandbox, ask it what it can reach, refuse on a yes.
 
     Returns a short human-readable face for the INFO log when the sandbox can
     reach no runtime socket. Raises SbxRuntimeExposureError when it can, when the
-    probe cannot be run or completed, or when its answer cannot be read.
+    probe cannot be run or completed, when its answer cannot be read, or when
+    there is no configured cap to probe with.
+
+    `memory_mb` is `int | None` because `ExecutorConfig.sandbox_memory_mb` is
+    deliberately nullable (#578 — an explicit null stays representable so the
+    create-time refusal stays reachable, `config.py`). The probe must describe the
+    sandbox venya would actually build, so a null is not a default to invent here:
+    it is the same refusal, named, and it comes BEFORE the sandbox exists rather
+    than as a `TypeError` out of `int(None)` inside the argv (refs #312 item 3a).
 
     Named `venya-rt-probe-<pid>` on purpose: the boot reap in daemon.start()
     collects every `venya-*` sandbox as residue, so a probe leaked by a kill
     mid-flight is collected by the next boot rather than orphaned forever.
     """
+    if memory_mb is None:
+        raise SbxRuntimeExposureError(
+            "cannot verify sandbox runtime isolation — sandbox_memory_mb is not configured, so there "
+            "is no cap to probe with. Set VENYA_EXECUTOR_SANDBOX_MEMORY_MB to a value between 512 and "
+            "75 percent of the executor guest memory. See docs/deployment-sizing.md for sizing guidance "
+            "(refs #312 item 3a, #578)."
+        )
     bound = float(timeout) if timeout else rt_probe_timeout()
     name = f"venya-rt-probe-{os.getpid()}"
     workspace: str | None = None
@@ -477,7 +491,7 @@ def require_runtime_isolated_sandbox(memory_mb: int, timeout: float | None = Non
         parsed = parse_runtime_probe(probe.stdout)
         if parsed.exposed:
             groups = " ".join(parsed.groups) or "numeric gids only, no names"
-            risky = sorted(set(g.lower() for g in parsed.groups) & set(RUNTIME_EXPOSED_GROUPS))
+            risky = sorted({g.lower() for g in parsed.groups} & set(RUNTIME_EXPOSED_GROUPS))
             raise SbxRuntimeExposureError(
                 "the sandbox can reach a container runtime — refusing to start. Inside a "
                 f"sandbox created by this executor, {[p for p in parsed.writable]} is "
@@ -533,7 +547,9 @@ def require_runtime_isolated_sandbox(memory_mb: int, timeout: float | None = Non
             except (OSError, subprocess.TimeoutExpired) as exc:
                 logger.warning(
                     "probe sandbox %s was not removed (%s) — the boot reap collects every "
-                    "venya-* sandbox as residue, so the next boot takes it (#474)", name, exc
+                    "venya-* sandbox as residue, so the next boot takes it (#474)",
+                    name,
+                    exc,
                 )
         if workspace:
             shutil.rmtree(workspace, ignore_errors=True)
