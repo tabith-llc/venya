@@ -33,12 +33,19 @@ DEFAULT_ALLOWLIST_PATH = Path("/etc/venya/egress-allowlist.txt")
 # host`, and the negative control — the same probe against a port the operator's
 # own log shows is blocked — failed the same way, which a peer rejection cannot
 # produce. The sandbox network path completes the handshake locally and closes
-# it, so the words that reach the guest belong to no peer. A match below is only
-# ever a named SHAPE: the notice says what the failure is consistent with, never
-# what caused it.
+# it, so the words that reach the guest belong to no peer. A second close face is
+# measured (leg 1295, `venya-exec-1`, product path create -> apply_network_policy
+# -> execute_command): the same destination arrives as `Connection closed by
+# <address> port <n>`, which carries the words `remote host` nowhere, so the
+# specific entry below does not reach it and the generic close phrase is the
+# fixed part the shape needs. Both close faces are matched from the same
+# transport, and the control still holds: the allowed resolver reaches the
+# protocol on the same path. A match below is only ever a named SHAPE: the
+# notice says what the failure is consistent with, never what caused it.
 DENY_SIGNATURES: tuple[str, ...] = (
     "kex_exchange_identification",
     "connection closed by remote host",
+    "connection closed by",
     "connection reset by peer",
     "connection timed out",
     "network is unreachable",

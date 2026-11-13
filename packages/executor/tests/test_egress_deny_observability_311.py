@@ -38,6 +38,12 @@ from executor.executor import Executor
 from executor.strategies.sbx_strategy import SbxStrategy
 
 KEX_STDERR = "kex_exchange_identification: Connection closed by remote host\n"
+# Measured face shape, leg 1295, `venya-exec-1`: a denied destination on the product's own
+# create -> apply_network_policy -> execute_command path closes as `Connection closed by
+# <address> port 22`, with no `remote host` and no `kex` anywhere in the line. The address is
+# restated here in the RFC 5737 example range the tree-wide scrub guard requires; the shape, not
+# the digits, is what the matcher matches.
+GUEST_CLOSE_STDERR = "Connection closed by 198.51.100.7 port 22\n"
 RESOLVE_STDERR = "ssh: Could not resolve hostname venya.ai: Name or service not known\n"
 
 
@@ -200,6 +206,14 @@ class TestDestinationReading:
 class TestSignatureReading:
     def test_case_insensitive_match(self):
         assert find_deny_signature("SSH: Could Not Resolve Hostname x") == "could not resolve host"
+
+    def test_the_measured_guest_close_face_is_named(self):
+        """The real sandbox close (leg 1295) carries the shape, so it matches."""
+        assert find_deny_signature(GUEST_CLOSE_STDERR) == "connection closed by"
+
+    def test_a_closed_word_without_the_close_shape_is_not_invented(self):
+        """Paired negative: the close entry is a phrase test, not a word test."""
+        assert find_deny_signature("server closed the connection unexpectedly\n") is None
 
     def test_no_match_on_plain_output(self):
         assert find_deny_signature("Traceback (most recent call last):\n") is None
@@ -453,6 +467,22 @@ class TestCallerSeesTheDenial:
         assert str(tmp_path / "egress-allowlist.txt").encode() in result.stderr
         # the command's own words are still there, ahead of ours
         assert result.stderr.startswith(KEX_STDERR.encode())
+
+    def test_the_measured_close_face_reaches_the_stream(self, tmp_path: Path):
+        """The guest face shape from leg 1295 gets the notice on the same path as the intake face."""
+        strategy, runner = self._strategy(tmp_path, stderr=GUEST_CLOSE_STDERR.encode(), returncode=255)
+        with runner:
+            result = strategy.execute_command("ssh 198.51.100.7 true", argv=["ssh", "198.51.100.7", "true"])
+        assert b"venya: exit 255" in result.stderr
+        assert b"198.51.100.7" in result.stderr
+        assert result.stderr.startswith(GUEST_CLOSE_STDERR.encode())
+
+    def test_the_measured_close_face_on_a_clean_run_stays_silent(self, tmp_path: Path):
+        """Paired negative: rc 0 with the close wording is still never relabelled."""
+        strategy, runner = self._strategy(tmp_path, stderr=GUEST_CLOSE_STDERR.encode(), returncode=0)
+        with runner:
+            result = strategy.execute_command("ssh 198.51.100.7 true", argv=["ssh", "198.51.100.7", "true"])
+        assert result.stderr == GUEST_CLOSE_STDERR.encode()
 
     def test_a_clean_run_is_left_alone(self, tmp_path: Path):
         """Paired negative: no signature, no editorialising."""
