@@ -297,7 +297,12 @@ class TestBootGate:
         daemon = self._daemon(cfg)
         sentinel = RuntimeError("past-the-resolver-shape-gate")
         daemon.cert_manager.register.side_effect = sentinel
-        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+        with (
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            # #312 item 3a: new boot precondition; the guard's own face is in
+            # test_sbx_runtime_socket_startup_refusal_312.py.
+            patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
+        ):
             with pytest.raises(RuntimeError) as exc:
                 daemon.start()
         assert exc.value is sentinel
@@ -312,7 +317,12 @@ class TestBootGate:
         sentinel = RuntimeError("stop-after-startup-lines")
         daemon.cert_manager.register.side_effect = sentinel
         with caplog.at_level(logging.INFO):
-            with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+            with (
+                patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+                # #312 item 3a: new boot precondition; the guard's own face is in
+                # test_sbx_runtime_socket_startup_refusal_312.py.
+                patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
+            ):
                 with pytest.raises(RuntimeError):
                     daemon.start()
         assert "Egress inputs at start:" in caplog.text
@@ -330,7 +340,12 @@ class TestBootGate:
         daemon = self._daemon(cfg)
         sentinel = RuntimeError("past-the-summary")
         daemon.cert_manager.register.side_effect = sentinel
-        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+        with (
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            # #312 item 3a: new boot precondition; the guard's own face is in
+            # test_sbx_runtime_socket_startup_refusal_312.py.
+            patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
+        ):
             with pytest.raises(RuntimeError) as exc:
                 daemon.start()
         assert exc.value is sentinel
