@@ -22,7 +22,15 @@ from sqlalchemy.orm import Session
 from server.dependencies import get_db, require_role, require_user_identity
 from server.rate_limit import lockout_http_exception
 
-from ..audit_lifecycle import VALUE_DISCLOSED, audit_lifecycle
+from ..audit_lifecycle import (
+    STORE_CREATED,
+    STORE_DELETED,
+    STORE_METADATA_UPDATED,
+    STORE_REPLACED,
+    VALUE_DISCLOSED,
+    audit_lifecycle,
+    record_secret_lifecycle,
+)
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -366,6 +374,29 @@ async def secrets_create(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Secret creation failed",
         )
+
+    # R-2909 item 4: the store and the replace each name themselves in the audit
+    # log. Two event names, not one plus a flag, because the question an auditor
+    # asks is "did this credential change hands or get overwritten?" — and a
+    # replace of a row someone else could also see is the answer they need
+    # separable. The row rides its OWN best-effort transaction (see
+    # audit_lifecycle.record_secret_lifecycle): core.put committed inside its own
+    # session before this line, so there is no open transaction here to ride, and
+    # an audit failure must not make a completed store read as a 400. Value-free
+    # by construction: id, key, roles, endpoint — the plaintext never reaches this
+    # call, and the value is not even in scope outside req.value.
+    record_secret_lifecycle(
+        request,
+        STORE_REPLACED if record.replaced else STORE_CREATED,
+        user_info["user_id"],
+        {
+            "outcome": "replaced" if record.replaced else "created",
+            "secret_id": int(record.id),
+            "secret_key": req.key,
+            "role_names": req.roles,
+            "endpoint": "/api/v1/secrets",
+        },
+    )
 
     return SecretCreateResponse(
         id=int(record.id),
@@ -720,6 +751,7 @@ async def secrets_delete(
     ],
     request: Request,
     user_info: dict = Depends(require_role("read-write")),
+    db: Session = Depends(get_db),
 ) -> SecretDeleteResponse:
     """Delete a secret.
 
@@ -737,6 +769,22 @@ async def secrets_delete(
             detail="Core not initialized",
         )
 
+    # Read the row's own id BEFORE the delete, because core.delete answers with a
+    # bool and the row is gone by the time it returns — and an audit row that
+    # cannot name which id left is the thing R-2909 item 4 is about. The
+    # predicate is core.delete's own (key AND created_by), so this read resolves
+    # exactly the row the delete is about to take or refuse: a key the caller
+    # neither owns nor may see stays 404-indistinguishable from nonexistent, and
+    # an unreadable row still gets the same answer it got a moment ago.
+    from core.iam.models import Secret
+
+    prior_id = (
+        db.query(Secret.id)
+        .filter(Secret.key == key, Secret.created_by == user_info["user_id"])
+        .order_by(Secret.id)
+        .scalar()
+    )
+
     deleted = core.delete(
         key=key,
         user_id=user_info["user_id"],
@@ -746,6 +794,24 @@ async def secrets_delete(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Secret '{key}' not found or not owned by you",
         )
+
+    # R-2909 item 4: the delete names itself in the audit log after the row is
+    # really gone — a refused or failed delete writes nothing, so the log never
+    # records a destruction that did not happen. Value-free: id, key, actor,
+    # time. `prior_id` is None only where the row had no id to read (a race
+    # against a concurrent delete of the same key); the row still records the
+    # delete, and the absent id is honest rather than guessed.
+    record_secret_lifecycle(
+        request,
+        STORE_DELETED,
+        user_info["user_id"],
+        {
+            "outcome": "deleted",
+            "secret_id": prior_id,
+            "secret_key": key,
+            "endpoint": "/api/v1/secrets/{key}",
+        },
+    )
 
     return SecretDeleteResponse(deleted=deleted, key=key)
 
@@ -846,6 +912,26 @@ async def update_secret_metadata(
         merged_meta = {**existing_meta, **new_meta}
 
         secret.meta = merged_meta
+        # R-2909 item 4: the metadata write is the one door in this file that
+        # owns its transaction, so the row rides it exactly as the ruled posture
+        # asks (same transaction, complete-or-nothing): a metadata merge that
+        # dies on the commit loses its audit row and its change together, and a
+        # landed change cannot lose its row. Names only — the changed FIELD
+        # names, never their values (same table discipline as ROLE_UPDATED at
+        # routes/roles.py:301). Field names are already visible to any caller who
+        # can list the secret, so the row adds no exposure the response lacks.
+        audit_lifecycle(
+            db,
+            STORE_METADATA_UPDATED,
+            user_info["user_id"],
+            {
+                "outcome": "updated",
+                "secret_id": int(secret.id),
+                "secret_key": secret.key,
+                "changed_fields": sorted(new_meta),
+                "endpoint": "/api/v1/secrets/{key}/metadata",
+            },
+        )
         db.commit()
 
         return SecretCreateResponse(

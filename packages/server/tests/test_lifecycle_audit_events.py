@@ -79,6 +79,13 @@ LIFECYCLE_EVENT_STRINGS = [
     # #602 AC1 shape (a): the human-unmask disclosure row (value-free — which
     # key, who, when; never the value). Rides the elevation burn's transaction.
     "secret_value_disclosed",
+    # R-2909 item 4 (refs #310): the four WRITE doors of the same object. Added
+    # to this list so the two pins above cover them — the strings may exist only
+    # in the helper, and routes/secrets.py must keep naming them through it.
+    "secret_created",
+    "secret_replaced",
+    "secret_metadata_updated",
+    "secret_deleted",
 ]
 
 
