@@ -87,11 +87,11 @@ What the listener DOES have is a post-handshake accept gate
 `packages/executor/src/executor/relay_listener.py:550`). Read it precisely, because it is not
 a peer check: it consults the ONE answer this daemon holds about **itself** —
 `DaemonState.revoked` and `revocation_answered`
-(`DaemonState.__init__`, `packages/executor/src/executor/daemon.py:249`,
-`packages/executor/src/executor/daemon.py:255`)
-as written by `ExecutorDaemon._main_loop` (`packages/executor/src/executor/daemon.py:2168`,
-`packages/executor/src/executor/daemon.py:2180`, and the consecutive-failure cutoff at
-`packages/executor/src/executor/daemon.py:2204`). So it refuses every new connection when THIS
+(`DaemonState.__init__`, `packages/executor/src/executor/daemon.py:250`,
+`packages/executor/src/executor/daemon.py:256`)
+as written by `ExecutorDaemon._main_loop` (`packages/executor/src/executor/daemon.py:2209`,
+`packages/executor/src/executor/daemon.py:2221`, and the consecutive-failure cutoff at
+`packages/executor/src/executor/daemon.py:2245`). So it refuses every new connection when THIS
 executor has been revoked or has received no revocation answer since boot; it holds no copy of
 any list and does no serial or identity matching of the peer in front of it **at this gate** — and its own
 contract comment says why — at `:8443` the peer is the core's relay-client credential, which
@@ -210,7 +210,7 @@ carries `next_update = now + 1 hour` (`packages/server/src/server/ca.py:769`, an
 on the admin sibling at `packages/server/src/server/ca.py:1475`), while the listener's published
 context is rebuilt only by `RelayListener.reload_ssl_context`
 (`packages/executor/src/executor/relay_listener.py:774`) whose one production caller is the
-daemon's rotation arm (`packages/executor/src/executor/daemon.py:2149`) — a 30-day cadence
+daemon's rotation arm (`packages/executor/src/executor/daemon.py:2190`) — a 30-day cadence
 (`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:47`). A list baked in at boot is
 therefore certain to lapse inside an hour, and under the ruled fail-closed posture a lapsed list
 means the executor refusing every new relay connection. That is a fleet-wide availability trade,
@@ -225,7 +225,7 @@ refuses a revoked EXECUTOR serial per request, on the inbound plane, in
 cooperatively on a bounded outage rather than serving on an unanswered question —
 `max_revocation_failures`, default 3
 (`packages/executor/src/executor/config.py`, `CertificateRotationConfig.max_revocation_failures`), fed at
-`packages/executor/src/executor/daemon.py:2204`. The first of those is an application-plane gate on
+`packages/executor/src/executor/daemon.py:2245`. The first of those is an application-plane gate on
 the core's inbound side, not a peer refusal at `:8443`, and the second is a cooperative stop; neither
 is claimed as peer revocation here. **They are the controls that were load-bearing while the peer arms
 were being built, and they still are — the door's own refusals now sit beside them, not instead of
@@ -241,7 +241,7 @@ assumption is not:
   (`packages/executor/src/executor/relay_listener.py:116`). It fails closed when the
   list is empty — the listener does not bind at all
   (`packages/executor/src/executor/relay_listener.py:718-723`, and the same guard in
-  `ExecutorDaemon.start` at `packages/executor/src/executor/daemon.py:1947`). Caveat that
+  `ExecutorDaemon.start` at `packages/executor/src/executor/daemon.py:1948`). Caveat that
   matters: the executor installer
   **rewrites** this key on every run (`relay_client_ids = ["${CORE_HOSTNAME}-relay"]`,
   `install-venya-executor.sh:729`), so a hand-edit there is not durable across a re-run — the
@@ -417,7 +417,7 @@ same commitment. A future seat must not anchor the owner's 60 minutes here.
 **The executor's own stop, which is the operational plane.** A revoked executor
 that is still reporting to its core stops itself on its next heartbeat — the shipped cadence is a
 beat every 30 seconds: `ExecutorDaemon._main_loop`,
-`packages/executor/src/executor/daemon.py:2219` (`self._shutdown_event.wait(30.0)`, heartbeat and
+`packages/executor/src/executor/daemon.py:2260` (`self._shutdown_event.wait(30.0)`, heartbeat and
 revocation poll on the same tick); the core's heartbeat route states the same cadence ("Executors
 POST to this endpoint every 30s", `packages/server/src/server/routes/executors.py`, `heartbeat`),
 and server-side changes reach each executor "on each executor's next heartbeat (~30 s)"
@@ -539,7 +539,7 @@ Two facts belong in the same breath, because each one is the reason the other ma
   `/api/v1/health` (`_check_ca`, `packages/server/src/server/routes/health.py:78`) asks only
   whether the CA loads. What exists is a loud failure at the end: the executor's CA probe refuses
   an expired anchor by name (`"CA certificate expired"`, inside `validate_ca_certificate`,
-  `packages/executor/src/executor/daemon.py:1404`), and the core's own verification fails closed
+  `packages/executor/src/executor/daemon.py:1405`), and the core's own verification fails closed
   past `not_valid_after` (inside `_verify_forwarded_cert`, the two lifetime checks at
   `packages/server/src/server/middleware/auth.py:203-206`). So the failure is a named refusal, not
   silent acceptance — but it arrives on the day, with no runway.
