@@ -40,6 +40,22 @@ never received is never recorded and one that happened is never lost. An
 auditor asking "who read a value, when, of which key?" therefore gets an
 answer on both arms of the same route — the denial and the disclosure.
 
+## The secret's lifecycle is written too
+
+Reading a value is not the only act worth reconstructing. Storing a secret,
+replacing one under the same key, changing its metadata and deleting it each
+write their own event — `secret_created`, `secret_replaced`,
+`secret_metadata_updated`, `secret_deleted` — with the actor, the secret id and
+key, the roles in scope and the timestamp. As on the read side, the row is
+about the ACT: never the value, never a digest of it, and never a metadata
+value either — the metadata row records which fields changed, not what they
+now say.
+
+Each row is written only when the action landed. A store refused because it
+scoped into a role the caller does not hold, a delete of a key the caller
+cannot see, and a metadata edit that died on its own commit all leave nothing
+behind, so the log never describes a change that did not happen.
+
 ## Elevation issuance is refused to auditor-only callers
 
 Both elevation-assert endpoints (CLI/API and browser) return 403 — logged

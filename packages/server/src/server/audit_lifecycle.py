@@ -93,6 +93,18 @@ EXECUTOR_ENROLLMENT_TOKEN_CREATED = "executor_enrollment_token_created"  # nosec
 # generated register) and a fake finding in .detect-secrets-baseline, for a
 # string that is not a credential. The auditor-facing value below is what the
 # log stores.
+# Beta3 gate item 4 (R-2909, refs #310): the secret's own lifecycle joins the
+# vocabulary. The disclosure row above says a VALUE left the server; these four
+# say the row was CREATED, REPLACED, TAGGED or REMOVED, so a log can
+# reconstruct what ran against which credential after the fact. Field table is
+# value-free by construction, same as VALUE_DISCLOSED: the row names the actor,
+# the secret id and key, the roles in scope and the endpoint — never the value,
+# never ciphertext, never a nonce or a wrapped DEK.
+# Constant names follow the note above: no SECRET_/TOKEN_ keyword in the NAME.
+STORE_CREATED = "secret_created"
+STORE_REPLACED = "secret_replaced"
+STORE_METADATA_UPDATED = "secret_metadata_updated"
+STORE_DELETED = "secret_deleted"
 VALUE_DISCLOSED = "secret_value_disclosed"
 
 
@@ -159,6 +171,10 @@ def audit_lifecycle(
         ENROLLMENT_TOKEN_REVOKED,
         COMMAND_POLICY_CHANGED,
         EXECUTOR_ENROLLMENT_TOKEN_CREATED,
+        STORE_CREATED,
+        STORE_REPLACED,
+        STORE_METADATA_UPDATED,
+        STORE_DELETED,
         VALUE_DISCLOSED,
     }
     if event_type not in known:
@@ -172,6 +188,42 @@ def audit_lifecycle(
             timestamp=datetime.now(UTC),
         )
     )
+
+
+def record_secret_lifecycle(
+    request: Any,
+    event_type: str,
+    actor_user_id: str | None,
+    fields: dict[str, Any],
+) -> None:
+    """Best-effort lifecycle row for a secret write whose action already committed.
+
+    WHY THIS SHAPE. The store, replace and delete doors do their work inside
+    `core.put()` / `core.delete()`, which open a session of their own, commit it
+    and close it before the route ever sees a result. Those three actions
+    therefore have NO open transaction for the helper to ride — the
+    same-transaction posture of `audit_lifecycle` binds a site that commits, and
+    these sites do not. This is the established exception, the
+    `record_login_failure` / `_record_relay_timeout_audit` idiom: commit in a
+    session of our own, swallow and LOG any failure, because an audit-write
+    failure must never turn a completed write into an error the caller cannot
+    reason about (and must never be mistaken for the write having failed).
+
+    A failure here is LOUD in the server log by design; a silently missing row
+    is the defect class this writer exists to close.
+    """
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        return
+    db = backend.get_session()
+    try:
+        audit_lifecycle(db, event_type, actor_user_id, fields)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("secret lifecycle audit write failed (%s)", event_type)
+    finally:
+        db.close()
 
 
 def record_login_failure(request: Any, mode: str, reason: str) -> None:
