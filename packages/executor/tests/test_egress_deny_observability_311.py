@@ -350,6 +350,71 @@ class TestCreateSummary:
         assert "web-server-3" not in caplog.text
 
 
+class TestTheAllowlistIsOnlyEverRead:
+    """Spec 0a (the `173.255.203.167` fixture constraint), in executable form.
+
+    The estate's live-egress case exists because of one hand-appended line in one
+    operator's file. Every path this leg adds must READ that file and change
+    nothing about it: not its bytes, not its modification time, not the order of
+    its entries, not the position of a line somebody added by hand.
+    """
+
+    BODY = "# Venya Egress Allowlist\n# a comment\n\nweb-server-3\n198.51.100.7\n"
+
+    def test_reading_for_every_new_surface_leaves_the_file_untouched(self, tmp_path: Path):
+        path = tmp_path / "egress-allowlist.txt"
+        path.write_text(self.BODY)
+        before = (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_mode)
+        egress = EgressFilter(allowlist_path=path, dns_resolver="192.0.2.53")
+
+        egress.describe()  # the boot and create summary lines
+        egress.read_allowlist()  # the warning path
+        hosts = egress.get_allowed_hosts()  # what the policy is built from
+        egress_deny_notice(KEX_STDERR, returncode=255, command="ssh db.internal.example", egress=egress)
+
+        assert (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_mode) == before
+        # File order survives, comments and blanks drop out, the resolver is added
+        # at the END: nothing is re-defaulted, re-sorted or rewritten.
+        assert hosts == ["web-server-3", "198.51.100.7", "192.0.2.53"]
+
+    def test_the_format_is_unchanged_so_nothing_needs_migrating(self, tmp_path: Path):
+        """A hand-appended entry above and below the comment block is still read.
+
+        The parse this leg inherits is the parse this leg ships: one entry per
+        line, `#` comments, blanks ignored. If that ever changes, a migration
+        carries the entries and this cell is where the old shape is caught.
+        """
+        path = tmp_path / "egress-allowlist.txt"
+        path.write_text("198.51.100.7\n# added by hand\n203.0.113.0/24\n   \nweb-server-3\n")
+        egress = EgressFilter(allowlist_path=path, dns_resolver="192.0.2.53")
+        assert egress.read_allowlist() == ["198.51.100.7", "203.0.113.0/24", "web-server-3"]
+        assert "entries=3" in egress.describe()
+
+    def test_no_new_surface_creates_an_absent_allowlist(self, tmp_path: Path):
+        """The other half of 0a: a fix that DEFAULTS the file would be as destructive
+        as one that rewrites it, because the installer's teaching-empty default is
+        what an operator adds their line to. Absent must stay absent.
+        """
+        path = tmp_path / "never-created.txt"
+        egress = EgressFilter(allowlist_path=path, dns_resolver="192.0.2.53")
+        egress.describe()
+        egress.read_allowlist()
+        egress.get_allowed_hosts()
+        egress_deny_notice(KEX_STDERR, returncode=255, command="ssh db.internal.example", egress=egress)
+        assert not path.exists()
+
+    def test_a_denied_destination_never_writes_the_file_it_just_read(self, tmp_path: Path):
+        path = tmp_path / "egress-allowlist.txt"
+        path.write_text(self.BODY)
+        before = path.read_bytes()
+        strategy = SbxStrategy(dns_resolver="192.0.2.53", egress_allowlist_path=str(path))
+        strategy._sandbox_name = "venya-fixture"
+        completed = CompletedProcess(args=["sbx", "exec"], returncode=255, stdout=b"", stderr=KEX_STDERR.encode())
+        with patch("subprocess.run", return_value=completed):
+            strategy.execute_command("ssh db.internal.example")
+        assert path.read_bytes() == before
+
+
 class TestCallerSeesTheDenial:
     """The notice is a product-visible act: it lands in the stream the agent reads,
     not only in the executor's journal. It is authored where the sandbox result is
