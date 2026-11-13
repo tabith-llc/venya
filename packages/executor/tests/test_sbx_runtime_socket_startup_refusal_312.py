@@ -111,6 +111,42 @@ class TestProbeCommand:
             assert forbidden not in body, f"probe body contains {forbidden!r}"
         assert body.count("id -Gn") == 1
 
+    def test_emitted_command_distinguishes_writable_from_present_for_real(self, tmp_path):
+        """THE cell the others depend on: it runs the command the guard actually
+        emits, against a real filesystem, with the four absolute paths swapped
+        for fixtures. Every other cell here feeds canned stdout to the parser, so
+        none of them can notice the EMITTED question asking about something else.
+        Measured: without this cell, mutating the `-w` test to a never-true left
+        all 19 others green (refs #312 item 3a).
+        """
+        writable = tmp_path / "runtime.sock"
+        writable.write_text("")
+        writable.chmod(0o660)
+        present_only = tmp_path / "read-only.bin"
+        present_only.write_text("")
+        present_only.chmod(0o444)
+        absent = tmp_path / "absent.sock"
+        also_absent = tmp_path / "also-absent.sock"
+
+        body = sbx.rt_probe_argv()[2]
+        mapping = dict(
+            zip(sbx.RUNTIME_SOCKET_PATHS, [str(writable), str(present_only), str(absent), str(also_absent)])
+        )
+        for path in mapping:
+            assert path in body, f"{path} is not in the emitted command"
+        # Longest first: /run/containerd/containerd.sock is a substring of
+        # /var/run/containerd/containerd.sock, so a naive pass corrupts the pair.
+        for path, repl in sorted(mapping.items(), key=lambda kv: -len(kv[0])):
+            body = body.replace(path, repl)
+        for path in mapping:
+            assert path not in body, f"{path} survived the swap, so a check ran against the host"
+
+        run = subprocess.run(["sh", "-c", body], capture_output=True, text=True, check=True)
+        parsed = sbx.parse_runtime_probe(run.stdout)
+        assert parsed.writable == [str(writable)], run.stdout
+        assert parsed.present == [str(present_only)], run.stdout
+        assert parsed.groups == run.stdout.splitlines()[0].split()
+
     def test_probe_timeout_default_and_env_override(self, monkeypatch):
         monkeypatch.delenv("VENYA_SBX_RT_PROBE_TIMEOUT", raising=False)
         assert sbx.rt_probe_timeout() == sbx.SBX_RT_PROBE_TIMEOUT
