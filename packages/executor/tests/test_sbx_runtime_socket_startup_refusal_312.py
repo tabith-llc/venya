@@ -129,9 +129,7 @@ class TestProbeCommand:
         also_absent = tmp_path / "also-absent.sock"
 
         body = sbx.rt_probe_argv()[2]
-        mapping = dict(
-            zip(sbx.RUNTIME_SOCKET_PATHS, [str(writable), str(present_only), str(absent), str(also_absent)])
-        )
+        mapping = dict(zip(sbx.RUNTIME_SOCKET_PATHS, [str(writable), str(present_only), str(absent), str(also_absent)]))
         for path in mapping:
             assert path in body, f"{path} is not in the emitted command"
         # Longest first: /run/containerd/containerd.sock is a substring of
@@ -341,3 +339,100 @@ class TestBootRefusalBeforeRegistration:
             with pytest.raises(RuntimeError):
                 d.start()
         assert order == ["sweep", "reap", "probe"], order
+
+
+class TestNulledCapRefusesByName:
+    """A nulled `sandbox_memory_mb` must cost the operator a NAMED refusal, not a traceback.
+
+    `ExecutorConfig.sandbox_memory_mb` is `int | None` on purpose (#578: the null
+    keeps the create-time refusal reachable, and `config.py` early-returns rather
+    than coercing it), and `daemon.start()` hands that field straight to this
+    probe. Before this class the probe declared `memory_mb: int` and formatted it
+    with `int(memory_mb)`, so the null reached a callee that could not hold it and
+    boot died with a bare `TypeError` inside the guard block — before registration,
+    which is the right place, but with the wrong face: root §13 asks a customer
+    machine to refuse by name. Every cell here drives the REAL callee with patched
+    `subprocess.run`, so nothing touches a sandbox, a guest or an estate box (R-2911).
+    """
+
+    def test_a_nulled_cap_refuses_by_name_never_by_typeerror(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
+        calls: list = []
+        with patch.object(sbx.subprocess, "run", fake_sbx(calls)):
+            with pytest.raises(sbx.SbxRuntimeExposureError) as exc:
+                sbx.require_runtime_isolated_sandbox(memory_mb=None)
+        msg = str(exc.value)
+        assert "sandbox_memory_mb is not configured" in msg  # the field, by name
+        assert "VENYA_EXECUTOR_SANDBOX_MEMORY_MB" in msg  # the knob to set it, by name
+        assert "refs #312" in msg and "#578" in msg  # why the null is kept, and what refuses
+        assert "TypeError" not in msg
+        # The refusal comes BEFORE the sandbox: no create, no exec, no rm, no directory.
+        assert calls == [], f"the probe reached sbx with a null cap: {calls}"
+        assert not (tmp_path / "wsbase").exists(), "a workspace base was made for a probe that never ran"
+
+    def test_an_int_cap_still_reaches_the_probe_argv(self, tmp_path, monkeypatch):
+        """PAIRED NEGATIVE: the new refusal fires on the null and ONLY on the null.
+
+        A guard that raised for every value would pass the cell above just as
+        well, so this one drives the same callee with a real cap and pins the
+        `--memory` face the vendor actually receives.
+        """
+        monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
+        calls: list = []
+        with patch.object(sbx.subprocess, "run", fake_sbx(calls, probe_stdout=CLEAN_STDOUT)):
+            face = sbx.require_runtime_isolated_sandbox(memory_mb=512)
+        assert "no writable" in face or "not writable" in face, face
+        create = calls[0]
+        assert create[:2] == ["sbx", "create"]
+        assert create[create.index("--memory") + 1] == "512m", create
+
+    def test_boot_refuses_before_registration_on_a_nulled_cap(self, config, tmp_path, monkeypatch):
+        """THE customer face: `venya executor start` with the knob nulled exits 1 on a name.
+
+        Not a stubbed guard — the real callee runs, so this is the cell that was
+        a `TypeError` traceback before the fix. Registration must stay untouched
+        (the enrollment token is one-shot, R-2910) and the exit must be the
+        shipped named refusal, not a Python crash.
+        """
+        config.sandbox_memory_mb = None
+        monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
+        d = _daemon(config)
+        calls: list = []
+        with (
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            patch.object(sbx.subprocess, "run", fake_sbx(calls)),
+            patch("executor.daemon.reap_orphan_sandboxes", return_value=0),
+            patch("executor.daemon.sweep_workspace_base", return_value=0),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                d.start()
+        assert exc.value.code == 1, "a nulled cap did not take the shipped refusal exit"
+        d.cert_manager.register.assert_not_called()
+        assert calls == [], f"boot reached sbx create with a null cap: {calls}"
+
+    def test_boot_walks_past_the_guard_with_the_shipped_default(self, config, tmp_path, monkeypatch):
+        """PAIRED NEGATIVE at the boot face: the shipped 1024 MiB default still boots.
+
+        This is what stops the fix from being read as 'null and default both
+        refuse'. `SANDBOX_MEMORY_DEFAULT_MB` is the config default, so an operator
+        who never touches the knob must never meet the new message.
+        """
+        from executor.config import SANDBOX_MEMORY_DEFAULT_MB
+
+        assert config.sandbox_memory_mb == SANDBOX_MEMORY_DEFAULT_MB  # the field, unmodified
+        monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
+        d = _daemon(config)
+        calls: list = []
+        sentinel = RuntimeError("past-the-guard")
+        d.cert_manager.register.side_effect = sentinel
+        with (
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            patch.object(sbx.subprocess, "run", fake_sbx(calls, probe_stdout=CLEAN_STDOUT)),
+            patch("executor.daemon.reap_orphan_sandboxes", return_value=0),
+            patch("executor.daemon.sweep_workspace_base", return_value=0),
+        ):
+            with pytest.raises(RuntimeError) as exc:
+                d.start()
+        assert exc.value is sentinel, "boot stopped at a guard that had nothing to refuse"
+        create = calls[0]
+        assert create[create.index("--memory") + 1] == f"{SANDBOX_MEMORY_DEFAULT_MB}m", create
