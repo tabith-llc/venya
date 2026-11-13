@@ -1714,6 +1714,70 @@ class TestShapeMetadata:
         assert len(data["metadata_warnings"]) == 1
         assert "CUSTOM shape" in data["metadata_warnings"][0]
 
+    # --- R-2909 item 8: a usage template is one line, at both write doors ---
+    #
+    # The field is a command template the server prints and the MCP tells an agent
+    # to follow, so a stored line break renders a command nobody can run as printed.
+    # Four cases, each through create AND PATCH, plus the accept twin below. The
+    # table is a class tuple, not a list: a mutable class default trips RUF012,
+    # and a module constant here would shift the line numbers the secret baseline
+    # already records for this file.
+
+    USAGE_LINE_BREAK_CASES = (
+        ("newline mid-template", "run --as {user} \n restart httpd"),
+        ("newline trailing", "restart httpd\n"),
+        ("crlf mid-template", "run --as {user}\r\nrestart httpd"),
+        ("bare carriage return", "restart httpd\r"),
+    )
+
+    def test_usage_line_break_rejected_400_at_create(self):
+        for label, template in self.USAGE_LINE_BREAK_CASES:
+            resp = self._store({"shape": "ssh-password", "usage": template})
+            assert resp.status_code == 400, label
+            detail = resp.json()["detail"]
+            assert "single line" in detail, label
+            # the refusal names the position, never the stored template
+            assert template not in detail, label
+
+    def test_usage_line_break_rejected_before_persistence(self):
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "twoliner",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {"shape": "ssh-password", "usage": "restart httpd\nnginx"},
+            },
+        )
+        assert resp.status_code == 400
+        core.put.assert_not_called()
+
+    def test_usage_line_break_rejected_400_at_patch(self):
+        for label, template in self.USAGE_LINE_BREAK_CASES:
+            client, mock_secret, mock_session = self._patch_client()
+            resp = client.patch(
+                "/api/v1/secrets/db-password/metadata",
+                json={"metadata": {"usage": template}},
+            )
+            assert resp.status_code == 400, label
+            assert "single line" in resp.json()["detail"], label
+            # enforce-before-mutate on the PATCH door as well
+            assert mock_secret.meta == {"executor": "web-server-3"}, label
+            mock_session.commit.assert_not_called()
+
+    def test_usage_single_line_accepted_twin(self):
+        # the same templates with the break replaced by a space stay accepted — a
+        # rule that reddens this set is a false refusal.
+        for label, template in self.USAGE_LINE_BREAK_CASES:
+            single_line = template.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").rstrip()
+            resp = self._store({"shape": "ssh-password", "usage": single_line})
+            assert resp.status_code == 201, label
+            assert resp.json()["metadata_warnings"] == [], label
+
 
 class TestUnmaskAuditorValueDeny:
     """Auditor-role rework (rulings 1b/1c-i): auditor-only callers are
