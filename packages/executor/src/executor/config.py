@@ -514,6 +514,13 @@ class ExecutorConfig(BaseSettings):
     # write it back, or the report of a conflict would itself become a config key.
     _precedence_conflicts: list[str] = PrivateAttr(default_factory=list)
 
+    # The keys the loaded file actually carried, with the file's own path. Private for the
+    # same reason as the conflict list above: ``save_file`` dumps the model, and neither of
+    # these is a setting. They answer "where did this live value come from?", which is a
+    # question a startup refusal has to be able to name (report 311).
+    _file_keys: frozenset[str] = PrivateAttr(default_factory=frozenset)
+    _file_path: Path | None = PrivateAttr(default=None)
+
     @model_validator(mode="after")
     def _sandbox_memory_within_vendor_bounds(self) -> ExecutorConfig:
         """#578 fail-closed at config load: an out-of-band cap is a config error,
@@ -584,7 +591,23 @@ class ExecutorConfig(BaseSettings):
             file_data=data,
             env_data=EnvSettingsSource(cls)(),
         )
+        config._file_keys = frozenset(_leaves(data))
+        config._file_path = path
         return config
+
+    def value_source(self, key: str) -> str:
+        """Name the door that supplied this live value, in the ruled order (#598).
+
+        A refusal that quotes a setting has to say where it came from, because
+        `file > env > default` means the environment spelling can be dead and
+        still look live to whoever set it. Names and paths only — never a value.
+        """
+        if key in self._file_keys:
+            return f"the key `{key}` in {self._file_path}"
+        env_name = f"{self.model_config.get('env_prefix', '')}{key.upper()}"
+        if env_name in os.environ:
+            return f"the environment variable {env_name}"
+        return "no source carrying the key, so the field default"
 
     def precedence_conflict_notes(self) -> list[str]:
         """The #598 loud list: keys this file set that the environment also set.

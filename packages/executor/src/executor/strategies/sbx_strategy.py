@@ -33,7 +33,7 @@ from pathlib import Path
 # puts the EXEC'D helper under /usr/local/bin instead, lives beside the constant.
 from venya_contract import ASKPASS_HELPER_PATH, CONTAINER_SECRET_DIR
 
-from ..egress_filter import DEFAULT_ALLOWLIST_PATH
+from ..egress_filter import DEFAULT_ALLOWLIST_PATH, EgressFilter, egress_deny_notice
 from .base import InjectionResult, InjectionStrategy, SecretMount
 
 logger = logging.getLogger("venya.executor.strategies.sbx")
@@ -1107,6 +1107,12 @@ class SbxStrategy(InjectionStrategy):
             allowlist_path=Path(self.egress_allowlist_path),
             dns_resolver=self.dns_resolver,
         )
+        # The arm that warned nothing before (report 311): the file exists and
+        # carries entries, and the host the command wanted is not one of them. The
+        # journal gets the count at the moment the rule set is built; the caller gets
+        # the same case named by `egress_deny_notice`. Names and counts only, never
+        # file contents.
+        logger.info("Egress inputs for sandbox %s: %s", sandbox_name, egress.describe())
 
         # Run as the daemon user, never via sudo: the sbx daemon and
         # `sbx login` credentials live under the daemon user, and the
@@ -1257,6 +1263,30 @@ class SbxStrategy(InjectionStrategy):
             if env_file:
                 self._destroy_env_file(env_file)
                 self._release_fallback_dir()
+        # Report 311, R-2909 item 1: a destination the policy never admitted is
+        # refused by the sandbox network path, which completes the handshake
+        # locally and closes it — so what reached this stream was a PEER's error
+        # message about a peer that received no packet
+        # (`kex_exchange_identification: Connection closed by remote host`, with
+        # the intake file's negative control a probe of a port the operator's own
+        # log shows is blocked, failing the same way). Name the refusal as venya's
+        # own, in the stream the caller reads, and keep the same line in the
+        # journal. Nothing about the command's own output is changed: the notice is
+        # appended, and it carries a destination, a path, an entry count and a
+        # resolver address — never a value, never file contents.
+        notice = egress_deny_notice(
+            (result.stderr or b"").decode("utf-8", "replace"),
+            returncode=result.returncode,
+            command=command,
+            argv=argv,
+            egress=EgressFilter(
+                allowlist_path=Path(self.egress_allowlist_path),
+                dns_resolver=self.dns_resolver or "",
+            ),
+        )
+        if notice:
+            logger.warning("Sandbox egress denial shape for %s: %s", self._sandbox_name, notice)
+            result.stderr = (result.stderr or b"") + f"\n{notice}".encode()
         return result
 
     def remove_sandbox(self) -> int:

@@ -57,6 +57,7 @@ from .command_validator import (
     CommandValidator,
 )
 from .config import ExecutorConfig
+from .egress_filter import EgressFilter, resolver_address_problem
 from .executor import Executor
 from .key_passphrase import (
     load_private_key,
@@ -1972,6 +1973,46 @@ class ExecutorDaemon:
                 "resolvectl status or grep nameserver /etc/resolv.conf)."
             )
             raise SystemExit(1)
+        # Refuse to boot on a resolver value that names no host (report 311, R-2909
+        # item 2). The seam this closes: the sandbox runtime writes its own resolver
+        # file naming a NETWORK address (its own bridge network rather than a host), an
+        # operator
+        # copies that number out of the file the guidance above points at, and the
+        # egress rule then permits an address no resolver answers on — a hostname
+        # target dies at its consumer with an error naming neither setting. Same door
+        # shape as the two guards above: BEFORE registration, so the one-shot
+        # enrollment token is never spent on a doomed boot. Venya does not guess the
+        # network and does not accept a number that names no host.
+        resolver_problem = resolver_address_problem(self.config.dns_resolver)
+        if resolver_problem:
+            logger.error(
+                "dns_resolver=%s %s — refusing to start: the sandbox egress policy "
+                "would allow DNS to an address that is not a host. The value in use "
+                "came from %s (precedence: file > env > default, #598). Set it to the "
+                "address a resolver answers on — find yours with resolvectl status. "
+                "This daemon does not write the sandbox's resolver file, so the address "
+                "the sandbox asks and the address this policy allows are two settings "
+                "that have to match by hand.",
+                self.config.dns_resolver,
+                resolver_problem,
+                self.config.value_source("dns_resolver"),
+            )
+            raise SystemExit(1)
+        # The reconcile-or-report half, reported because which side owns the
+        # sandbox's own resolver file is an open product question (R-2909 item 2),
+        # not this door's to settle. Two lines, both names and counts, never file
+        # contents: what the inputs are, and what the sandbox is actually given.
+        egress_inputs = EgressFilter(
+            allowlist_path=Path(self.config.egress_allowlist_path),
+            dns_resolver=self.config.dns_resolver,
+        )
+        logger.info("Egress inputs at start: %s", egress_inputs.describe())
+        logger.info(
+            "The sandbox egress policy will allow DNS to %s only; venya never writes the "
+            "sandbox's own resolver file, so a hostname target resolves only when the "
+            "nameserver the runtime wrote answers AND the hostname is in the allowlist.",
+            self.config.dns_resolver,
+        )
         # refs ticket sbx-exec-env-file-noop: refuse boot on an sbx CLI below
         # the version floor — below 0.39.0 `sbx exec --env-file` is a silent
         # no-op, so secrets would never land. Checked BEFORE registration so
