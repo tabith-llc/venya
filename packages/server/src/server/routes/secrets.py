@@ -148,14 +148,15 @@ _VALUE_PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_LINE_BREAK_RE = re.compile(r"[\n\r]")
 
 
 def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
     """Validate the shape/usage convention keys. Returns user-facing warnings.
 
     Warnings are loud, never fatal (forward-compat ruling). The security half
-    RAISES 400 with an actionable message: usage templates interpolating the
-    secret value, or non-string shape/usage.
+    RAISES 400 with an actionable message: a usage template carrying a line
+    break, one interpolating the secret value, or non-string shape/usage.
     """
     warnings: list[str] = []
 
@@ -190,6 +191,21 @@ def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="'usage' metadata must be a non-empty command-template string.",
+            )
+        # R-2909 item 8: this field is a command template the server prints and an
+        # agent is told to run AS PRINTED, so it has to stay one line. Refused at
+        # authoring time, before the value-interpolation check and before either
+        # write door persists. The message names the position, never the template.
+        line_break = _LINE_BREAK_RE.search(usage)
+        if line_break:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "'usage' template must be a single line — a line break is at position "
+                    f"{line_break.start()}. Remove it, or split the intent: several commands"
+                    " in one field is not what 'usage' expresses. Point the template at a"
+                    " file-based shape or a wrapper script instead."
+                ),
             )
         m = _VALUE_PLACEHOLDER_RE.search(usage)
         if m:
