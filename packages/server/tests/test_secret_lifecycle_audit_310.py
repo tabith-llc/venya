@@ -100,6 +100,18 @@ def _build(tmp_path):
     """Real backend + real routes, zero mocked crypto and no mocked store."""
     db_path = tmp_path / "lifecycle310.db"
     engine = create_engine(f"sqlite:///{db_path}")
+
+    # The #634 interlock reads an engine built without this listener as a new
+    # FK-blind door, and it is right: the delete door under test cascades
+    # secret_roles and execution_session_secrets, so a blind engine would let a
+    # dangling link read as a clean delete. Shape from
+    # tests/test_unmask_disclosure_audit_602.py.
+    @sa_event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine)
 
