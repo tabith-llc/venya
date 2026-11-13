@@ -1506,7 +1506,12 @@ class TestDeafBootRefusal:
         d = self._daemon(cfg)
         sentinel = RuntimeError("past-the-guard")
         d.cert_manager.register.side_effect = sentinel
-        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+        with (
+            # #312 item 3a: runtime-isolation guard stubbed so this cell measures
+            # only the deaf-relay gate (own face: test_sbx_runtime_socket_startup_refusal_312.py).
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
+        ):
             with pytest.raises(RuntimeError) as exc:
                 d.start()
         assert exc.value is sentinel  # reached registration ⇒ guard passed
@@ -1534,7 +1539,12 @@ class TestDeafBootRefusal:
         d._main_loop = MagicMock()
         d.stop = MagicMock()
         d._write_pidfile = MagicMock()
-        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+        with (
+            # #312 item 3a: runtime-isolation guard stubbed so this cell measures
+            # only the relay bind path (own face: test_sbx_runtime_socket_startup_refusal_312.py).
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
+        ):
             d.start()
         assert d.state.running is True
         d._main_loop.assert_called_once()
@@ -1579,7 +1589,12 @@ class TestResolverBootRefusal:
         d = self._daemon(cfg)
         sentinel = RuntimeError("past-the-resolver-gate")
         d.cert_manager.register.side_effect = sentinel
-        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+        with (
+            # #312 item 3a: runtime-isolation guard stubbed so this cell measures
+            # only the resolver gate (own face: test_sbx_runtime_socket_startup_refusal_312.py).
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
+        ):
             with pytest.raises(RuntimeError) as exc:
                 d.start()
         assert exc.value is sentinel  # reached registration ⇒ resolver gate passed

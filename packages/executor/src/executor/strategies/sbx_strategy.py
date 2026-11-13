@@ -24,6 +24,7 @@ import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 # `CONTAINER_SECRET_DIR` (where an injected secret appears inside the sandbox) is
 # defined ONCE in the frozen wire contract and imported here — the server wires the
@@ -282,6 +283,260 @@ def require_supported_sbx(timeout: float = 10.0) -> str:
             "once the CLI is >= 0.39.0. (refs ticket sbx-exec-env-file-noop)"
         )
     return (result.stdout + result.stderr).strip()
+
+
+# ---------------------------------------------------------------------------
+# refs #312 item 3a (beta3 gate): refuse to boot an executor whose sandbox can
+# reach a container runtime.
+#
+# Measured on a live estate executor 2026-11-12 (`reports/312`, fleet face): the
+# sandbox's OWN filesystem view carried `/var/run/docker.sock` mode
+# `srw-rw---- root docker`, and `id -Gn` inside that sandbox answered
+# `agent sudo docker`. `create_sandbox` below passes only
+# `--name --memory shell <workspace>` — zero hits in this file for a group, user,
+# socket or capability flag — so whether a sandbox can reach a runtime is decided
+# entirely by the vendor build (`docker-sbx`), never by venya.
+#
+# Why a socket is a different class from a bad mount: the command inside the
+# sandbox can ask that runtime to create a SECOND container with the host bind
+# mounted, and the isolation the sandbox exists to provide ends at that socket.
+# venya cannot drop what it never added, so the half it CAN do is refuse to
+# pretend: ask one throwaway sandbox what it can write, and refuse to boot on an
+# affirmative answer.
+# ---------------------------------------------------------------------------
+
+#: Socket paths whose presence means "whoever is inside this sandbox can talk to
+#: a container runtime". Both spellings of the docker socket because images
+#: mount one or the other; containerd because a containerd socket grants the
+#: same power with a different name.
+RUNTIME_SOCKET_PATHS: tuple[str, ...] = (
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+    "/run/containerd/containerd.sock",
+    "/var/run/containerd/containerd.sock",
+)
+
+#: Supplementary groups that are the usual owners of one of those sockets. Used
+#: for the WORDING of the refusal, never as the criterion: GIDs are site-specific
+#: (this estate's docker group is 1001, most images carry 999) and a group with no
+#: socket behind it grants nothing. The criterion is `-w` inside the sandbox.
+RUNTIME_EXPOSED_GROUPS: frozenset[str] = frozenset({"docker", "sudo", "wheel", "root"})
+
+#: The probe creates, execs in, and removes ONE throwaway sandbox at boot. Bound
+#: far below SBX_CREATE_TIMEOUT (240 s) — a boot must not sit on a doomed create
+#: for four minutes — and far above a warm container start. Override per host
+#: with VENYA_SBX_RT_PROBE_TIMEOUT, the same env-at-call-time idiom as
+#: sbx_command_timeout(), so a unit cell can inject a short bound.
+SBX_RT_PROBE_TIMEOUT = 60.0
+
+#: Marker prefix so probe output can never be confused with sandbox chatter.
+_RT_TAG = "VENYA_RT"
+
+
+class SbxRuntimeExposureError(RuntimeError):
+    """The sandbox can write a container-runtime socket, or venya cannot prove
+    that it cannot. Both are refusals: the claim this guard makes is about
+    reachability, and an unreadable answer is not evidence of isolation."""
+
+
+class RuntimeProbe(NamedTuple):
+    """What one throwaway sandbox reported about itself.
+
+    groups:   the names `id -Gn` printed inside the sandbox (`[]` if it printed
+              only numbers, which is why groups are wording and not the test).
+    writable: runtime sockets the sandbox user could OPEN FOR WRITING.
+    present:  runtime sockets that exist but are NOT writable from inside.
+    """
+
+    groups: list[str]
+    writable: list[str]
+    present: list[str]
+
+    @property
+    def exposed(self) -> bool:
+        return bool(self.writable)
+
+
+def rt_probe_timeout() -> float:
+    """Probe bound, read at call time (VENYA_SBX_RT_PROBE_TIMEOUT, else 60 s).
+
+    An unusable value falls back to the default rather than disabling the guard:
+    a typo in a timeout must never read as "skip the check".
+    """
+    raw = os.environ.get("VENYA_SBX_RT_PROBE_TIMEOUT", "")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return SBX_RT_PROBE_TIMEOUT
+    return value if value > 0 else SBX_RT_PROBE_TIMEOUT
+
+
+def rt_probe_argv() -> list[str]:
+    """The one shell command the probe execs inside the throwaway sandbox.
+
+    Read-only by construction: `id`, and four `[ -e ]` / `[ -w ]` tests. No
+    write, no network, no state, nothing that could consume or alter anything.
+    """
+    tests = "; ".join(
+        f'if [ -e "{p}" ]; then if [ -w "{p}" ]; then echo "{_RT_TAG} W {p}"; '
+        f'else echo "{_RT_TAG} P {p}"; fi; fi'
+        for p in RUNTIME_SOCKET_PATHS
+    )
+    return ["sh", "-c", f"id -Gn; {tests}"]
+
+
+def parse_runtime_probe(stdout: str) -> RuntimeProbe:
+    """Parse probe stdout; raise SbxRuntimeExposureError when it is unreadable.
+
+    "Unreadable is a refusal" is the rule the sbx version floor already uses
+    (require_supported_sbx treats output it cannot parse as a boot refusal), for
+    the same reason: a guard that passes on noise is not armed.
+    """
+    groups: list[str] = []
+    writable: list[str] = []
+    present: list[str] = []
+    saw_marker = False
+    for raw_line in (stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(_RT_TAG + " W "):
+            saw_marker = True
+            writable.append(line[len(_RT_TAG) + 3 :].strip())
+        elif line.startswith(_RT_TAG + " P "):
+            saw_marker = True
+            present.append(line[len(_RT_TAG) + 3 :].strip())
+        elif not groups and not saw_marker and all(re.fullmatch(r"[A-Za-z0-9._-]+", t) for t in line.split()):
+            groups = line.split()  # the `id -Gn` line, first line of output
+        else:
+            raise SbxRuntimeExposureError(
+                f"cannot read the sandbox runtime probe output (unexpected line {line!r}) — "
+                "refusing to boot rather than call unreadable output proof of isolation"
+            )
+    if not groups and not saw_marker:
+        raise SbxRuntimeExposureError(
+            "the sandbox runtime probe produced no parsable output — refusing to boot "
+            "rather than treat silence as proof of isolation"
+        )
+    return RuntimeProbe(groups=groups, writable=writable, present=present)
+
+
+def require_runtime_isolated_sandbox(memory_mb: int, timeout: float | None = None) -> str:
+    """Create one throwaway sandbox, ask it what it can reach, refuse on a yes.
+
+    Returns a short human-readable face for the INFO log when the sandbox can
+    reach no runtime socket. Raises SbxRuntimeExposureError when it can, when the
+    probe cannot be run or completed, or when its answer cannot be read.
+
+    Named `venya-rt-probe-<pid>` on purpose: the boot reap in daemon.start()
+    collects every `venya-*` sandbox as residue, so a probe leaked by a kill
+    mid-flight is collected by the next boot rather than orphaned forever.
+    """
+    bound = float(timeout) if timeout else rt_probe_timeout()
+    name = f"venya-rt-probe-{os.getpid()}"
+    workspace: str | None = None
+    created = False
+    try:
+        os.makedirs(WORKSPACE_BASE, mode=0o700, exist_ok=True)
+        workspace = tempfile.mkdtemp(prefix="rtprobe_", dir=WORKSPACE_BASE)
+        create = [
+            "sbx",
+            "create",
+            "--name",
+            name,
+            "--memory",
+            f"{int(memory_mb)}m",
+            "shell",
+            workspace,
+        ]
+        result = subprocess.run(  # nosec
+            create,
+            capture_output=True,
+            text=True,
+            timeout=bound,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            raise SbxRuntimeExposureError(
+                "cannot verify sandbox runtime isolation — the throwaway probe sandbox "
+                f"could not be created (sbx create rc={result.returncode}: "
+                f"{(result.stderr or '').strip()[:300]!r}). The executor starts once the "
+                "vendor sandbox can be created; refusing to boot is deliberate, because "
+                "an unanswerable question is not an answer (refs #312 item 3a)."
+            )
+        created = True
+        probe = subprocess.run(  # nosec
+            ["sbx", "exec", name, *rt_probe_argv()],
+            capture_output=True,
+            text=True,
+            timeout=bound,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        parsed = parse_runtime_probe(probe.stdout)
+        if parsed.exposed:
+            groups = " ".join(parsed.groups) or "numeric gids only, no names"
+            risky = sorted(set(g.lower() for g in parsed.groups) & set(RUNTIME_EXPOSED_GROUPS))
+            raise SbxRuntimeExposureError(
+                "the sandbox can reach a container runtime — refusing to start. Inside a "
+                f"sandbox created by this executor, {[p for p in parsed.writable]} is "
+                f"writable by the sandbox user (groups: {groups}"
+                + (f", including {', '.join(risky)}" if risky else "")
+                + "). Whoever runs a command here can ask that runtime to create another "
+                "container with the host mounted, which ends the isolation the sandbox "
+                "exists to provide. venya passes no group, user or socket flag to `sbx "
+                "create`, so the fix is in the vendor sandbox configuration "
+                "(docker-sbx): do not mount a runtime socket into the sandbox, and drop "
+                "the docker/sudo supplementary groups. The executor starts once the "
+                "sandbox reports no writable runtime socket (refs #312 item 3a)."
+            )
+        if parsed.present:
+            logger.warning(
+                "runtime socket(s) %s exist in the sandbox view but are NOT writable by "
+                "the sandbox user (groups: %s) — starting.",
+                ", ".join(parsed.present),
+                " ".join(parsed.groups) or "numeric gids only",
+            )
+        return (
+            f"no writable runtime socket in the sandbox view "
+            f"(groups: {' '.join(parsed.groups) or 'numeric gids only'}"
+            + (f"; present but not writable: {', '.join(parsed.present)}" if parsed.present else "")
+            + ")"
+        )
+    except SbxRuntimeExposureError:
+        raise
+    except subprocess.TimeoutExpired as exc:
+        raise SbxRuntimeExposureError(
+            f"cannot verify sandbox runtime isolation — the probe did not finish within "
+            f"{bound:g} s (VENYA_SBX_RT_PROBE_TIMEOUT, default {SBX_RT_PROBE_TIMEOUT:g}) "
+            f"during {exc.cmd if isinstance(exc.cmd, str) else 'the sbx probe'}; refusing to "
+            "boot on an unanswered question (refs #312 item 3a)."
+        ) from exc
+    except OSError as exc:
+        raise SbxRuntimeExposureError(
+            "cannot verify sandbox runtime isolation — the sbx probe could not be run "
+            f"({exc}); install/upgrade the vendor package docker-sbx and the executor "
+            "starts once the question can be answered (refs #312 item 3a)."
+        ) from exc
+    finally:
+        if created:
+            try:
+                subprocess.run(  # nosec
+                    ["sbx", "rm", "--force", name],
+                    capture_output=True,
+                    text=True,
+                    timeout=SBX_REAP_COMMAND_TIMEOUT,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                logger.warning(
+                    "probe sandbox %s was not removed (%s) — the boot reap collects every "
+                    "venya-* sandbox as residue, so the next boot takes it (#474)", name, exc
+                )
+        if workspace:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 # Server-issued secret ids land in path joins (host tmpfs file name and the

@@ -202,6 +202,11 @@ class TestDaemonReclaimScope:
         daemon.cert_manager.register.side_effect = sentinel
         with (
             patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            # #312 item 3a: a boot precondition added after this cell was written.
+            # sbx is absent in the unit face, so an unpatched probe refuses the boot
+            # for want of an answer; the guard itself is tested in
+            # test_sbx_runtime_socket_startup_refusal_312.py.
+            patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
             patch("executor.daemon.sweep_workspace_base", return_value=0),
             # #474 added a boot reap beside the sweep; stubbed so this cell
             # never reaches a real `sbx ls`/`sbx rm` on a host that has the CLI.

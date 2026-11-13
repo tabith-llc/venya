@@ -72,6 +72,9 @@ def _started_daemon(tmp_path: Path, *, remote_url: str | None, spool_path: Path 
     d.create_executor = MagicMock()  # sessions must never be needed for the drain
     with (
         patch("executor.daemon.require_supported_sbx", return_value="v0.46.0"),
+        # #312 item 3a: new boot precondition; the guard's own face is in
+        # test_sbx_runtime_socket_startup_refusal_312.py.
+        patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
         patch("executor.daemon.sweep_workspace_base", return_value=0),
     ):
         d.start()

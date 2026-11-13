@@ -180,6 +180,9 @@ enrollment_token = "enrl_exec_toml_legacy"
                 patch("executor.daemon.sweep_workspace_base", return_value=0),
                 patch("executor.daemon.reap_orphan_sandboxes", return_value=0),  # #474 boot reap stub
                 patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+                # #312 item 3a: new boot precondition; the guard's own face is in
+                # test_sbx_runtime_socket_startup_refusal_312.py.
+                patch("executor.daemon.require_runtime_isolated_sandbox", return_value="clean"),
                 caplog.at_level(logging.ERROR),
             ):
                 daemon.start()  # must complete — no crash, loop entered

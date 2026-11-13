@@ -71,9 +71,11 @@ from .strategies.sbx_strategy import (
     ENV_DIR_PREFIX,
     SECRET_TMPFS_BASE,
     SESSION_DIR_PREFIX,
+    SbxRuntimeExposureError,
     SbxStrategy,
     SbxVersionError,
     reap_orphan_sandboxes,
+    require_runtime_isolated_sandbox,
     require_supported_sbx,
     sweep_workspace_base,
 )
@@ -2052,6 +2054,20 @@ class ExecutorDaemon:
         reclaimed = self._reclaim_stale_tmp()
         if reclaimed:
             logger.info("Reclaimed %d stale temp file(s) from executor directories (#478)", reclaimed)
+
+        # refs #312 item 3a (beta3 gate): refuse to boot an executor whose
+        # sandbox can reach a container runtime. Same position and shape as the
+        # empty-allowlist and missing-resolver guards at the top of this method —
+        # BEFORE registration, so the one-shot enrollment token is never consumed
+        # on a doomed boot — and deliberately AFTER the workspace sweep and the
+        # #474 reap above, so the probe's throwaway `venya-rt-probe-*` sandbox is
+        # never collected as debris while the probe is running inside it.
+        try:
+            isolation = require_runtime_isolated_sandbox(memory_mb=self.config.sandbox_memory_mb)
+            logger.info("Sandbox runtime isolation verified: %s", isolation)
+        except SbxRuntimeExposureError as exc:
+            logger.error("%s", exc)
+            raise SystemExit(1) from None
 
         # Register with server (creates cert/key if not present)
         # register() uses throwaway httpx2.Client instances internally —
