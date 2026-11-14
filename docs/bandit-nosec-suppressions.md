@@ -46,7 +46,7 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/executor/src/executor/key_passphrase.py` | `EXECUTOR_KEY_PASSPHRASE_ENV = "VENYA_EXECUTOR_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/executor/src/executor/relay_listener.py` | `host: str = "0.0.0.0",  # nosec B104 — private relay net; mTLS CERT_REQUIRED + CN allowlist is the access control` |
 | `packages/executor/src/executor/sandbox_shape.py` | `import subprocess  # nosec B404 — read-only vendor CLI calls, fixed argv, no shell` |
-| `packages/executor/src/executor/sandbox_shape.py` | `done = subprocess.run(  # nosec B603 B607 — fixed argv built from module literals, no shell, no caller input` |
+| `packages/executor/src/executor/sandbox_shape.py` | `done = subprocess.run(  # nosec B603 — fixed argv built from module literals, no shell, no caller input` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec` | <!-- pragma: allowlist secret -->
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec` |
