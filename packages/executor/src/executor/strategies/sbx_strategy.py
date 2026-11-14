@@ -492,17 +492,23 @@ def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | Non
         if parsed.exposed:
             groups = " ".join(parsed.groups) or "numeric gids only, no names"
             risky = sorted({g.lower() for g in parsed.groups} & set(RUNTIME_EXPOSED_GROUPS))
+            # shortcut: INTERIM message shape — no drift-aware wording ("the face changed
+            # from X"), because the recorded sandbox face that sentence would compare
+            # against does not exist yet; upgrade when R-2928 cl.4's recorded face ships.
             raise SbxRuntimeExposureError(
-                "the sandbox can reach a container runtime — refusing to start. Inside a "
-                f"sandbox created by this executor, {[p for p in parsed.writable]} is "
-                f"writable by the sandbox user (groups: {groups}"
+                "the sandbox can reach a container runtime — refusing to start. Inside the "
+                f"sandbox this executor created, {[p for p in parsed.writable]} is writable "
+                f"by the sandbox user (groups: {groups}"
                 + (f", including {', '.join(risky)}" if risky else "")
-                + "). Whoever runs a command here can ask that runtime to create another "
-                "container with the host mounted, which ends the isolation the sandbox "
-                "exists to provide. venya passes no group, user or socket flag to `sbx "
-                "create`, so the fix is in the vendor sandbox configuration "
-                "(docker-sbx): do not mount a runtime socket into the sandbox, and drop "
-                "the docker/sudo supplementary groups. The executor starts once the "
+                + "). That writability is the finding: the group list is wording, not the "
+                "test, because a group grants nothing unless a socket behind it is writable. "
+                "Whoever runs a command here can ask that runtime to create another container "
+                "with the host mounted, which ends the isolation the sandbox exists to "
+                "provide. `sbx create` is called with no group, user or socket flag, so this "
+                "answer is not something a venya setting produced or a venya setting can "
+                "undo — venya does not name the cause here. Read the executor log before "
+                "changing anything: this line and the `sbx CLI supported` line above it are "
+                "both in it (`journalctl -u venya-executor`). The executor starts once the "
                 "sandbox reports no writable runtime socket (refs #312 item 3a)."
             )
         if parsed.present:
