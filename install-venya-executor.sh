@@ -1204,6 +1204,34 @@ else
     fi
 fi
 
+# --- Sandbox shape record (refs #312; R-2928 cl.4, R-2938 cl.2 item 1) --------------
+# The face this executor's sandbox actually has: vendor package and version, the sbx
+# build sha, the template's image id, the settings behind the three channels leg 1325
+# measured, and — from one throwaway sandbox — the group set the sandbox user receives
+# and which runtime socket paths it can see, and which of those it can write.
+# Why: without a recorded face there is no such thing as "changed". Two weeks of
+# estate-versus-wyoming argument settled nothing because nothing had been written down
+# (leg 1326's estate face at 0.50.1, against leg 1289's test-bed face on the same vendor
+# product showing no socket at all). The boot guard compares
+# against this file and names the field that moved; it never writes it, so a shape that
+# has already moved cannot define the baseline it is judged against.
+# Prereq order is load-bearing, and it is the warm block's: sbx present + sandboxd +
+# deny-all policy + a pulled template all precede here, because the in-sandbox half
+# creates one throwaway sandbox of its own.
+# NON-FATAL by design, like the warm above it. A host that cannot answer some question
+# records that field as unread with the failing command's rc, and installs anyway; the
+# executor still refuses at boot on a writable socket whether or not a record exists
+# (R-2923 cl.1 / R-2928 cl.2 are not gated on this file).
+info "Recording the sandbox shape face (refs #312)..."
+SHAPE_RECORD="${VENYA_SANDBOX_SHAPE_FILE:-/var/lib/venya/executor/sandbox-shape.json}"
+if SHAPE_OUT=$(sudo -H -u venya "$VENV_PYTHON" -m executor.sandbox_shape record --out "$SHAPE_RECORD" 2>&1); then
+    printf '%s\n' "$SHAPE_OUT" | sed 's/^/    /'
+else
+    warn "Sandbox-shape record FAILED — the boot guard still runs, but there is nothing recorded to compare against:"
+    printf '%s\n' "$SHAPE_OUT" | sed 's/^/    /'
+    warn "Manual re-record: sudo -H -u venya $VENV_PYTHON -m executor.sandbox_shape record"
+fi
+
 # NOTE: executor credential hardening ("Harden executor credentials") runs
 # immediately after registration and BEFORE the Docker gate (#370) — an abort
 # in the optional Docker chain below must leave a bootable degraded install.

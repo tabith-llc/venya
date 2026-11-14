@@ -420,13 +420,25 @@ def parse_runtime_probe(stdout: str) -> RuntimeProbe:
     return RuntimeProbe(groups=groups, writable=writable, present=present)
 
 
-def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | None = None) -> str:
+def require_runtime_isolated_sandbox(
+    memory_mb: int | None,
+    timeout: float | None = None,
+    on_probe: Callable[[RuntimeProbe], object] | None = None,
+) -> str:
     """Create one throwaway sandbox, ask it what it can reach, refuse on a yes.
 
     Returns a short human-readable face for the INFO log when the sandbox can
     reach no runtime socket. Raises SbxRuntimeExposureError when it can, when the
     probe cannot be run or completed, when its answer cannot be read, or when
     there is no configured cap to probe with.
+
+    `on_probe` is a report, not a decision, and it is only reached on the path where
+    this guard has already chosen NOT to refuse: it is handed the parsed probe so the
+    recorded-shape comparison (`R-2928` cl.4, leg 1328) reads the same answer the guard
+    read instead of costing the boot a second throwaway sandbox. An exception from it is
+    logged and dropped, so nothing a shape check does can widen or narrow the refusal.
+    The predicate, the four paths it tests, the raise and the shipped default are
+    untouched by its presence (`R-2923` cl.1, `R-2928` cl.2).
 
     `memory_mb` is `int | None` because `ExecutorConfig.sandbox_memory_mb` is
     deliberately nullable (#578 — an explicit null stays representable so the
@@ -511,6 +523,18 @@ def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | Non
                 "both in it (`journalctl -u venya-executor`). The executor starts once the "
                 "sandbox reports no writable runtime socket (refs #312 item 3a)."
             )
+        if on_probe is not None:
+            # Past the raise above, so every refusal still refuses exactly as it did. This
+            # call reports the probe; it cannot change what was just decided, and a failure
+            # inside it must not read as a shape that matches.
+            try:
+                on_probe(parsed)
+            except Exception as exc:
+                logger.warning(
+                    "the sandbox shape comparison did not run (%s: %s) — the isolation decision above stands",
+                    type(exc).__name__,
+                    exc,
+                )
         if parsed.present:
             logger.warning(
                 "runtime socket(s) %s exist in the sandbox view but are NOT writable by "

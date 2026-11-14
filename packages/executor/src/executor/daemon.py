@@ -49,6 +49,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from . import sandbox_shape
 from .audit import AuditLogger
 from .command_validator import (
     DEFAULT_DANGEROUS_PATTERNS,
@@ -2062,8 +2063,17 @@ class ExecutorDaemon:
         # on a doomed boot — and deliberately AFTER the workspace sweep and the
         # #474 reap above, so the probe's throwaway `venya-rt-probe-*` sandbox is
         # never collected as debris while the probe is running inside it.
+        #
+        # `on_probe` is R-2928 cl.4 / leg 1328: the same probe answer is compared against
+        # the sandbox shape recorded at install, and a difference names the field that
+        # moved. It runs only where the guard has already declined to refuse, its failures
+        # are dropped inside the guard, and it decides nothing — the refusal above it is
+        # unchanged in predicate, paths, raise and default (R-2923 cl.1, R-2928 cl.2).
         try:
-            isolation = require_runtime_isolated_sandbox(memory_mb=self.config.sandbox_memory_mb)
+            isolation = require_runtime_isolated_sandbox(
+                memory_mb=self.config.sandbox_memory_mb,
+                on_probe=sandbox_shape.check_at_boot,
+            )
             logger.info("Sandbox runtime isolation verified: %s", isolation)
         except SbxRuntimeExposureError as exc:
             logger.error("%s", exc)
