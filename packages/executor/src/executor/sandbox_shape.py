@@ -583,10 +583,20 @@ def describe(comparison: list[dict[str, Any]], recorded: dict[str, Any], observe
     not shown to exist on the recorded face. The interim refusal wording merged as seq 382
     is where an operator is pointed at the log today, and this line joins it there.
     """
-    if not comparison:
-        return "sandbox shape matches the recorded face"
     signals = drifts_of(comparison)
     quiet = [d for d in comparison if not d.get("signal")]
+    if not signals:
+        # Nothing moved. The unread fields are still worth naming on the same line, because
+        # "matches" over a face where half the fields were never readable is a weaker claim
+        # than the word alone suggests, and the reader should not have to know which fields
+        # this build could not ask about.
+        if not comparison:
+            return "sandbox shape matches the recorded face"
+        return (
+            f"sandbox shape matches the recorded face at {recorded.get('observed_at', 'an unknown time')}"
+            f" ({_sbx_of(recorded)}); no field that was readable at record time differs now"
+            + (f", and {len(quiet)} field(s) have no recorded answer to be compared against" if quiet else "")
+        )
     head = (
         f"sandbox shape drift: {len(signals)} field(s) differ from the face recorded at "
         f"{recorded.get('observed_at', 'an unknown time')} by {recorded.get('written_by', 'unknown writer')} "

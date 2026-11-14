@@ -220,9 +220,10 @@ class TestCompareNamesTheFieldAndItsDirection:
     """P3: the message names the field, and a path APPEARING is not the same fact as one
     disappearing. `R-2928` cl.4 calls the first a hostile-shape signal."""
 
-    def test_identical_faces_produce_no_difference(self):
+    def test_identical_faces_produce_no_difference_and_say_so_plainly(self):
         f = face(**{"runtime_sockets.writable": field([]), "sandbox.groups": field(["agent"])})
         assert shape.compare_face(f, json.loads(json.dumps(f))) == []
+        assert shape.describe([], f, f) == "sandbox shape matches the recorded face"
 
     def test_a_writable_socket_appearing_is_reported_as_appeared(self):
         recorded = face(
@@ -251,7 +252,23 @@ class TestCompareNamesTheFieldAndItsDirection:
         assert ("sandbox.groups", "appeared", None, "docker") in backward
         assert forward != backward
 
-    def test_a_value_change_names_its_field(self):
+    def test_paired_negative_a_clean_face_with_unread_fields_never_says_drift(self):
+        """The wording this leg ships is part of what it claims. A face where every
+        readable field agrees but one was never readable at record time is NOT drift, and
+        printing the count as ``drift: 0 field(s) differ`` teaches an operator that the
+        alarm word applies to a normal case."""
+        recorded = face(
+            **{
+                "sandbox.groups": field(["agent"]),
+                "template.digest.x": shape.unread("sbx template inspect", 1, "refused"),
+            }
+        )
+        observed = face(**{"sandbox.groups": field(["agent"])})
+        text = shape.describe(shape.compare_face(recorded, observed), recorded, observed)
+        assert "drift" not in text.lower(), text
+        assert "matches" in text
+        assert "no recorded answer" in text, "the unread half must still be admitted out loud"
+
         recorded = face(**{"setting.skills.defaultMode": field("readonly", setting_source="default")})
         observed = face(**{"setting.skills.defaultMode": field("readwrite", setting_source="default")})
         d = shape.compare_face(recorded, observed)
