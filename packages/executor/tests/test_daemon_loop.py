@@ -884,6 +884,8 @@ class TestCreateExecutorPlumbing:
             "venya-mem",
             "--memory",
             f"{config.sandbox_memory_mb}m",
+            "-t",
+            "docker.io/docker/sandbox-templates:shell",
             "shell",
             "/workspace",
         ], f"the daemon-built strategy emitted {argv!r} — the configured cap did not reach the argument"
