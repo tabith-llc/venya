@@ -420,11 +420,33 @@ def parse_runtime_probe(stdout: str) -> RuntimeProbe:
     return RuntimeProbe(groups=groups, writable=writable, present=present)
 
 
-def require_runtime_isolated_sandbox(
-    memory_mb: int | None,
-    timeout: float | None = None,
-    on_probe: Callable[[RuntimeProbe], object] | None = None,
-) -> str:
+def _report_shape(parsed: RuntimeProbe) -> None:
+    """Hand this boot's probe answer to the recorded-shape comparison. Never raises.
+
+    Why it sits BEFORE the exposure branch rather than after it: measured physically on the
+    test bed at v0.46.0 (leg 1328), two runtime sockets are writable inside the sandbox
+    there, so the guard refuses on every boot. A report mounted only on the pass path would
+    therefore print nothing on exactly the face `R-2928` cl.4 was written about, and the
+    refusal would remain the only signal there ever was — the failure mode the recorded face
+    exists to end. Placed here, an operator reads the refusal AND which field moved.
+
+    It cannot cost the refusal either way: the raise that follows tests the same `parsed`
+    unconditionally, every path out of this function is swallowed, and the import is inside
+    the call so this module does not depend on the reporting one at load time.
+    """
+    try:
+        from ..sandbox_shape import check_at_boot
+
+        check_at_boot(parsed)
+    except Exception as exc:  # a report cannot reopen a decision, in either direction
+        logger.warning(
+            "the sandbox shape comparison did not run (%s: %s) — the isolation decision is unaffected",
+            type(exc).__name__,
+            exc,
+        )
+
+
+def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | None = None) -> str:
     """Create one throwaway sandbox, ask it what it can reach, refuse on a yes.
 
     Returns a short human-readable face for the INFO log when the sandbox can
@@ -432,14 +454,10 @@ def require_runtime_isolated_sandbox(
     probe cannot be run or completed, when its answer cannot be read, or when
     there is no configured cap to probe with.
 
-    `on_probe` is a report, not a decision: it is handed the parsed probe so the
-    recorded-shape comparison (`R-2928` cl.4, leg 1328) can name the field that moved
-    against the same answer the guard read, instead of costing the boot a second
-    throwaway sandbox. It is called on BOTH outcomes — including the refusing one, where
-    the drift sentence is the point — and an exception from it is logged and dropped, so
-    nothing a shape check does can widen or narrow the refusal. The predicate, the four
-    paths it tests, the raise and the shipped default are untouched by its presence
-    (`R-2923` cl.1, `R-2928` cl.2).
+    This guard's own signature, predicate, socket paths, raise and shipped default are
+    UNCHANGED by the recorded-shape work; the only thing added is the `_report_shape` call
+    below, which hands the probe answer to `R-2928` cl.4's comparison and cannot widen or
+    narrow the refusal (`R-2923` cl.1, `R-2928` cl.2).
 
     `memory_mb` is `int | None` because `ExecutorConfig.sandbox_memory_mb` is
     deliberately nullable (#578 — an explicit null stays representable so the
@@ -502,23 +520,7 @@ def require_runtime_isolated_sandbox(
             stdin=subprocess.DEVNULL,
         )
         parsed = parse_runtime_probe(probe.stdout)
-        # The probe is handed to the shape report BEFORE the refusal branch, not after it,
-        # because the case the report exists for IS the refusal case. Measured physically on
-        # the test bed at v0.46.0 (leg 1328): two runtime sockets are writable inside the
-        # sandbox there, so the guard refuses on every boot — and a report mounted only on
-        # the pass path would print nothing on exactly the face `R-2928` cl.4 was written
-        # about, leaving the refusal as the only signal there ever was. It still cannot cost
-        # the refusal: the raise below is unconditional on this same `parsed`, and an
-        # exception out of the callback is caught here rather than reaching it.
-        if on_probe is not None:
-            try:
-                on_probe(parsed)
-            except Exception as exc:  # a report cannot reopen a decision, in either direction
-                logger.warning(
-                    "the sandbox shape comparison did not run (%s: %s) — the isolation decision is unaffected",
-                    type(exc).__name__,
-                    exc,
-                )
+        _report_shape(parsed)
         if parsed.exposed:
             groups = " ".join(parsed.groups) or "numeric gids only, no names"
             risky = sorted({g.lower() for g in parsed.groups} & set(RUNTIME_EXPOSED_GROUPS))

@@ -557,9 +557,10 @@ class TestTheGuardStillDecides:
         monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
         calls: list = []
         seen: list = []
+        monkeypatch.setattr(sbx, "_report_shape", seen.append)
         with patch.object(sbx.subprocess, "run", self.fake_sbx(calls, EXPOSED_STDOUT)):
             with pytest.raises(sbx.SbxRuntimeExposureError):
-                sbx.require_runtime_isolated_sandbox(memory_mb=512, on_probe=seen.append)
+                sbx.require_runtime_isolated_sandbox(memory_mb=512)
         assert len(seen) == 1 and seen[0].exposed is True, "the report never saw the hostile face"
         assert [c[1] for c in calls] == ["create", "exec", "rm"]
 
@@ -573,44 +574,49 @@ class TestTheGuardStillDecides:
             raise RuntimeError("shape module is broken")
 
         calls: list = []
-        with patch.object(sbx.subprocess, "run", self.fake_sbx(calls, EXPOSED_STDOUT)):
+        with (
+            patch.object(sbx.subprocess, "run", self.fake_sbx(calls, EXPOSED_STDOUT)),
+            patch("executor.sandbox_shape.check_at_boot", side_effect=boom),
+        ):
             with pytest.raises(sbx.SbxRuntimeExposureError):
-                sbx.require_runtime_isolated_sandbox(memory_mb=512, on_probe=boom)
+                sbx.require_runtime_isolated_sandbox(memory_mb=512)
         assert [c[1] for c in calls] == ["create", "exec", "rm"]
 
     def test_a_clean_probe_still_boots_and_hands_the_report_its_probe(self, tmp_path, monkeypatch):
         monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
         calls: list = []
         seen: list = []
+        monkeypatch.setattr(sbx, "_report_shape", seen.append)
         with patch.object(sbx.subprocess, "run", self.fake_sbx(calls, PRESENT_NOT_WRITABLE)):
-            face_line = sbx.require_runtime_isolated_sandbox(memory_mb=512, on_probe=seen.append)
+            face_line = sbx.require_runtime_isolated_sandbox(memory_mb=512)
         assert "not writable" in face_line
         assert len(seen) == 1
         assert seen[0].present == ["/var/run/docker.sock"] and seen[0].writable == []
 
-    def test_a_shape_report_that_raises_cannot_stop_the_refusal(self, tmp_path, monkeypatch):
-        """PAIRED NEGATIVE, the expensive direction: the report is a feature, the refusal
-        is a control. An exception from the callback is logged and the guard's own answer
-        stands — a clean probe still boots, an exposed one still refuses."""
+    def test_a_shape_report_that_raises_cannot_stop_the_clean_boot_either(self, tmp_path, monkeypatch):
+        """PAIRED NEGATIVE, the other direction of the same claim: a broken report must not
+        turn a bootable face into a refusal either. Both outcomes are asserted, because
+        `_report_shape` now sits in front of the branch that decides between them."""
         monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
 
         def boom(_probe):
             raise RuntimeError("shape module is broken")
 
         calls: list = []
-        with patch.object(sbx.subprocess, "run", self.fake_sbx(calls, CLEAN_STDOUT)):
-            assert "no writable runtime socket" in sbx.require_runtime_isolated_sandbox(memory_mb=512, on_probe=boom)
-        with patch.object(sbx.subprocess, "run", self.fake_sbx(calls, EXPOSED_STDOUT)):
-            with pytest.raises(sbx.SbxRuntimeExposureError):
-                sbx.require_runtime_isolated_sandbox(memory_mb=512, on_probe=boom)
+        with (
+            patch.object(sbx.subprocess, "run", self.fake_sbx(calls, CLEAN_STDOUT)),
+            patch("executor.sandbox_shape.check_at_boot", side_effect=boom),
+        ):
+            assert "no writable runtime socket" in sbx.require_runtime_isolated_sandbox(memory_mb=512)
 
-    def test_the_shipped_default_still_calls_the_guard_with_no_report_at_all(self):
-        """``on_probe`` defaults to None, so every existing call site — and every install
-        that never re-records — behaves byte-for-byte as before."""
+    def test_the_guards_own_signature_is_unchanged_by_the_report(self):
+        """The shipped call sites and the #312 cells must not have to know the report
+        exists at all — a new required parameter here would itself be a change to the
+        guard's contract, and the release page cites this file's coordinates."""
         import inspect
 
         sig = inspect.signature(sbx.require_runtime_isolated_sandbox)
-        assert sig.parameters["on_probe"].default is None
+        assert list(sig.parameters) == ["memory_mb", "timeout"], sig
 
 
 class TestSandboxViewHalf:
