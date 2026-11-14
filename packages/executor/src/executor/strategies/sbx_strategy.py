@@ -434,6 +434,32 @@ def parse_runtime_probe(stdout: str) -> RuntimeProbe:
     return RuntimeProbe(groups=groups, writable=writable, present=present)
 
 
+def _report_shape(parsed: RuntimeProbe) -> None:
+    """Hand this boot's probe answer to the recorded-shape comparison. Never raises.
+
+    Why it sits BEFORE the exposure branch rather than after it: measured physically on the
+    test bed at v0.46.0 (leg 1328), two runtime sockets are writable inside the sandbox
+    there, so the guard refuses on every boot. A report mounted only on the pass path would
+    therefore print nothing on exactly the face `R-2928` cl.4 was written about, and the
+    refusal would remain the only signal there ever was — the failure mode the recorded face
+    exists to end. Placed here, an operator reads the refusal AND which field moved.
+
+    It cannot cost the refusal either way: the raise that follows tests the same `parsed`
+    unconditionally, every path out of this function is swallowed, and the import is inside
+    the call so this module does not depend on the reporting one at load time.
+    """
+    try:
+        from ..sandbox_shape import check_at_boot
+
+        check_at_boot(parsed)
+    except Exception as exc:  # a report cannot reopen a decision, in either direction
+        logger.warning(
+            "the sandbox shape comparison did not run (%s: %s) — the isolation decision is unaffected",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | None = None) -> str:
     """Create one throwaway sandbox, ask it what it can reach, refuse on a yes.
 
@@ -441,6 +467,11 @@ def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | Non
     reach no runtime socket. Raises SbxRuntimeExposureError when it can, when the
     probe cannot be run or completed, when its answer cannot be read, or when
     there is no configured cap to probe with.
+
+    This guard's own signature, predicate, socket paths, raise and shipped default are
+    UNCHANGED by the recorded-shape work; the only thing added is the `_report_shape` call
+    below, which hands the probe answer to `R-2928` cl.4's comparison and cannot widen or
+    narrow the refusal (`R-2923` cl.1, `R-2928` cl.2).
 
     `memory_mb` is `int | None` because `ExecutorConfig.sandbox_memory_mb` is
     deliberately nullable (#578 — an explicit null stays representable so the
@@ -505,12 +536,16 @@ def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | Non
             stdin=subprocess.DEVNULL,
         )
         parsed = parse_runtime_probe(probe.stdout)
+        _report_shape(parsed)
         if parsed.exposed:
             groups = " ".join(parsed.groups) or "numeric gids only, no names"
             risky = sorted({g.lower() for g in parsed.groups} & set(RUNTIME_EXPOSED_GROUPS))
             # shortcut: INTERIM message shape — no drift-aware wording ("the face changed
-            # from X"), because the recorded sandbox face that sentence would compare
-            # against does not exist yet; upgrade when R-2928 cl.4's recorded face ships.
+            # from X") in THIS message. R-2928 cl.4's recorded face now exists (sandbox_shape,
+            # leg 1328) and the drift sentence is logged beside this refusal rather than
+            # folded into it, because rewriting the shipped refusal wording is not that leg's
+            # scope and its paired-negative cells pin this text. Upgrade trigger: the
+            # operator-facing-text item queued second in R-2938 cl.2.
             raise SbxRuntimeExposureError(
                 "the sandbox can reach a container runtime — refusing to start. Inside the "
                 f"sandbox this executor created, {[p for p in parsed.writable]} is writable "
