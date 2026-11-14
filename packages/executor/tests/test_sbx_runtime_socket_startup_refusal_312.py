@@ -193,7 +193,16 @@ class TestProbeParsing:
 
 
 class TestRequireRuntimeIsolatedSandbox:
-    def test_refuses_and_names_the_socket_and_the_owner_of_the_fix(self, tmp_path, monkeypatch):
+    def test_refusal_message_is_truthful_and_names_the_log_to_read(self, tmp_path, monkeypatch):
+        """#315 (R-2928 cl.3): the message states the observed writability and points at the
+        log, and orders no knob that the measured vendor build does not have.
+
+        The old tail told an operator to change the vendor sandbox configuration and drop
+        the docker/sudo groups. On the measured vendor version those actions do not exist,
+        and on the measured estate host there is no such account to change, so the sentence
+        was false instruction. What replaced it is the observation plus the log to read
+        (O1095 face 4: maximum truth, and when the cause cannot be named, name the log).
+        """
         monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
         calls: list = []
         with patch.object(sbx.subprocess, "run", fake_sbx(calls, probe_stdout=EXPOSED_STDOUT)):
@@ -201,12 +210,30 @@ class TestRequireRuntimeIsolatedSandbox:
                 sbx.require_runtime_isolated_sandbox(memory_mb=512)
         msg = str(exc.value)
         assert "/var/run/docker.sock" in msg
-        assert "docker-sbx" in msg  # who has to change, named
         assert "refs #312" in msg
         # Honest claim boundary: a reachable runtime is the finding; a proven
         # host escape is not, and the guard must not assert one.
         assert "escape" not in msg.lower()
         assert "another container" in msg
+        # (1) the observed fact, stated as fact, with the groups kept as wording.
+        assert "writable" in msg and "sandbox user" in msg
+        assert "wording, not the test" in msg
+        # (2) the false instruction is gone, in both of its old phrasings.
+        for forbidden in (
+            "docker-sbx",
+            "vendor sandbox configuration",
+            "do not mount",
+            "drop the docker",
+            "supplementary groups",
+        ):
+            assert forbidden not in msg, f"the refusal still orders {forbidden!r}"
+        # (3) when the cause cannot be named, the message names the log to read.
+        assert "journalctl -u venya-executor" in msg
+        assert "venya does not name the cause" in msg
+        # (4) INTERIM only: no drift-aware change statement, because the recorded face
+        # R-2928 cl.4 needs does not exist. A wording that claims a change is a defect here.
+        for forbidden in ("changed from", "previously reported", "the shape was"):
+            assert forbidden not in msg, f"drift-aware wording before the control exists: {forbidden!r}"
 
     def test_probe_sandbox_is_removed_after_a_refusal(self, tmp_path, monkeypatch):
         """A refusal must not leave a live sandbox holding the probe's workspace."""
@@ -228,6 +255,63 @@ class TestRequireRuntimeIsolatedSandbox:
             face = sbx.require_runtime_isolated_sandbox(memory_mb=512)
         assert "not writable" in face
         assert [c[1] for c in calls] == ["create", "exec", "rm"]
+
+    def test_paired_negative_the_refusal_still_raises_on_the_same_inputs(self, tmp_path, monkeypatch):
+        """#315 PAIRED NEGATIVE: only the message changed, the behaviour did not.
+
+        R-2928 cl.2 bars softening, gating, or defaulting the guard off, so this cell pins
+        the three things a text edit could silently break: the predicate still answers the
+        same way on the same probe stdout, the raise is still the same exception type, and
+        the group names are still NOT the criterion — a numeric-gids-only face with a
+        writable socket refuses exactly as the named-group face does.
+        """
+        # 1. predicate unchanged, at the parse face.
+        parsed = sbx.parse_runtime_probe(EXPOSED_STDOUT)
+        assert parsed.exposed is True and parsed.writable == ["/var/run/docker.sock"]
+        assert sbx.parse_runtime_probe(SOCKET_PRESENT_NOT_WRITABLE).exposed is False
+        # 2. same inputs -> same exception, unchanged type, from the real callee.
+        monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
+        calls: list = []
+        with patch.object(sbx.subprocess, "run", fake_sbx(calls, probe_stdout=EXPOSED_STDOUT)):
+            with pytest.raises(sbx.SbxRuntimeExposureError):
+                sbx.require_runtime_isolated_sandbox(memory_mb=512)
+        assert [c[1] for c in calls] == ["create", "exec", "rm"]
+        # 3. groups are wording: strip the names and the refusal is identical in kind.
+        numeric_only = "1000 27 1001\nVENYA_RT W /var/run/docker.sock\n"
+        assert sbx.parse_runtime_probe(numeric_only).exposed is True
+        calls2: list = []
+        with patch.object(sbx.subprocess, "run", fake_sbx(calls2, probe_stdout=numeric_only)):
+            with pytest.raises(sbx.SbxRuntimeExposureError):
+                sbx.require_runtime_isolated_sandbox(memory_mb=512)
+
+    def test_boot_face_paired_negative_a_not_writable_socket_still_boots_with_its_warning(
+        self, config, tmp_path, monkeypatch, caplog
+    ):
+        """#315 PAIRED NEGATIVE at the boot face: present-but-not-writable still STARTS.
+
+        The message edit must not have moved the boot decision. This drives the real
+        callee (no stubbed guard) with the `P` answer, and pins both halves: boot walks on
+        to registration, and the warning path that says so is still emitted.
+        """
+        monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
+        d = _daemon(config)
+        calls: list = []
+        sentinel = RuntimeError("past-the-guard")
+        d.cert_manager.register.side_effect = sentinel
+        with (
+            patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
+            patch.object(sbx.subprocess, "run", fake_sbx(calls, probe_stdout=SOCKET_PRESENT_NOT_WRITABLE)),
+            patch("executor.daemon.reap_orphan_sandboxes", return_value=0),
+            patch("executor.daemon.sweep_workspace_base", return_value=0),
+            caplog.at_level("WARNING", logger="venya.executor.strategies.sbx"),
+        ):
+            with pytest.raises(RuntimeError) as exc:
+                d.start()
+        assert exc.value is sentinel, "a non-writable socket cost the executor its boot"
+        assert [c[1] for c in calls] == ["create", "exec", "rm"]
+        warned = [r.getMessage() for r in caplog.records if "NOT writable" in r.getMessage()]
+        assert warned, f"the warning path went silent: {[r.getMessage() for r in caplog.records]}"
+        assert "/var/run/docker.sock" in warned[0]
 
     def test_failed_create_refuses_without_execing(self, tmp_path, monkeypatch):
         """An unanswerable question is not an answer: no create, no exec, no rm
