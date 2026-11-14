@@ -153,7 +153,7 @@ def run_instrument(argv: list[str], timeout: float = INSTRUMENT_TIMEOUT) -> tupl
     propagate. The caller checks ``rc``.
     """
     try:
-        done = subprocess.run(  # nosec B603 B607 — fixed argv built from module literals, no shell, no caller input
+        done = subprocess.run(  # nosec B603 — fixed argv built from module literals, no shell, no caller input
             argv,
             capture_output=True,
             text=True,
@@ -636,8 +636,11 @@ def check_at_boot(probe: Any) -> list[dict[str, Any]]:
 def compare_with_record(probe: Any, path: str) -> list[dict[str, Any]]:
     """Compare this boot's observed face against the face recorded at ``path``.
 
-    Called from the boot guard on the path where it has ALREADY decided not to refuse, and
-    it never raises: everything in here is a report. It adds no refusal and removes none.
+    Called from the boot guard BEFORE it decides whether to refuse, and it never raises:
+    everything in here is a report. It adds no refusal and removes none, and it is reached on
+    the refusing face too — that placement is what ``_report_shape`` documents and what
+    `461bdffd` moved it to, so an operator reads the drift sentence beside the refusal
+    instead of only on a boot that never happened here.
 
     Two things this deliberately does not do. It does not read the host-side instruments
     when there is no recorded face — with nothing to compare against, four vendor calls
