@@ -432,13 +432,14 @@ def require_runtime_isolated_sandbox(
     probe cannot be run or completed, when its answer cannot be read, or when
     there is no configured cap to probe with.
 
-    `on_probe` is a report, not a decision, and it is only reached on the path where
-    this guard has already chosen NOT to refuse: it is handed the parsed probe so the
-    recorded-shape comparison (`R-2928` cl.4, leg 1328) reads the same answer the guard
-    read instead of costing the boot a second throwaway sandbox. An exception from it is
-    logged and dropped, so nothing a shape check does can widen or narrow the refusal.
-    The predicate, the four paths it tests, the raise and the shipped default are
-    untouched by its presence (`R-2923` cl.1, `R-2928` cl.2).
+    `on_probe` is a report, not a decision: it is handed the parsed probe so the
+    recorded-shape comparison (`R-2928` cl.4, leg 1328) can name the field that moved
+    against the same answer the guard read, instead of costing the boot a second
+    throwaway sandbox. It is called on BOTH outcomes — including the refusing one, where
+    the drift sentence is the point — and an exception from it is logged and dropped, so
+    nothing a shape check does can widen or narrow the refusal. The predicate, the four
+    paths it tests, the raise and the shipped default are untouched by its presence
+    (`R-2923` cl.1, `R-2928` cl.2).
 
     `memory_mb` is `int | None` because `ExecutorConfig.sandbox_memory_mb` is
     deliberately nullable (#578 — an explicit null stays representable so the
@@ -501,12 +502,32 @@ def require_runtime_isolated_sandbox(
             stdin=subprocess.DEVNULL,
         )
         parsed = parse_runtime_probe(probe.stdout)
+        # The probe is handed to the shape report BEFORE the refusal branch, not after it,
+        # because the case the report exists for IS the refusal case. Measured physically on
+        # the test bed at v0.46.0 (leg 1328): two runtime sockets are writable inside the
+        # sandbox there, so the guard refuses on every boot — and a report mounted only on
+        # the pass path would print nothing on exactly the face `R-2928` cl.4 was written
+        # about, leaving the refusal as the only signal there ever was. It still cannot cost
+        # the refusal: the raise below is unconditional on this same `parsed`, and an
+        # exception out of the callback is caught here rather than reaching it.
+        if on_probe is not None:
+            try:
+                on_probe(parsed)
+            except Exception as exc:  # a report cannot reopen a decision, in either direction
+                logger.warning(
+                    "the sandbox shape comparison did not run (%s: %s) — the isolation decision is unaffected",
+                    type(exc).__name__,
+                    exc,
+                )
         if parsed.exposed:
             groups = " ".join(parsed.groups) or "numeric gids only, no names"
             risky = sorted({g.lower() for g in parsed.groups} & set(RUNTIME_EXPOSED_GROUPS))
             # shortcut: INTERIM message shape — no drift-aware wording ("the face changed
-            # from X"), because the recorded sandbox face that sentence would compare
-            # against does not exist yet; upgrade when R-2928 cl.4's recorded face ships.
+            # from X") in THIS message. R-2928 cl.4's recorded face now exists (sandbox_shape,
+            # leg 1328) and the drift sentence is logged beside this refusal rather than
+            # folded into it, because rewriting the shipped refusal wording is not that leg's
+            # scope and its paired-negative cells pin this text. Upgrade trigger: the
+            # operator-facing-text item queued second in R-2938 cl.2.
             raise SbxRuntimeExposureError(
                 "the sandbox can reach a container runtime — refusing to start. Inside the "
                 f"sandbox this executor created, {[p for p in parsed.writable]} is writable "
@@ -523,18 +544,6 @@ def require_runtime_isolated_sandbox(
                 "both in it (`journalctl -u venya-executor`). The executor starts once the "
                 "sandbox reports no writable runtime socket (refs #312 item 3a)."
             )
-        if on_probe is not None:
-            # Past the raise above, so every refusal still refuses exactly as it did. This
-            # call reports the probe; it cannot change what was just decided, and a failure
-            # inside it must not read as a shape that matches.
-            try:
-                on_probe(parsed)
-            except Exception as exc:
-                logger.warning(
-                    "the sandbox shape comparison did not run (%s: %s) — the isolation decision above stands",
-                    type(exc).__name__,
-                    exc,
-                )
         if parsed.present:
             logger.warning(
                 "runtime socket(s) %s exist in the sandbox view but are NOT writable by "

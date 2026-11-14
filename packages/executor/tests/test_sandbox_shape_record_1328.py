@@ -543,16 +543,39 @@ class TestTheGuardStillDecides:
 
         return run
 
-    def test_a_refusing_probe_never_reaches_the_shape_report(self, tmp_path, monkeypatch):
-        """The report is mounted on the pass path only: an exposed sandbox must produce
-        the refusal and nothing else, exactly as before this module existed."""
+    def test_the_refusing_probe_reaches_the_report_AND_still_refuses(self, tmp_path, monkeypatch):
+        """The refusal must not be the ONLY signal on a hostile shape.
+
+        Measured physically on the test bed at v0.46.0 (leg 1328): the live sandbox there
+        has two writable runtime sockets, so the guard refuses on every boot — which means
+        a report mounted only on the pass path would never print on exactly the face
+        `R-2928` cl.4 was written about. So the probe is handed over BEFORE the raise
+        branch, and the refusal still refuses. Both halves are asserted here, and the
+        ordering is why: if the hook were after the raise, this cell's first assertion
+        could not pass.
+        """
         monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
         calls: list = []
         seen: list = []
         with patch.object(sbx.subprocess, "run", self.fake_sbx(calls, EXPOSED_STDOUT)):
             with pytest.raises(sbx.SbxRuntimeExposureError):
                 sbx.require_runtime_isolated_sandbox(memory_mb=512, on_probe=seen.append)
-        assert seen == [], "the shape report ran on a face the guard refuses"
+        assert len(seen) == 1 and seen[0].exposed is True, "the report never saw the hostile face"
+        assert [c[1] for c in calls] == ["create", "exec", "rm"]
+
+    def test_a_report_that_raises_cannot_swallow_the_refusal_on_a_hostile_face(self, tmp_path, monkeypatch):
+        """PAIRED NEGATIVE, the expensive ordering: moving the hook earlier put a shape
+        report INSIDE the path to the raise. An exception from it must be logged and the
+        refusal must still be the thing the boot sees."""
+        monkeypatch.setattr(sbx, "WORKSPACE_BASE", str(tmp_path / "wsbase"))
+
+        def boom(_probe):
+            raise RuntimeError("shape module is broken")
+
+        calls: list = []
+        with patch.object(sbx.subprocess, "run", self.fake_sbx(calls, EXPOSED_STDOUT)):
+            with pytest.raises(sbx.SbxRuntimeExposureError):
+                sbx.require_runtime_isolated_sandbox(memory_mb=512, on_probe=boom)
         assert [c[1] for c in calls] == ["create", "exec", "rm"]
 
     def test_a_clean_probe_still_boots_and_hands_the_report_its_probe(self, tmp_path, monkeypatch):
