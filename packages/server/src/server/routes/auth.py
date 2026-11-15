@@ -86,6 +86,19 @@ async def auth_login_start(
         user_id=req.user_id,
     )
 
+    # Leg 1361 (1A): a targeted id that matched no credentials leaves `allowCredentials`
+    # off, the browser then volunteers any resident credential for this rp id, and the
+    # next call's 401 "Credential not found" accuses the key for a cause that sat HERE.
+    # The truth is now recorded server-side, with the id and no challenge or credential
+    # material. The RESPONSE is byte-for-byte what it was: anti-enumeration at
+    # login/start is ruled posture, and this log is the reason it does not need to move.
+    if req.user_id and "allowCredentials" not in options:
+        logger.warning(
+            "login/start: user id %r has no credentials to allow; the challenge was "
+            "issued with the response unchanged",
+            req.user_id,
+        )
+
     return AuthenticationStartResponse(challenge_id=challenge_id, options=options)
 
 

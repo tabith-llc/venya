@@ -2305,6 +2305,9 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
     print(f"  Expires:          {info['not_after'].isoformat()}")
     print(f"  Minutes remaining: {info['minutes_remaining']}")
     print("  Clock:            local — computed on this workstation's clock, not the core's")
+    # Leg 1361 (1B): the sixty-minute human-plane surprise is stated HERE, where an
+    # operator first meets it, not buried in a runbook paragraph.
+    print("  Note:             this credential is short-lived by design; renew takes one ceremony.")
     print("  Note:             renew is not a revoke — the previous certificate was not revoked.")
     print(_admin_leaf_key_encrypted_notice(Path(key_path)))
     print("  STATUS: OK")
@@ -2904,10 +2907,13 @@ def cmd_login(client: APIClient, args: Any) -> int:
         print(f"Authenticated as {result['user_id']}.")
         return 0
     except APIClientAuthenticationError as e:
-        print(f"Login failed: {e}", file=sys.stderr)
+        # Leg 1361 (1A): name the id this command was told. An unknown id makes the
+        # browser volunteer any resident credential, and the server's next answer —
+        # "Credential not found" — accused the key for a cause that sat in this call.
+        print(f"Login failed for user id {args.user_id!r}: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Login failed: {e}", file=sys.stderr)
+        print(f"Login failed for user id {args.user_id!r}: {e}", file=sys.stderr)
         return 1
 
 
@@ -5252,16 +5258,23 @@ def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
     the same predicate, so the clause that used to live here — "the venya CLI cannot yet
     load an encrypted admin key for admin mTLS" — is FALSE and has been replaced by the
     fact. No severity language.
+
+    Leg 1361 (1C): the repair line is PER-SITE now. The shared ADMIN_CA_SETUP_FRAGMENT
+    ends in "then run: venya admin init-admin-ca", which is true only where the CA is
+    absent; at a leaf-key site the CA already exists and following it would mint a
+    second, unrelated Admin CA the core cannot accept. The refusal itself and its
+    before-any-filesystem-work ordering (#547a) are unchanged.
     """
     return (
         f"REFUSED: the admin private key written by {site} must never be stored unencrypted.\n"
         "Nothing was written.\n"
-        # The fragment is the shipped #547 sentence, character-for-character, on its own
-        # line — interpolated mid-sentence it reads "To fix it: Set VENYA_...", and
-        # lowering its first letter would break the cross-package identity that #547's
-        # cells hold. Layout carries the tone; the bytes stay theirs.
         "To fix it:\n"
-        f"  {ADMIN_CA_SETUP_FRAGMENT}\n"
+        "  Choose a passphrase and set it as VENYA_ADMIN_CA_KEY_PASSPHRASE. At this site\n"
+        "  the value is local to this command: it encrypts only the admin private key\n"
+        f"  {site} is about to write — it is not a stored CA secret.\n"
+        f"  Then re-run the same command: {site}\n"
+        "  This command needs a passphrase, not a new certificate authority: minting a\n"
+        "  second Admin CA here would produce certificates this core cannot accept.\n"
         "Note: the key is written encrypted at rest with that passphrase, and the CLI opens\n"
         "it the same way when it dials for admin mTLS — set the variable in the environment\n"
         "of both commands. To read the key back by hand, supply the same passphrase:\n"

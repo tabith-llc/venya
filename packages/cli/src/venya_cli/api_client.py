@@ -330,18 +330,23 @@ def _admin_key_no_passphrase_refusal(keyfile: str) -> str:
 
     Names the variable, names the file, and says nothing was sent. It is NOT the "neither
     VENYA_ADMIN_CERT nor VENYA_ADMIN_KEY is set" text — the pair IS configured; what is
-    missing is the thing that opens it. ``ADMIN_CA_SETUP_FRAGMENT`` is the shipped repair
-    line and is READ from ``commands`` at call time (that module imports this one, so a
-    module-level import would be a cycle) — never retyped here.
+    missing is the thing that opens it. Leg 1361 (1C): this site no longer interpolates
+    ``ADMIN_CA_SETUP_FRAGMENT`` — that sentence ends in ``init-admin-ca``, a CA mint, and
+    at a dial the right repair is to supply the passphrase that ENCRYPTS THE STORED KEY
+    and re-run the same command. Never retyped from ``commands`` here either; the two
+    repair texts are per-site by ruling.
     """
-    from .commands import ADMIN_CA_SETUP_FRAGMENT
-
     return (
         f"REFUSED: the admin client key at {keyfile!r} is encrypted and no passphrase is\n"
         "configured, so it cannot be presented for admin mTLS. Nothing was sent.\n"
         "To fix it:\n"
-        f"  {ADMIN_CA_SETUP_FRAGMENT}\n"
-        "  Then re-run the command — the passphrase is read from that variable at dial time.\n"
+        "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE to the passphrase chosen when this key was\n"
+        "  created — at a dial the value must MATCH the stored key; it is not a new secret.\n"
+        "  Then re-run the same command.\n"
+        "  Fixing this is not a renewal: at a dial site a renewal is a mint — login\n"
+        "  session, one ceremony, and it overwrites the pair. And a second Admin CA\n"
+        "  minted here would carry certificates this core cannot chain to.\n"
+        "  The passphrase is read from that variable at dial time.\n"
         "Reference: docs/cert-rotation-runbook.md (certificate rotation and key locations)."
     )
 
@@ -997,6 +1002,22 @@ class APIClient:
             # skewed operator reads 405/404, not a bare sentence. Advisory only —
             # the 401 refresh path below is unchanged.
             error_msg = f"HTTP {e.response.status_code}: {error_msg}"
+
+            # Leg 1361 (1B): the admin middleware answers SIX outcomes with this ONE
+            # string. Two of them — the pair unset in this shell, and an expired pair —
+            # the operator's own machine can already answer without asking the core, so
+            # the client points at the read-local check. Deliberately keyed to this
+            # exact detail: a client hint that fired on any 403 would leak which of the
+            # six sites answered, the same enumeration door login/start keeps shut.
+            if e.response.status_code == 403 and error_msg.endswith("Admin access requires valid client certificate"):
+                error_msg += (
+                    "\nTwo of the causes are answerable on this workstation without contacting "
+                    "the core: run `venya admin cert status` (read-local) — admin certificates "
+                    "are short-lived by design, so an expired pair is the common case; and check "
+                    "that VENYA_ADMIN_CERT / VENYA_ADMIN_KEY are set in THIS shell, because unset "
+                    "means no certificate was presented at all. Renewing takes one ceremony: "
+                    "`venya admin cert renew`."
+                )
 
             if e.response.status_code == 401:
                 if self.config.access_token:

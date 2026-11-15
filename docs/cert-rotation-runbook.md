@@ -35,6 +35,8 @@ workstation with `venya admin cert renew`, which generates a fresh keypair
 locally and writes the new certificate and its private key to the configured
 pair. The mint rides a login session plus one security-key ceremony and never
 presents the old certificate, so an expired leaf does not block the request.
+Renewal is one ceremony, and what it mints is short-lived by design — the
+person's certificate lives 60 minutes (the note below is the ruling).
 One fact travels with every successful renewal: the private key is written
 encrypted at rest, and the CLI opens it with the same variable when it dials —
 `VENYA_ADMIN_CA_KEY_PASSPHRASE` must be set in the environment of every admin

@@ -120,15 +120,15 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     "packages/executor/src/executor/relay_listener.py:718-723": (R, "relay_client_ids is empty", 1, "pin"),
     "packages/executor/src/executor/relay_listener.py:774": (R, "def reload_ssl_context", 1, "pin"),
     # ---- #586 entry: the daemon state machine
-    'packages/executor/src/executor/daemon.py:252': (D, "self.revoked = False", 1, "pin"),
-    'packages/executor/src/executor/daemon.py:258': (D, "self.revocation_answered = False", 1, "pin"),
-    'packages/executor/src/executor/daemon.py:2225': (D, "self.state.revoked = True", 1, "pin"),
-    'packages/executor/src/executor/daemon.py:2237': (D, "self.state.revocation_answered = True", 1, "pin"),
-    'packages/executor/src/executor/daemon.py:2261': (D, "if self.state._consecutive_revocation_failures >=", 1, "pin"),
-    'packages/executor/src/executor/daemon.py:2206': (D, "self.relay.reload_ssl_context()", 1, "pin"),
-    'packages/executor/src/executor/daemon.py:2276': (D, "self._shutdown_event.wait(30.0)", 1, "pin"),
-    'packages/executor/src/executor/daemon.py:1950': (D, "relay_client_ids is empty", 1, "pin"),
-    'packages/executor/src/executor/daemon.py:1407': (D, "CA certificate expired", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:252": (D, "self.revoked = False", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:258": (D, "self.revocation_answered = False", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:2225": (D, "self.state.revoked = True", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:2237": (D, "self.state.revocation_answered = True", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:2261": (D, "if self.state._consecutive_revocation_failures >=", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:2206": (D, "self.relay.reload_ssl_context()", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:2276": (D, "self._shutdown_event.wait(30.0)", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:1950": (D, "relay_client_ids is empty", 1, "pin"),
+    "packages/executor/src/executor/daemon.py:1407": (D, "CA certificate expired", 1, "pin"),
     # ---- installers and CA
     "install-venya-core.sh:1243": (HC, "-CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key", 2, "pin"),
     "install-venya-core.sh:1245": (HC, '-CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365', 1, "pin"),
@@ -192,13 +192,13 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     f"{CM}:3678": (CM, "the renew path wrote NoEncryption(): an executor private key", 1, "pin"),
     # the page prints these two as BARE `commands.py:N` on the continuation line — same file, so
     # keyed here; the guard still demands the page say a full path (see the ambiguity cell)
-    "packages/cli/src/venya_cli/commands.py:3518": (
+    "packages/cli/src/venya_cli/commands.py:3524": (
         CM,
         "NoEncryption(), an executor private key in the clear beside the cert",
         1,
         "pin",
     ),
-    "packages/cli/src/venya_cli/commands.py:3955": (
+    "packages/cli/src/venya_cli/commands.py:3961": (
         CM,
         "the renew path wrote NoEncryption(): an executor private key",
         1,

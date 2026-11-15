@@ -163,6 +163,21 @@ unless the command opts in (for example `-o StrictHostKeyChecking=accept-new`).
 That is the transport protecting you, and it stays exactly as described here
 regardless of which knobs you turn.
 
+### What `id` reports inside a live sandbox
+
+Identity output from inside a sandbox can look wrong and be right. The
+`#312` remedy for the container-runtime exposure works by **naming a
+socket-free template at every create site** (`SANDBOX_TEMPLATE` in
+`packages/executor/src/executor/strategies/sbx_strategy.py`) — it does not
+touch groups. So `id` may still report `groups=...,27(sudo),1001(docker)`
+while `/var/run/docker.sock` is absent: the groups are baked into the image,
+the socket simply is not there. That is the design, not a regression, and
+group stripping was considered and refused. The one consequence that is real:
+the plain socket-free flavour carries **no nested engine**, so a sandboxed
+command cannot run Docker inside the sandbox. Nothing in venya asks for one
+today; if a future feature needs an in-sandbox engine, revisit the template
+choice — do not re-aim the startup probe.
+
 ## Knob catalog
 
 Every row: what you gain, what you lose, where it is set, and the shipped

@@ -59,7 +59,7 @@ class TestCmdLoginFailures:
         out, err = capsys.readouterr()
 
         assert rc == 1
-        assert "Login failed: key rejected by server" in err
+        assert "Login failed for user id 'ada': key rejected by server" in err
         assert "Authenticated" not in out
 
     def test_unexpected_error_returns_one_on_stderr(self, capsys):
@@ -69,7 +69,7 @@ class TestCmdLoginFailures:
         out, err = capsys.readouterr()
 
         assert rc == 1
-        assert "Login failed: no security key found" in err
+        assert "Login failed for user id 'ada': no security key found" in err
         assert "Authenticated" not in out
 
     def test_malformed_server_response_returns_one(self, capsys):
@@ -80,5 +80,5 @@ class TestCmdLoginFailures:
         out, err = capsys.readouterr()
 
         assert rc == 1
-        assert "Login failed:" in err
+        assert "Login failed for user id 'ada':" in err
         assert "Authenticated" not in out
