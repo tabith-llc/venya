@@ -5266,19 +5266,19 @@ def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
     load an encrypted admin key for admin mTLS" — is FALSE and has been replaced by the
     fact. No severity language.
 
-    iid 794: the repair line is per-site. This door no longer interpolates
-    ``ADMIN_CA_SETUP_FRAGMENT``, whose second half names the admin CA mint — a leaf-key door
-    must not send the operator to create a signing authority. But the sentence that replaces
-    it is written to be true at BOTH of its callers, which the measurement here settled:
+    iid 794 + #789/#790 (reconciled): the repair line is per-site. This door no longer
+    interpolates ``ADMIN_CA_SETUP_FRAGMENT``, whose second half names the mint of a signing
+    authority — a leaf-key door must not send the operator to create one. The sentence that
+    replaces it is written to be true at BOTH of its callers, which the measurement settled:
     ``admin cert renew`` mints remotely and never opens a stored signing key, so its value is
-    chosen fresh (pinned by ``TestMechanismAndSentenceAgree``), while
+    a fresh one to choose (pinned by ``TestMechanismAndSentenceAgree``), while
     ``admin generate-admin-cert`` signs locally and opens the stored authority key with the
     SAME variable, so there the value has to be the one already in place for it (pinned by
     ``TestLeafDoorsMakeNoCAClaim::test_generate_shares_one_value_with_the_stored_signing_key``).
-    A first draft of this text said "yours to choose, not one to look up", which is true at
-    renew and FALSE at the local mint — so the wording states the one fact both sites share
-    and makes the second conditional. The variable keeps one name across both admin planes
-    (#554) and this leg splits no predicate; the CA sites keep their wording byte-for-byte,
+    The class-of-value sentence from the landed repair text is kept in that conditional shape
+    — "choose" is true at the renewal half and the shared-value half names the other — so
+    neither ticket's assertion is edited away. The variable keeps one name across both admin
+    planes (#554) and no predicate is split; the CA sites keep their wording byte-for-byte,
     and the #547a ordering — refuse before any filesystem work — is not edited here.
     """
     return (
@@ -5287,9 +5287,10 @@ def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
         "To fix it:\n"
         "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE in the environment of this command to the\n"
         f"  passphrase this key should carry, then re-run the same command: {site}\n"
-        "  The value is the passphrase of the key this command writes. One variable carries\n"
-        "  the passphrase for both admin planes (#554), so where a command also opens a\n"
-        "  stored signing key, it is the same value — set it to the one already in use.\n"
+        "  The value is the passphrase of the key this command writes — a fresh value to\n"
+        "  choose at a renewal that opens no stored signing key, and the value already in\n"
+        "  use where one variable (#554) carries both admin planes, since that command\n"
+        "  opens the stored key with it before writing anything new.\n"
         "Note: the key is written encrypted at rest with that passphrase, and the CLI opens\n"
         "it the same way when it dials for admin mTLS — set the variable in the environment\n"
         "of both commands. To read the key back by hand, supply the same passphrase:\n"
