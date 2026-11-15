@@ -346,7 +346,7 @@ def read_os_release(path: str | Path = "/etc/os-release") -> dict[str, str]:
     """
     fields: dict[str, str] = {}
     try:
-        with open(path, encoding="utf-8") as handle:  # nosec: a KEY=VALUE inventory file
+        with open(path, encoding="utf-8") as handle:
             for line in handle:
                 key, sep, value = line.strip().partition("=")
                 if sep and key:
