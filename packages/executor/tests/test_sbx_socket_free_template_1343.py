@@ -194,6 +194,43 @@ class TestAllFourSitesAgree:
         assert len(warm) == 1, f"expected one warm create, found {len(warm)}"
         assert '-t "$SBX_SANDBOX_TEMPLATE"' in warm[0], warm[0]
 
+    def test_every_installer_create_line_reads_the_variable(self):
+        """BOTH reads, and the COUNT, so this cannot rot quietly.
+
+        The installer declares the template once and reads it twice: the warm it executes, and
+        the `Manual warm:` remedy it PRINTS for an operator to copy after the automated warm has
+        already failed — the moment a wrong flavour costs a cold pull inside the timeout chain.
+        Selecting installer lines by the executed form's own substring cannot see the printed
+        one, so a deleted token there stayed green (measured at leg 1351). Select by shape
+        instead, then pin how many shapes exist: a third create line cannot be silently
+        un-listed and a deleted read cannot be silently un-paired.
+
+        The quote forms differ and that is the trap: the printed line lives inside a
+        double-quoted `warn` string, so in the file bytes its quotes are escaped
+        (`-t \"$SBX_SANDBOX_TEMPLATE\"`), while the executed line carries plain quotes. A naive
+        `'-t "$SBX_SANDBOX_TEMPLATE"' in ln` reads False on the good printed line, which would make
+        this cell red on correct bytes, so the selector matches the flag and the variable name and
+        lets whatever quote characters sit between them be whatever they are.
+        """
+        text = self.INSTALLER.read_text(encoding="utf-8")
+        creates = [
+            ln for ln in text.splitlines() if re.search(r"\bsbx\s+create\b", ln) and not ln.lstrip().startswith("#")
+        ]
+        assert len(creates) == 2, (
+            f"expected exactly 2 installer create lines (the executed warm and the printed "
+            f"remedy), found {len(creates)}: {[ln.strip()[:70] for ln in creates]}"
+        )
+        # The character class allows the quote forms both sites use: the executed line has plain
+        # quotes, and the printed remedy sits inside a double-quoted `warn` string, so in the file
+        # bytes its quotes are escaped. A naive '-t "$SBX_SANDBOX_TEMPLATE"' substring reads False
+        # on those correct bytes, which would make this cell red on a healthy installer.
+        reads_it = re.compile(r"-t\s+[\"\\']*\$SBX_SANDBOX_TEMPLATE")
+        unpaired = [ln.strip()[:90] for ln in creates if not reads_it.search(ln)]
+        assert not unpaired, (
+            f"installer create lines that do not read the declaration: {unpaired} — one declaration, "
+            "every create reads it, including the line an operator copies by hand"
+        )
+
     def test_all_four_sites_are_one_value(self, monkeypatch, tmp_path):
         """THE PAIRING CELL. If any one of the four sites moves alone, this is red — which is
         the failure mode that survived a two-site PASS on leg 1343."""
