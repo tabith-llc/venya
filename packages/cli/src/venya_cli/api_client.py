@@ -332,14 +332,14 @@ def _admin_key_no_passphrase_refusal(keyfile: str) -> str:
     VENYA_ADMIN_CERT nor VENYA_ADMIN_KEY is set" text — the pair IS configured; what is
     missing is the thing that opens it.
 
-    iid 794: this door no longer interpolates ``ADMIN_CA_SETUP_FRAGMENT``, which is READ from
-    ``commands`` at call time (that module imports this one, so a module-level import would be
-    a cycle). That sentence ends in the admin CA mint, and at a dial the mint is the wrong
-    instruction twice over: the signing authority already exists, and the value asked for here
-    has to MATCH the key on disk rather than be chosen fresh. The repair is per-site now; the
-    CA-precondition sites keep their own wording untouched, and the variable keeps one name
-    across both admin planes (#554, shipped law — this leg moves no name and splits no
-    predicate).
+    iid 794: this door no longer interpolates ``ADMIN_CA_SETUP_FRAGMENT`` (that constant lives
+    in ``commands``, which imports this module — a call-time read was the only cycle-free way to
+    share it, and it is no longer shared here). The fragment's second half names the admin CA
+    mint, and at a dial that instruction is wrong twice over: the signing authority already
+    exists, and the value asked for here has to MATCH the key on disk rather than be chosen
+    fresh. The repair is per-site now; the CA-precondition sites keep their own wording
+    untouched, and the variable keeps one name across both admin planes (#554, shipped law —
+    this leg moves no name and splits no predicate).
     """
     return (
         f"REFUSED: the admin client key at {keyfile!r} is encrypted and no passphrase is\n"
