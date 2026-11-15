@@ -9,6 +9,7 @@
 import base64
 import hashlib
 import logging
+import secrets
 
 from core.engine.backend import Backend
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -84,6 +85,7 @@ def compute_detection_hashes(value: bytes) -> list[str]:
 def filter_output(
     output: bytes,
     secret_hashes: dict[str, bytes],
+    tags: dict[str, str],
 ) -> tuple[bytes, list[str]]:
     """Filter secret values from output using hash matching.
 
@@ -92,9 +94,15 @@ def filter_output(
     Args:
         output: The raw output bytes to filter.
         secret_hashes: Dict mapping hash_hex -> secret_bytes.
+        tags: hash_hex -> the PRINTED marker. Leg 1362: the marker is a random
+            per-response id supplied by the caller, never a prefix of the value
+            digest — an unkeyed `sha256(plaintext)[:8]` tag turns any captured
+            masked line into an offline verifier for low-entropy secrets and
+            leaks equality across sessions (reports/342 §2). Matching and dedupe
+            still key off the full hash; only what surfaces changes.
 
     Returns:
-        Tuple of (filtered_output, list of masked hash prefixes).
+        Tuple of (filtered_output, list of marker tags for masks that fired).
     """
     masked_hashes: list[str] = []
 
@@ -102,14 +110,15 @@ def filter_output(
         # Skip empty secret values to avoid matching every position
         if not secret_bytes:
             continue
+        tag = tags[hash_hex]
 
         # Try raw bytes matching
         if secret_bytes in output:
             output = output.replace(
                 secret_bytes,
-                f"[REDACTED:{hash_hex[:8]}]".encode(),
+                f"[REDACTED:{tag}]".encode(),
             )
-            masked_hashes.append(hash_hex[:8])
+            masked_hashes.append(tag)
 
         # Try base64 matching
         import base64 as b64
@@ -118,18 +127,18 @@ def filter_output(
         if b64_secret in output:
             output = output.replace(
                 b64_secret,
-                f"[REDACTED:{hash_hex[:8]}]".encode(),
+                f"[REDACTED:{tag}]".encode(),
             )
-            masked_hashes.append(hash_hex[:8])
+            masked_hashes.append(tag)
 
         # Try hex matching
         hex_secret = secret_bytes.hex().encode()
         if hex_secret in output:
             output = output.replace(
                 hex_secret,
-                f"[REDACTED:{hash_hex[:8]}]".encode(),
+                f"[REDACTED:{tag}]".encode(),
             )
-            masked_hashes.append(hash_hex[:8])
+            masked_hashes.append(tag)
 
     # Deduplicate masked hashes
     unique = list(dict.fromkeys(masked_hashes))
@@ -309,8 +318,15 @@ async def filter_session_output(
             hash_hex = hashlib.sha256(plaintext).hexdigest()
             session_secrets[hash_hex] = plaintext
 
-    filtered_stdout, stdout_hashes = filter_output(stdout, session_secrets)
-    filtered_stderr, stderr_hashes = filter_output(stderr, session_secrets)
+    # Leg 1362: the printed marker is a random per-response id, one per distinct
+    # secret value, stable within the response (the "did the mask fire" oracle
+    # keeps its affordance) and carrying no relation to the value (kills the
+    # offline verifier and the cross-session equality leak, reports/342 §2).
+    # The full hash remains the internal key for matching — never printed.
+    tags = {hash_hex: secrets.token_hex(4) for hash_hex in session_secrets}
+
+    filtered_stdout, stdout_hashes = filter_output(stdout, session_secrets, tags)
+    filtered_stderr, stderr_hashes = filter_output(stderr, session_secrets, tags)
 
     all_hashes = stdout_hashes + stderr_hashes
 
