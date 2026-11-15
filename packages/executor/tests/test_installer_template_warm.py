@@ -23,7 +23,11 @@ INSTALLER = (REPO_ROOT / "install-venya-executor.sh").read_text()
 def test_installer_warms_agent_template() -> None:
     # Throwaway create+rm pair on the executor's own sbx surface.
     assert 'WARM_SANDBOX="venya-install-warm"' in INSTALLER
-    assert 'sbx create --name "$WARM_SANDBOX" shell "$WARM_WS"' in INSTALLER
+    # The warm names the template rather than letting the vendor resolve a bare agent
+    # name, so it warms the flavour the executor will actually create (see
+    # test_sbx_socket_free_template_1343.py for the four-site pairing).
+    assert 'sbx create --name "$WARM_SANDBOX" -t "$SBX_SANDBOX_TEMPLATE" shell "$WARM_WS"' in INSTALLER
+    assert 'SBX_SANDBOX_TEMPLATE="docker.io/docker/sandbox-templates:shell"' in INSTALLER
     assert 'sbx rm --force "$WARM_SANDBOX"' in INSTALLER
     # The workspace must pre-exist (sbx create prompts on a missing dir and
     # dies on non-TTY EOF) — pin the mktemp-into-workspaces-base pattern.
