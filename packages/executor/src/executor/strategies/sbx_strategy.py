@@ -380,8 +380,6 @@ def sbx_install_route(os_release: dict[str, str] | None = None) -> str:
         return ROUTE_ASSET
     if family != "ubuntu":
         return ROUTE_UNIDENTIFIED
-    if family != "ubuntu":
-        return ROUTE_UNIDENTIFIED
     if release in APT_PUBLISHING_RELEASES:
         return ROUTE_APT
     if release in APT_ABSENT_UBUNTU_RELEASES:
