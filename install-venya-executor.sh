@@ -1183,6 +1183,15 @@ if [ "${VENYA_SKIP_DOCKER_LOGIN:-}" = "yes" ]; then
 else
     info "Warming sbx agent template (throwaway sandbox; multi-GiB pull on a fresh host can take several minutes)..."
     WARM_SANDBOX="venya-install-warm"
+    # SBX_SANDBOX_TEMPLATE must equal SANDBOX_TEMPLATE in
+    # packages/executor/src/executor/strategies/sbx_strategy.py. A shell script cannot import a
+    # Python constant, so this pairing is documented rather than shared, and the drift is loud:
+    # warm the socket-mounting flavour here and the installer pulls a multi-GiB template the
+    # executor never creates, while the shape record and the boot guard then describe two
+    # different sandboxes and every boot prints a drift line about a change that never happened.
+    # A cell holds it: packages/executor/tests/test_sbx_socket_free_template_1343.py parses this
+    # assignment, so editing one side alone goes red.
+    SBX_SANDBOX_TEMPLATE="docker.io/docker/sandbox-templates:shell"
     sudo -H -u venya mkdir -p /home/venya/.venya-workspaces 2>/dev/null || true
     WARM_WS="$(sudo -H -u venya mktemp -d /home/venya/.venya-workspaces/warm.XXXXXX 2>/dev/null || true)"
     # #475: deliberately NOT registered with the EXIT-cleanup list. It is not
@@ -1192,11 +1201,11 @@ else
     # `rm -rf` at script exit would be a new capability, not a leak fix).
     # Clear a stale warm sandbox from a previous failed run (create would refuse the name).
     sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
-    if [ -n "$WARM_WS" ] && timeout 1800 sudo -H -u venya sbx create --name "$WARM_SANDBOX" shell "$WARM_WS" < /dev/null > /dev/null 2>&1; then
+    if [ -n "$WARM_WS" ] && timeout 1800 sudo -H -u venya sbx create --name "$WARM_SANDBOX" -t "$SBX_SANDBOX_TEMPLATE" shell "$WARM_WS" < /dev/null > /dev/null 2>&1; then
         info "Agent template warm (first sandbox create is now seconds-scale)"
     else
         warn "Agent-template warm FAILED — the first sandbox execution will pull the template itself (~60-90 s+; slow but within the timeout chain). Check disk free (>= ~3.5 GiB), Docker auth, and: sudo -H -u venya sbx diagnose"
-        warn "Manual warm: sudo -H -u venya sbx create --name warm shell <existing-empty-dir> && sudo -H -u venya sbx rm --force warm"
+        warn "Manual warm: sudo -H -u venya sbx create --name warm -t \"$SBX_SANDBOX_TEMPLATE\" shell <existing-empty-dir> && sudo -H -u venya sbx rm --force warm"
     fi
     sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
     if [ -n "$WARM_WS" ]; then

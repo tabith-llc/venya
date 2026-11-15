@@ -389,12 +389,21 @@ def _sandbox_view(memory_mb: int) -> dict[str, Any]:
     """Create one throwaway sandbox, ask it the read-only probe question, remove it.
 
     Uses the guard's own argv builder and parser (``rt_probe_argv``, ``parse_runtime_probe``)
-    so the recorded in-sandbox view and the boot-checked in-sandbox view are literally the
-    same question, not two approximations of it. The sandbox name carries ``venya-`` so the
-    boot reap collects a probe leaked by a kill mid-flight (#474), exactly as the guard's
-    own ``venya-rt-probe-*`` does.
+    and the guard's own ``SANDBOX_TEMPLATE`` for the create that makes the sandbox, so the
+    recorded in-sandbox view and the boot-checked in-sandbox view are literally the same
+    question, not two approximations of it. Sharing the inner argv was never enough on its
+    own: two different outer creates can hand the same question to different sandboxes, and
+    then the record asserts a shape production does not build and every boot reads as drift.
+    The sandbox name carries ``venya-`` so the boot reap collects a probe leaked by a kill
+    mid-flight (#474), exactly as the guard's own ``venya-rt-probe-*`` does.
     """
-    from .strategies.sbx_strategy import WORKSPACE_BASE, parse_runtime_probe, rt_probe_argv, rt_probe_timeout
+    from .strategies.sbx_strategy import (
+        SANDBOX_TEMPLATE,
+        WORKSPACE_BASE,
+        parse_runtime_probe,
+        rt_probe_argv,
+        rt_probe_timeout,
+    )
 
     name = f"venya-shape-probe-{os.getpid()}"
     label = "sbx create + sbx exec probe (id -Gn and the runtime socket tests)"
@@ -405,7 +414,18 @@ def _sandbox_view(memory_mb: int) -> dict[str, Any]:
         workspace = tempfile.mkdtemp(prefix="shapeview_", dir=WORKSPACE_BASE)
         bound = rt_probe_timeout()
         make_rc, _, make_err = run_instrument(
-            ["sbx", "create", "--name", name, "--memory", f"{int(memory_mb)}m", "shell", workspace],
+            [
+                "sbx",
+                "create",
+                "--name",
+                name,
+                "--memory",
+                f"{int(memory_mb)}m",
+                "-t",
+                SANDBOX_TEMPLATE,
+                "shell",
+                workspace,
+            ],
             timeout=bound,
         )
         if make_rc != 0:
