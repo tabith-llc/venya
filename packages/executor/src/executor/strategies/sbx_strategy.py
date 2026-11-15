@@ -286,6 +286,160 @@ def require_supported_sbx(timeout: float = 10.0) -> str:
 
 
 # ---------------------------------------------------------------------------
+# iid 795: which install route is TRUE on this host.
+#
+# The refusal below used to print one sentence for every platform. Leg 1373 measured that
+# `docker-sbx` has ZERO stanzas on every Debian publication face (and on jammy, focal,
+# oracular, plucky and stonking), while `noble` and `resolute` publish it — so the same
+# string was simultaneously correct on the Ubuntu server/executor target and a dead end on a
+# Debian host, which `README.md` names as a Workstation CLI platform only.
+#
+# The table is a MEASUREMENT, not a guess about the vendor's roadmap, so it is deliberately
+# narrow: a release is claimed to publish only when the face was read. Everything else —
+# including a Debian or Ubuntu release nobody has checked, and any other distribution — falls
+# to the asset route, which is the one face proved to work anywhere (leg 1371 installed the
+# vendor's linux-amd64 asset with no apt package and no sudo). An unidentified host is never
+# assumed to be Ubuntu: that assumption is what this fix removes.
+# ---------------------------------------------------------------------------
+
+ROUTE_APT = "apt"
+ROUTE_ASSET = "asset"
+ROUTE_UNIDENTIFIED = "unidentified"
+
+#: Releases read on download.docker.com with a non-zero `docker-sbx` stanza count.
+APT_PUBLISHING_RELEASES: frozenset[str] = frozenset({"noble", "resolute"})
+
+#: Ubuntu releases read on the same host with a ZERO count. Named separately from "anything
+#: else", because a measured absence is a different claim from an unmeasured one.
+APT_ABSENT_UBUNTU_RELEASES: frozenset[str] = frozenset({"jammy", "focal", "oracular", "plucky", "stonking"})
+
+#: Debian is a supported family in `README.md` (Workstation CLI) whose whole publication was read
+#: with zero `docker-sbx` stanzas, so it is recognised — not "unidentified".
+APT_ABSENT_FAMILIES: frozenset[str] = frozenset({"debian"})
+
+#: Handed to the reader so they can falsify this sentence at their own face instead of trusting
+#: a measurement baked into a release.
+APT_CHECK = "apt-cache policy docker-sbx"
+
+#: `download.docker.com` distribution directory whose asset route leg 1371 actually executed.
+SBX_VENDOR_ASSET = "https://github.com/docker/sbx-releases"
+
+#: The generic asset's archive, named so an operator can find it without a search engine.
+SBX_VENDOR_ASSET_FILE = "DockerSandboxes-linux-amd64.tar.gz"
+
+#: The grant `validate()` used to order inline. It is a host-privilege requirement owned by
+#: the installer (iid 384/383), not a line to type at a refusal, and it is stated, not run.
+_KVM_NOTE = (
+    "KVM access is a host-privilege requirement, not part of this install: the executor "
+    "installer grants it to the `venya` service account, so check it with `getent group kvm` "
+    "rather than editing your own membership from this message."
+)
+
+
+def read_os_release(path: str | Path = "/etc/os-release") -> dict[str, str]:
+    """Parse the KEY=VALUE pairs of an os-release file.
+
+    Absent or unreadable returns ``{}`` — a refusal must not be replaced by a second failure
+    while it is being built. Values are unquoted the way the shell would unquote them, because
+    a classifier that only recognised the exact lowercase token would silently fall to the safe
+    route on a host that legitimately publishes the package.
+    """
+    fields: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                key, sep, value = line.strip().partition("=")
+                if sep and key:
+                    fields[key] = value.strip().strip('"').strip("'")
+    except OSError:
+        return {}
+    return fields
+
+
+def _os_release_token(value: str) -> str:
+    """Normalise one os-release token the way the shell would read it.
+
+    The classifier owns this, rather than trusting the caller: an unquoted-vs-quoted or
+    capitalised spelling that fell through to the safe route would quietly deny a publishing
+    host its apt package.
+    """
+    return value.strip().strip('"').strip("'").casefold()
+
+
+def sbx_install_route(os_release: dict[str, str] | None = None) -> str:
+    """Return which install route the operator of THIS host can actually follow.
+
+    Pure over the mapping it is given (it reads os-release only when handed nothing), so a test
+    can assert a face without owning a box that is that face.
+    """
+    fields = read_os_release() if os_release is None else os_release
+    family = _os_release_token(fields.get("ID", ""))
+    release = _os_release_token(fields.get("VERSION_CODENAME", ""))
+    if family in APT_ABSENT_FAMILIES:
+        # Whole publication read, zero stanzas — a known family with no apt route.
+        return ROUTE_ASSET
+    if family != "ubuntu":
+        return ROUTE_UNIDENTIFIED
+    if release in APT_PUBLISHING_RELEASES:
+        return ROUTE_APT
+    if release in APT_ABSENT_UBUNTU_RELEASES:
+        return ROUTE_ASSET
+    # A release nobody read gets no claim at all — not the apt route, and not an assertion that
+    # the package is absent. Guessing either way is the defect this ticket files.
+    return ROUTE_UNIDENTIFIED
+
+
+def sbx_install_refusal(os_release: dict[str, str] | None = None) -> str:
+    """The `sbx CLI not found` sentence, classified for the host raising it.
+
+    Every branch names something the reader can act on at their own face — a package route that
+    exists, or the vendor asset with its file name — and none of them says "see the docs".
+    """
+    route = sbx_install_route(os_release)
+    fields = read_os_release() if os_release is None else os_release
+    family = _os_release_token(fields.get("ID", ""))
+    release = _os_release_token(fields.get("VERSION_CODENAME", "")) or "this release"
+    floor = ".".join(map(str, SBX_MIN_VERSION))
+
+    if route == ROUTE_APT:
+        head = (
+            "sbx CLI not found. This host runs Ubuntu "
+            f"{release}, which publishes the vendor package: install it with "
+            "curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh && "
+            "sudo apt-get install docker-sbx. "
+        )
+    elif route == ROUTE_ASSET and family in APT_ABSENT_FAMILIES:
+        head = (
+            f"sbx CLI not found. Docker's {family} publication carries no `docker-sbx` package, "
+            "so apt would find nothing here; install the vendor's generic asset instead — "
+            f"{SBX_VENDOR_ASSET} ({SBX_VENDOR_ASSET_FILE}), whose install.sh honours a PREFIX "
+            "you own — and put that bin directory on the executor's PATH. "
+            f"Check your own face with `{APT_CHECK}`. "
+        )
+    elif route == ROUTE_ASSET:
+        head = (
+            f"sbx CLI not found. No `docker-sbx` package was found for Ubuntu {release} in "
+            "Docker's publication, so apt may fail here; install the vendor's generic asset "
+            f"instead — {SBX_VENDOR_ASSET} ({SBX_VENDOR_ASSET_FILE}), whose install.sh honours a "
+            f"PREFIX you own — and put that bin directory on the executor's PATH. Check your own "
+            f"face with `{APT_CHECK}`. "
+        )
+    else:
+        # The lie this leg removes: this arm used to end `Check what your own repository offers
+        # with `apt-cache policy docker-sbx`.` on a sentence whose own words are "no package
+        # manager is named" — an odd box was handed the same apt instruction #795 was filed for.
+        # The falsifiable hand-over survives where an apt route is genuinely plausible (the two
+        # asset arms above); it cannot live here without making the first sentence false.
+        head = (
+            "sbx CLI not found, and no install route was verified for this host, so no package "
+            f"manager is named. The vendor's generic asset is the route proved to work on an "
+            f"unfamiliar host: {SBX_VENDOR_ASSET} ({SBX_VENDOR_ASSET_FILE}), install.sh with a "
+            "PREFIX you own, then put that bin directory on the executor's PATH. "
+        )
+    return f"{head}{_KVM_NOTE} The executor starts once `sbx version` reports >= {floor}."
+
+
+# ---------------------------------------------------------------------------
 # refs #312 item 3a (beta3 gate): refuse to boot an executor whose sandbox can
 # reach a container runtime.
 #
@@ -884,14 +1038,15 @@ class SbxStrategy(InjectionStrategy):
         return "sbx"
 
     def validate(self) -> None:
-        """Check that sbx CLI is installed."""
+        """Check that sbx CLI is installed.
+
+        The refusal classifies the install route for the host raising it (iid 795): a face that
+        publishes `docker-sbx` is told to install it, a face that does not is sent to the vendor
+        asset instead of to an apt package its family never publishes, and a face the product
+        cannot identify is never assumed to be Ubuntu.
+        """
         if shutil.which("sbx") is None:
-            raise RuntimeError(
-                "sbx CLI not found. Install with: "
-                "curl -fsSL https://get.docker.com | sudo REPO_ONLY=1 sh && "
-                "sudo apt-get install docker-sbx && "
-                "sudo usermod -aG kvm $USER && newgrp kvm"
-            )
+            raise RuntimeError(sbx_install_refusal())
 
     def prepare(self, secrets: list, session_id: str) -> InjectionResult:
         """Write secrets to host tmpfs.
