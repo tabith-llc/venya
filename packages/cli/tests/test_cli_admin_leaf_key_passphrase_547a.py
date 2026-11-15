@@ -318,12 +318,19 @@ class TestRefusalOrdering:
         assert "' x" not in err and "1 character" not in err
 
     def test_refusal_names_the_variable_and_the_fixing_command(self, tmp_path, capsys):
+        """Leg 1361 (1C): this cell used to pin the shared fragment here, at a
+        leaf-key site where the CA already EXISTS — following it (`init-admin-ca`)
+        would have planted a second, unrelated Admin CA. The refusal and its
+        before-any-write ordering are intact; the repair text is per-site now."""
         ca_dir = _admin_ca(tmp_path)
         os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
         assert cmd_admin_generate_admin_cert(_generate_args(ca_dir, tmp_path / "x")) == 1
         err = capsys.readouterr().err
-        assert ADMIN_CA_SETUP_FRAGMENT in err, "the refusal must carry the shared fragment verbatim"
-        assert "venya admin init-admin-ca" in err
+        assert "REFUSED" in err
+        assert "VENYA_ADMIN_CA_KEY_PASSPHRASE" in err
+        assert "venya admin generate-admin-cert" in err, "the site names its own re-run command"
+        assert "init-admin-ca" not in err
+        assert ADMIN_CA_SETUP_FRAGMENT not in err
 
 
 class TestThePartBReadSide:
