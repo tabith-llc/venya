@@ -225,6 +225,8 @@ class TestSbxStrategyCreateSandbox:
                 "venya-test123",
                 "--memory",
                 f"{self.MEMORY_MB}m",
+                "-t",
+                "docker.io/docker/sandbox-templates:shell",
                 "shell",
                 "/workspace",
             ]
@@ -246,15 +248,18 @@ class TestSbxStrategyCreateSandbox:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123")
             call_args = mock_run.call_args_list[0][0][0]
-            # #578 shifted this window: --memory sits between --name and shell,
-            # so the first seven tokens are the pinned prefix.
-            assert call_args[:7] == [
+            # #578 shifted this window and leg 1343 shifted it again: --memory sits
+            # between --name and the template, so the first nine tokens are the pinned
+            # prefix, and the template reference is one of them by name, not by digest.
+            assert call_args[:9] == [
                 "sbx",
                 "create",
                 "--name",
                 "venya-test123",
                 "--memory",
                 f"{self.MEMORY_MB}m",
+                "-t",
+                "docker.io/docker/sandbox-templates:shell",
                 "shell",
             ]
             workspace = call_args[len(call_args) - 1]
@@ -449,6 +454,8 @@ class TestSandboxMemoryDefault:
             "venya-test589",
             "--memory",
             f"{SANDBOX_MEMORY_DEFAULT_MB}m",
+            "-t",
+            "docker.io/docker/sandbox-templates:shell",
             "shell",
             "/workspace",
         ]

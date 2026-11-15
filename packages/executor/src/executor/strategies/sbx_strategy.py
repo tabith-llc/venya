@@ -329,6 +329,20 @@ RUNTIME_EXPOSED_GROUPS: frozenset[str] = frozenset({"docker", "sudo", "wheel", "
 #: sbx_command_timeout(), so a unit cell can inject a short bound.
 SBX_RT_PROBE_TIMEOUT = 60.0
 
+#: The sandbox template both create sites name, by image NAME at both sites.
+#: Passing the bare agent name lets the vendor choose the flavour, and the flavour it
+#: chooses for `shell` mounts a container-runtime socket the probe then correctly
+#: refuses. Naming the plain `shell` template takes that choice back: the sandbox the
+#: boot probe measures becomes the sandbox a workload gets, because both sites read
+#: this one value. What it gives up is stated once, here: the plain flavour carries no
+#: nested engine, so a container engine inside the sandbox is gone on this template —
+#: nothing in venya asks for one today. Revisit if a feature needs an in-sandbox
+#: engine, or if the vendor ships a flavour that mounts no runtime socket and still
+#: carries one; either is a change to this line and to nothing in the guard.
+#: By name, never by digest: `R-2927` cl.1's conditional trust is in the runtime probe's
+#: answer about the shape, not in a tag this code cannot check.
+SANDBOX_TEMPLATE = "docker.io/docker/sandbox-templates:shell"
+
 #: Marker prefix so probe output can never be confused with sandbox chatter.
 _RT_TAG = "VENYA_RT"
 
@@ -491,6 +505,8 @@ def require_runtime_isolated_sandbox(memory_mb: int | None, timeout: float | Non
             name,
             "--memory",
             f"{int(memory_mb)}m",
+            "-t",
+            SANDBOX_TEMPLATE,
             "shell",
             workspace,
         ]
@@ -1018,6 +1034,8 @@ class SbxStrategy(InjectionStrategy):
             sandbox_name,
             "--memory",
             f"{self.sandbox_memory_mb}m",
+            "-t",
+            SANDBOX_TEMPLATE,
             "shell",
             workspace,
         ]
