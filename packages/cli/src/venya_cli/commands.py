@@ -5267,24 +5267,29 @@ def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
     fact. No severity language.
 
     iid 794: the repair line is per-site. This door no longer interpolates
-    ``ADMIN_CA_SETUP_FRAGMENT``, whose second half names the admin CA mint. At a leaf-key
-    site the signing authority already exists and the value being asked for is the
-    passphrase of the key THIS command writes — a value the operator chooses here, not a
-    secret to go and look up — so following that pointer would plant a second authority the
-    core cannot chain to. The variable keeps one name across both admin planes (#554, and
-    this leg splits no predicate); the plane is what the sentence now states. The CA sites
-    keep their wording byte-for-byte, and the #547a ordering — refuse before any filesystem
-    work — is not edited here.
+    ``ADMIN_CA_SETUP_FRAGMENT``, whose second half names the admin CA mint — a leaf-key door
+    must not send the operator to create a signing authority. But the sentence that replaces
+    it is written to be true at BOTH of its callers, which the measurement here settled:
+    ``admin cert renew`` mints remotely and never opens a stored signing key, so its value is
+    chosen fresh (pinned by ``TestMechanismAndSentenceAgree``), while
+    ``admin generate-admin-cert`` signs locally and opens the stored authority key with the
+    SAME variable, so there the value has to be the one already in place for it (pinned by
+    ``TestLeafDoorsMakeNoCAClaim::test_generate_shares_one_value_with_the_stored_signing_key``).
+    A first draft of this text said "yours to choose, not one to look up", which is true at
+    renew and FALSE at the local mint — so the wording states the one fact both sites share
+    and makes the second conditional. The variable keeps one name across both admin planes
+    (#554) and this leg splits no predicate; the CA sites keep their wording byte-for-byte,
+    and the #547a ordering — refuse before any filesystem work — is not edited here.
     """
     return (
         f"REFUSED: the admin private key written by {site} must never be stored unencrypted.\n"
         "Nothing was written.\n"
         "To fix it:\n"
-        "  Choose a passphrase for this key, set it as VENYA_ADMIN_CA_KEY_PASSPHRASE in the\n"
-        f"  environment of this command, then re-run the same command: {site}\n"
-        "  The value is the passphrase of the key this command writes. It is yours to choose\n"
-        "  now, not one to look up: the same variable carries the passphrase for both admin\n"
-        "  planes (#554), and setting it here opens nothing else and changes no other file.\n"
+        "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE in the environment of this command to the\n"
+        f"  passphrase this key should carry, then re-run the same command: {site}\n"
+        "  The value is the passphrase of the key this command writes. One variable carries\n"
+        "  the passphrase for both admin planes (#554), so where a command also opens a\n"
+        "  stored signing key, it is the same value — set it to the one already in use.\n"
         "Note: the key is written encrypted at rest with that passphrase, and the CLI opens\n"
         "it the same way when it dials for admin mTLS — set the variable in the environment\n"
         "of both commands. To read the key back by hand, supply the same passphrase:\n"

@@ -198,6 +198,31 @@ class TestLeafDoorsMakeNoCAClaim:
             assert ADMIN_CA_SETUP_FRAGMENT not in text, site
             assert _CA_TOKEN.search(_action_text(text)) is None, f"{site}: {_action_text(text)!r}"
 
+    def test_generate_shares_one_value_with_the_stored_signing_key(self, tmp_path, capsys):
+        """The paired negative that set this leg's wording, and the reason the leaf sentence is
+        conditional rather than cheerful. `admin generate-admin-cert` signs LOCALLY, so the one
+        variable must carry the stored key's value too: drive it with a fresh value the
+        authority was not sealed with and the mint fails at the signing-key read, in the CA
+        door's own words. So 'choose a value here, nothing else to look up' would be TRUE of
+        renew and FALSE of generate, and the shipped sentence says neither.
+
+        This cell is green at base and must stay green — it is the mechanism the text now
+        matches, not a claim about a string.
+        """
+        ca_dir = _mint_admin_ca(tmp_path)
+        os.environ[VAR] = LEAF_SIDE_PASSPHRASE  # real value, clears the floor, seals nothing here
+        out = tmp_path / "leaf"
+        assert cmd_admin_generate_admin_cert(_generate_args(ca_dir, out)) == 1
+        err = capsys.readouterr().err
+        assert not out.exists(), "a mint that cannot open its signing key wrote a leaf anyway"
+        assert "failed to decrypt" in err and str(ca_dir / "admin-ca.key") in err, err
+        # and with the stored value the same mint succeeds — one variable, both planes (#554)
+        os.environ[VAR] = CA_SIDE_PASSPHRASE
+        assert cmd_admin_generate_admin_cert(_generate_args(ca_dir, out)) == 0
+        assert serialization.load_pem_private_key(
+            (out / "admin.key").read_bytes(), password=CA_SIDE_PASSPHRASE.encode()
+        )
+
 
 # --- §3.2 mechanism vs sentence ---
 

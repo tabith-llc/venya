@@ -347,8 +347,7 @@ def _admin_key_no_passphrase_refusal(keyfile: str) -> str:
         "To fix it:\n"
         "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE to the passphrase this admin client key was\n"
         "  sealed with, then re-run the command. At a dial the value has to match the key\n"
-        "  on disk, so it is not a new secret to choose — and setting it here opens nothing\n"
-        "  else and changes no other file on this machine.\n"
+        "  on disk, so it is not a new secret to choose here.\n"
         "  The passphrase is read from that variable at dial time.\n"
         "Reference: docs/cert-rotation-runbook.md (certificate rotation and key locations)."
     )
