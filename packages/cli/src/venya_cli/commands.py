@@ -5245,6 +5245,13 @@ def _admin_leaf_key_passphrase_or_none() -> str | None:
     ``_admin_ca_passphrase_or_none()`` — the ticket's "one shared predicate" law, and
     the reason a change to blankness cannot land on one path and miss the other.
     Behavior for this caller is unchanged.
+
+    iid 794 records what that delegation does NOT mean: the value returned here seals an
+    admin CLIENT key, not a signing authority's key. One name spanning two planes is the
+    ruling; the per-site truth is carried in the operator sentences
+    (``_admin_leaf_key_no_passphrase_refusal`` and
+    ``api_client._admin_key_no_passphrase_refusal``), never in a second variable or a
+    second predicate.
     """
     return _admin_ca_passphrase_or_none()
 
@@ -5259,22 +5266,25 @@ def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
     load an encrypted admin key for admin mTLS" — is FALSE and has been replaced by the
     fact. No severity language.
 
-    Leg 1361 (1C): the repair line is PER-SITE now. The shared ADMIN_CA_SETUP_FRAGMENT
-    ends in "then run: venya admin init-admin-ca", which is true only where the CA is
-    absent; at a leaf-key site the CA already exists and following it would mint a
-    second, unrelated Admin CA the core cannot accept. The refusal itself and its
-    before-any-filesystem-work ordering (#547a) are unchanged.
+    iid 794: the repair line is per-site. This door no longer interpolates
+    ``ADMIN_CA_SETUP_FRAGMENT``, whose second half names the admin CA mint. At a leaf-key
+    site the signing authority already exists and the value being asked for is the
+    passphrase of the key THIS command writes — a value the operator chooses here, not a
+    secret to go and look up — so following that pointer would plant a second authority the
+    core cannot chain to. The variable keeps one name across both admin planes (#554, and
+    this leg splits no predicate); the plane is what the sentence now states. The CA sites
+    keep their wording byte-for-byte, and the #547a ordering — refuse before any filesystem
+    work — is not edited here.
     """
     return (
         f"REFUSED: the admin private key written by {site} must never be stored unencrypted.\n"
         "Nothing was written.\n"
         "To fix it:\n"
-        "  Choose a passphrase and set it as VENYA_ADMIN_CA_KEY_PASSPHRASE. At this site\n"
-        "  the value is local to this command: it encrypts only the admin private key\n"
-        f"  {site} is about to write — it is not a stored CA secret.\n"
-        f"  Then re-run the same command: {site}\n"
-        "  This command needs a passphrase, not a new certificate authority: minting a\n"
-        "  second Admin CA here would produce certificates this core cannot accept.\n"
+        "  Choose a passphrase for this key, set it as VENYA_ADMIN_CA_KEY_PASSPHRASE in the\n"
+        f"  environment of this command, then re-run the same command: {site}\n"
+        "  The value is the passphrase of the key this command writes. It is yours to choose\n"
+        "  now, not one to look up: the same variable carries the passphrase for both admin\n"
+        "  planes (#554), and setting it here opens nothing else and changes no other file.\n"
         "Note: the key is written encrypted at rest with that passphrase, and the CLI opens\n"
         "it the same way when it dials for admin mTLS — set the variable in the environment\n"
         "of both commands. To read the key back by hand, supply the same passphrase:\n"

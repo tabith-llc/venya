@@ -326,26 +326,29 @@ def _admin_cert_fingerprint(cert_path: str) -> str:
 
 
 def _admin_key_no_passphrase_refusal(keyfile: str) -> str:
-    """#565 Part B, read door: the admin key is encrypted and this host has no passphrase.
+    """#565 Part B, read door: the admin client key is encrypted and this host has no passphrase.
 
     Names the variable, names the file, and says nothing was sent. It is NOT the "neither
     VENYA_ADMIN_CERT nor VENYA_ADMIN_KEY is set" text — the pair IS configured; what is
-    missing is the thing that opens it. Leg 1361 (1C): this site no longer interpolates
-    ``ADMIN_CA_SETUP_FRAGMENT`` — that sentence ends in ``init-admin-ca``, a CA mint, and
-    at a dial the right repair is to supply the passphrase that ENCRYPTS THE STORED KEY
-    and re-run the same command. Never retyped from ``commands`` here either; the two
-    repair texts are per-site by ruling.
+    missing is the thing that opens it.
+
+    iid 794: this door no longer interpolates ``ADMIN_CA_SETUP_FRAGMENT``, which is READ from
+    ``commands`` at call time (that module imports this one, so a module-level import would be
+    a cycle). That sentence ends in the admin CA mint, and at a dial the mint is the wrong
+    instruction twice over: the signing authority already exists, and the value asked for here
+    has to MATCH the key on disk rather than be chosen fresh. The repair is per-site now; the
+    CA-precondition sites keep their own wording untouched, and the variable keeps one name
+    across both admin planes (#554, shipped law — this leg moves no name and splits no
+    predicate).
     """
     return (
         f"REFUSED: the admin client key at {keyfile!r} is encrypted and no passphrase is\n"
         "configured, so it cannot be presented for admin mTLS. Nothing was sent.\n"
         "To fix it:\n"
-        "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE to the passphrase chosen when this key was\n"
-        "  created — at a dial the value must MATCH the stored key; it is not a new secret.\n"
-        "  Then re-run the same command.\n"
-        "  Fixing this is not a renewal: at a dial site a renewal is a mint — login\n"
-        "  session, one ceremony, and it overwrites the pair. And a second Admin CA\n"
-        "  minted here would carry certificates this core cannot chain to.\n"
+        "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE to the passphrase this admin client key was\n"
+        "  sealed with, then re-run the command. At a dial the value has to match the key\n"
+        "  on disk, so it is not a new secret to choose — and setting it here opens nothing\n"
+        "  else and changes no other file on this machine.\n"
         "  The passphrase is read from that variable at dial time.\n"
         "Reference: docs/cert-rotation-runbook.md (certificate rotation and key locations)."
     )
