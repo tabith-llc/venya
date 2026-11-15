@@ -5245,6 +5245,13 @@ def _admin_leaf_key_passphrase_or_none() -> str | None:
     ``_admin_ca_passphrase_or_none()`` — the ticket's "one shared predicate" law, and
     the reason a change to blankness cannot land on one path and miss the other.
     Behavior for this caller is unchanged.
+
+    iid 794 records what that delegation does NOT mean: the value returned here seals an
+    admin CLIENT key, not a signing authority's key. One name spanning two planes is the
+    ruling; the per-site truth is carried in the operator sentences
+    (``_admin_leaf_key_no_passphrase_refusal`` and
+    ``api_client._admin_key_no_passphrase_refusal``), never in a second variable or a
+    second predicate.
     """
     return _admin_ca_passphrase_or_none()
 
@@ -5259,22 +5266,31 @@ def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
     load an encrypted admin key for admin mTLS" — is FALSE and has been replaced by the
     fact. No severity language.
 
-    Leg 1361 (1C): the repair line is PER-SITE now. The shared ADMIN_CA_SETUP_FRAGMENT
-    ends in "then run: venya admin init-admin-ca", which is true only where the CA is
-    absent; at a leaf-key site the CA already exists and following it would mint a
-    second, unrelated Admin CA the core cannot accept. The refusal itself and its
-    before-any-filesystem-work ordering (#547a) are unchanged.
+    iid 794 + #789/#790 (reconciled): the repair line is per-site. This door no longer
+    interpolates ``ADMIN_CA_SETUP_FRAGMENT``, whose second half names the mint of a signing
+    authority — a leaf-key door must not send the operator to create one. The sentence that
+    replaces it is written to be true at BOTH of its callers, which the measurement settled:
+    ``admin cert renew`` mints remotely and never opens a stored signing key, so its value is
+    a fresh one to choose (pinned by ``TestMechanismAndSentenceAgree``), while
+    ``admin generate-admin-cert`` signs locally and opens the stored authority key with the
+    SAME variable, so there the value has to be the one already in place for it (pinned by
+    ``TestLeafDoorsMakeNoCAClaim::test_generate_shares_one_value_with_the_stored_signing_key``).
+    The class-of-value sentence from the landed repair text is kept in that conditional shape
+    — "choose" is true at the renewal half and the shared-value half names the other — so
+    neither ticket's assertion is edited away. The variable keeps one name across both admin
+    planes (#554) and no predicate is split; the CA sites keep their wording byte-for-byte,
+    and the #547a ordering — refuse before any filesystem work — is not edited here.
     """
     return (
         f"REFUSED: the admin private key written by {site} must never be stored unencrypted.\n"
         "Nothing was written.\n"
         "To fix it:\n"
-        "  Choose a passphrase and set it as VENYA_ADMIN_CA_KEY_PASSPHRASE. At this site\n"
-        "  the value is local to this command: it encrypts only the admin private key\n"
-        f"  {site} is about to write — it is not a stored CA secret.\n"
-        f"  Then re-run the same command: {site}\n"
-        "  This command needs a passphrase, not a new certificate authority: minting a\n"
-        "  second Admin CA here would produce certificates this core cannot accept.\n"
+        "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE in the environment of this command to the\n"
+        f"  passphrase this key should carry, then re-run the same command: {site}\n"
+        "  The value is the passphrase of the key this command writes — a fresh value to\n"
+        "  choose at a renewal that opens no stored signing key, and the value already in\n"
+        "  use where one variable (#554) carries both admin planes, since that command\n"
+        "  opens the stored key with it before writing anything new.\n"
         "Note: the key is written encrypted at rest with that passphrase, and the CLI opens\n"
         "it the same way when it dials for admin mTLS — set the variable in the environment\n"
         "of both commands. To read the key back by hand, supply the same passphrase:\n"

@@ -326,26 +326,38 @@ def _admin_cert_fingerprint(cert_path: str) -> str:
 
 
 def _admin_key_no_passphrase_refusal(keyfile: str) -> str:
-    """#565 Part B, read door: the admin key is encrypted and this host has no passphrase.
+    """#565 Part B, read door: the admin client key is encrypted and this host has no passphrase.
 
     Names the variable, names the file, and says nothing was sent. It is NOT the "neither
     VENYA_ADMIN_CERT nor VENYA_ADMIN_KEY is set" text — the pair IS configured; what is
-    missing is the thing that opens it. Leg 1361 (1C): this site no longer interpolates
-    ``ADMIN_CA_SETUP_FRAGMENT`` — that sentence ends in ``init-admin-ca``, a CA mint, and
-    at a dial the right repair is to supply the passphrase that ENCRYPTS THE STORED KEY
-    and re-run the same command. Never retyped from ``commands`` here either; the two
-    repair texts are per-site by ruling.
+    missing is the thing that opens it.
+
+    #789/#790 (landed): the repair is per-site — never retyped from ``commands``; the two
+    repair texts differ by ruling. This door says MATCH the stored key, re-run the same
+    command, and keeps the renewal warning: at a dial, a renewal is a mint that overwrites
+    the pair.
+
+    #794: this door no longer interpolates ``ADMIN_CA_SETUP_FRAGMENT`` (that constant lives
+    in ``commands``, which imports this module — a call-time read was the only cycle-free way to
+    share it, and it is no longer shared here). The fragment's second half names the mint of a
+    signing authority, and at a dial that instruction is wrong twice over: the authority
+    already exists, and the value asked for here has to MATCH the key on disk rather than be
+    chosen fresh. The operator-facing sentences stay CA-token-free under the shipped #794
+    predicate; the warning is kept in those words. The repair is per-site now; the
+    CA-precondition sites keep their own wording untouched, and the variable keeps one name
+    across both admin planes (#554, shipped law — this line moves no name and splits no
+    predicate).
     """
     return (
         f"REFUSED: the admin client key at {keyfile!r} is encrypted and no passphrase is\n"
         "configured, so it cannot be presented for admin mTLS. Nothing was sent.\n"
         "To fix it:\n"
-        "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE to the passphrase chosen when this key was\n"
-        "  created — at a dial the value must MATCH the stored key; it is not a new secret.\n"
-        "  Then re-run the same command.\n"
-        "  Fixing this is not a renewal: at a dial site a renewal is a mint — login\n"
-        "  session, one ceremony, and it overwrites the pair. And a second Admin CA\n"
-        "  minted here would carry certificates this core cannot chain to.\n"
+        "  Set VENYA_ADMIN_CA_KEY_PASSPHRASE to the passphrase this admin client key was\n"
+        "  sealed with, then re-run the same command. At a dial the value has to match the\n"
+        "  key on disk, so it is not a new secret to choose here.\n"
+        "  This is not a renewal: a renewal here would need a login session and one\n"
+        "  ceremony, and it would overwrite the pair — and a second signing authority\n"
+        "  minted at this site would carry certificates this core cannot chain to.\n"
         "  The passphrase is read from that variable at dial time.\n"
         "Reference: docs/cert-rotation-runbook.md (certificate rotation and key locations)."
     )
