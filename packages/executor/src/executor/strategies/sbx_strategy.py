@@ -427,12 +427,16 @@ def sbx_install_refusal(os_release: dict[str, str] | None = None) -> str:
             f"face with `{APT_CHECK}`. "
         )
     else:
+        # The lie this leg removes: this arm used to end `Check what your own repository offers
+        # with `apt-cache policy docker-sbx`.` on a sentence whose own words are "no package
+        # manager is named" — an odd box was handed the same apt instruction #795 was filed for.
+        # The falsifiable hand-over survives where an apt route is genuinely plausible (the two
+        # asset arms above); it cannot live here without making the first sentence false.
         head = (
             "sbx CLI not found, and no install route was verified for this host, so no package "
             f"manager is named. The vendor's generic asset is the route proved to work on an "
             f"unfamiliar host: {SBX_VENDOR_ASSET} ({SBX_VENDOR_ASSET_FILE}), install.sh with a "
             "PREFIX you own, then put that bin directory on the executor's PATH. "
-            f"Check what your own repository offers with `{APT_CHECK}`. "
         )
     return f"{head}{_KVM_NOTE} The executor starts once `sbx version` reports >= {floor}."
 

@@ -147,9 +147,30 @@ class TestDebianIsRecognisedNotUnknown:
 class TestReaderCanFalsifyTheSentence:
     def test_every_non_apt_face_hands_over_the_check_command(self):
         """The staleness guard: a measurement baked into a release must ship the instrument that
-        disproves it, or the fix rots into the same lie the next time the vendor publishes."""
-        for face in (DEBIAN_TRIXIE, UBUNTU_JAMMY, {}):
+        disproves it, or the fix rots into the same lie the next time the vendor publishes.
+
+        Leg 1389 re-aims this, it does not weaken it: the hand-over stays on every face where an
+        apt route is genuinely plausible (debian and known-ubuntu families, both asset arms), and
+        comes OFF the unidentified face — where the same arm's own first sentence says no package
+        manager is named, so naming `apt-cache` made the sentence false on all five unidentified
+        shapes (`{}` plus the four in UNIDENTIFIED_IDS). The paired negative below now pins the
+        other direction."""
+        for face in (DEBIAN_TRIXIE, UBUNTU_JAMMY):
             assert sbx.APT_CHECK in refusal_text(face)
+
+    def test_the_unidentified_face_names_no_package_manager(self):
+        """Paired negative, the shape `test_the_apt_face_does_not_need_it` extends: on a face the
+        product cannot identify, the refusal names NO package manager — not the apt command, not
+        any other — because the sentence that opens the arm claims exactly that. Red at
+        `54356e6f`, where the arm pasted `APT_CHECK` into its own last clause."""
+        managers = ("apt", "dnf", "yum", "zypper", "pacman", "apk", "emerge", "xbps-install")
+        for face in (*UNIDENTIFIED_IDS, {"ID": "rhel"}, {"ID": "suse", "VERSION_CODENAME": ""}):
+            text = refusal_text(face)
+            assert sbx.APT_CHECK not in text
+            lowered = text.casefold()
+            named = [m for m in managers if m in lowered]
+            assert not named, f"unidentified face {face} names {named}"
+            assert "no package manager is named" in lowered  # the claim the arm must keep
 
     def test_the_apt_face_does_not_need_it(self):
         """Paired negative — the check is not pasted onto a face whose route is the package."""
