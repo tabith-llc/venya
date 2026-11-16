@@ -1162,10 +1162,25 @@ fi
 # deny-all baseline; per-sandbox allow rules are applied from the egress
 # allowlist at execution time. Without this, every sbx create fails with
 # "global network policy has not been initialized".
-if sudo -H -u venya sbx policy init deny-all < /dev/null > /dev/null 2>&1; then
+# #801: the vendor answers the same non-zero status for two opposite outcomes --
+# a re-run over a policy that is already in place (harmless) and a host with no
+# policy at all (this guest cannot sandbox). Its sentence, not its status, is
+# what tells them apart, so the sentence is kept instead of discarded.
+# `sbx policy ls` is the operator's read and NOT this branch's test: measured
+# on a guest, its status follows the reading user's session rather than the
+# policy state, so it can fail on a host whose policy is fine.
+POLICY_INIT_RC=0
+POLICY_INIT_OUT="$(sudo -H -u venya sbx policy init deny-all < /dev/null 2>&1)" || POLICY_INIT_RC=$?
+if [ "$POLICY_INIT_RC" -eq 0 ]; then
     info "sbx global network policy initialized (deny-all)"
+elif printf '%s\n' "$POLICY_INIT_OUT" | grep -qi 'already initialized'; then
+    info "sbx global network policy already initialized — left as it is (read it: sudo -H -u venya sbx policy ls)"
 else
-    warn "sbx policy init deny-all failed or policy already initialized — verify manually if sandbox creates fail"
+    error "sbx global network policy is not initialized — sandbox creation fails with 'global network policy has not been initialized' until it is"
+    error "sbx policy init deny-all exited $POLICY_INIT_RC; its answer:"
+    printf '%s\n' "$POLICY_INIT_OUT" | tail -n 5 | sed 's/^/  /' >&2
+    error "Repair: sudo -H -u venya sbx policy init deny-all   (read the state: sudo -H -u venya sbx policy ls)"
+    warn "The install continues; sandbox execution stays unavailable until the policy is in place."
 fi
 
 # --- sbx agent-template warm (ticket sbx-cold-start-prepull) ---
