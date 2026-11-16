@@ -2,7 +2,7 @@
 
 Notable changes to Venya will be documented in this file.
 
-## [0.1.0beta3] - 2026-11-06
+## [0.1.0beta3] - 2026-11-16
 
 ### New features
 
@@ -12,6 +12,7 @@ Notable changes to Venya will be documented in this file.
 
 - If you call the role API yourself rather than through the CLI, the five writers now sit under `/api/v1/admin/`: `POST /api/v1/admin/roles`, `PUT /api/v1/admin/roles/{role_id}`, `DELETE /api/v1/admin/roles/{role_id}`, `POST /api/v1/admin/roles/{role_id}/members`, `DELETE /api/v1/admin/roles/{role_id}/members/{user_id}` — update the path in your caller or it reads 405 or 404 (#729)
 - Ubuntu 26.04 LTS is now the tested target for the core and the executor, and Ubuntu 24.04 is no longer a supported server/executor platform, so check the host's release with `cat /etc/os-release` before you install: the installers carry no OS-version check, so a release outside the tested target is not refused, it is simply untested (your workstation is unaffected — the Workstation CLI still runs on Ubuntu 24.04, Debian 13 and macOS)
+- Redaction markers in command output are now per-response identifiers rather than short digests of the secret itself, so anything that recognised a masked value by its `[REDACTED:<id>]` text — a log parser, a correlation rule, a test that asserts on the marker — sees a different id per response: masked-ness, one marker per distinct secret and the mask counts are unchanged, but a marker that was a prefix of the secret's own digest let anyone holding a captured log line test a guessed password against it offline, and equal secrets printed equal markers wherever they appeared; key your rules on the field and the fact that a mask fired, not on the marker text (#793)
 
 ### Added
 
@@ -25,6 +26,7 @@ Notable changes to Venya will be documented in this file.
 - A pre-upgrade restore point in `/var/backups/venya` is taken on a same-version re-run too, where it used to key on two version strings differing; the three newest are kept, and a failed dump stops the run before any migration (#750)
 - `VENYA_PURGE_CA=yes` on the core uninstaller is now the only way to remove the estate CA, and it is a separate choice from `VENYA_SKIP_PROMPT` — skipping the prompt does not authorise it (#749)
 - The full-lifecycle test plan carries the guard-crossing rule for middleware and auth-routing cells: such a cell mounts the shipped session middleware and the real router, or says which half it is not crossing (#730)
+- Signing in with a key the core does not recognise now leaves a clear record on the core saying which user id had no credentials to offer and why the challenge was still issued; previously the browser was handed an empty choice, volunteered some other key it happened to hold, and the next answer blamed that key — an accurate-sounding dead end with no trace behind it. The log line names the user id and nothing else: no challenge, no credential material, and the response a client sees is byte-for-byte what it was before (#789)
 
 ### Changed
 
@@ -34,6 +36,8 @@ Notable changes to Venya will be documented in this file.
 - The startup disk-encryption check finds the PostgreSQL cluster the machine actually runs — the cluster manager first, then the running server, then a single installed cluster — instead of assuming `/var/lib/postgresql/16/main` (#740)
 - An unattended re-run of the executor installer that would change the installed `executor_id` refuses and writes nothing, naming both values: set `VENYA_EXECUTOR_ID=` to either one to consent by name, and an interactive run keeps its confirmation (#746)
 - Uninstalling a core leaves `/var/lib/venya/ca` standing while the rest of the service's state under `/var/lib/venya` still goes, and the run prints the path it left behind so you can finish deliberately (#749)
+- When the administrative client certificate is protected by a passphrase, the CLI now says so at the moment it needs it and names the variable that holds it; the message used to read as though a certificate were missing and needed minting, when the key was there all along and simply encrypted, and following it would have started a ceremony creating a second certificate authority your core then refuses — the refusal, its ordering and everything it declines to do are unchanged, only the guidance was wrong about which door you were standing at (#794)
+- The same guidance is now given once, in one sentence, wherever an administrative key passphrase is needed; where two sites once printed two different repairs, an operator who followed one could still be refused by the other, and the wording is now the same at both and states the value once — the distinct refusal reasons are preserved, so a reader can still tell what went wrong, but which of the two doors answered is no longer inferable from the text, which is deliberate: the administrative plane answers refusals in one indistinguishable form, and a more specific repair message would have quietly undone that (#794)
 
 ### Fixed
 
@@ -57,6 +61,7 @@ Notable changes to Venya will be documented in this file.
 - Uninstalling an executor keeps `/var/lib/venya` — the executor CA and its enrollment state — where it used to take the directory with the rest of the service, and it now refuses a state path that is a symlink, naming the link and where it points; run it again with `VENYA_PURGE_STATE=yes` when you mean the state gone, and either way the run prints what happened only after it has proved the path's real state (#757)
 - The published install and recovery commands used to write an installer variable after `sudo`, which makes it one of sudo's arguments and keeps the value in that process's command line, readable to other local accounts, for the life of the install; they now set it before `sudo` and pipe into `sudo -E bash -s`, and `docs/cert-rotation-runbook.md` reads the one `VENYA_ADMIN_CA_KEY_PASSPHRASE` line it needs instead of printing the whole env file (#756)
 - Two sentences in `install-venya-core.sh` claimed more than the script does: the unreadable-incoming-version arm of the schema compare warns and continues, where its line said the version guard had refused, and a restore point is taken before migrations run, not before anything changes, so both lines now match the path you are on (#759)
+- An operator whose sandbox tools could not be found no longer receives installation instructions for a package their platform does not publish (#795)
 
 ## [0.1.0beta2] - 2026-10-28
 
