@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**85 suppression lines across 29 files.**
+**86 suppression lines across 29 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -26,6 +26,7 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/cli/src/venya_cli/cli.py` | `except Exception:  # nosec B110 — unwritable config dir must not break the CLI` |
 | `packages/cli/src/venya_cli/commands.py` | `resp = httpx2.get(url, verify=False, timeout=5.0)  # nosec B403 -- scoped TOFU bootstrap; see docstring` |
 | `packages/cli/src/venya_cli/commands.py` | `except Exception:  # nosec B110  # noqa: S110` |
+| `packages/cli/src/venya_cli/commands.py` | `except Exception:  # nosec B110 — an unreadable config is "nothing configured"` |
 | `packages/cli/src/venya_cli/executor_key.py` | `EXECUTOR_KEY_PASSPHRASE_ENV = "VENYA_EXECUTOR_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/cli/src/venya_cli/fido2_client.py` | `except Exception:  # noqa: S110  # nosec B110 — deliberate: parse failure keeps raw status text` |
 | `packages/cli/src/venya_cli/webauthn.py` | `except Exception:  # nosec B110  # noqa: S110` |
