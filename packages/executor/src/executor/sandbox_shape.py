@@ -171,6 +171,30 @@ def _clip(text: str) -> str:
     return (text or "").strip()[:200]
 
 
+def _rows(payload: Any, key: str) -> list[dict[str, Any]] | None:
+    """The vendor's rows from either face it answers with, or ``None`` when the answer is not that answer.
+
+    ``sbx template ls --json`` and ``sbx settings list --json`` print a top-level ARRAY of rows at
+    v0.50.1; the OBJECT face leg 1328 captured carries the same rows under ``key``. Both are read
+    here. Anything else is a SHAPE fact and gets its own sentence, because a shape answer reported
+    as "the JSON answer did not parse" points an operator at a parse failure on a machine that
+    answered cleanly. ``None`` means shape: an object with no ``key`` at all is shape, while an
+    explicit ``null`` or ``[]`` under it stays the empty answer this recorder has always written.
+    """
+    if isinstance(payload, dict):
+        if key not in payload:
+            return None
+        payload = payload[key] or []
+    if isinstance(payload, list) and all(isinstance(row, dict) for row in payload):
+        return payload
+    return None
+
+
+def _shape_reason(what: str, key: str) -> str:
+    """The sentence for an answer that parsed into the wrong shape — never the parse sentence."""
+    return f"the answer parsed but is not {what}: expected an array of rows, or an object with a {key!r} array"
+
+
 def dpkg_fields(fields: dict[str, Any]) -> None:
     """Vendor package name and version, from one ``dpkg-query`` (absent off-Debian = unread)."""
     label = "dpkg-query -W -f='${Package} ${Version}' docker-sbx"
@@ -216,10 +240,16 @@ def template_fields(fields: dict[str, Any]) -> None:
         fields["template.image_ids"] = unread(label, rc, _clip(err or out or "no answer"))
         return
     try:
-        images = json.loads(out).get("images") or []
-    except (ValueError, AttributeError):
+        payload = json.loads(out)
+    except ValueError:
         fields["template.refs"] = unread(label, rc, "the JSON answer did not parse")
         fields["template.image_ids"] = unread(label, rc, "the JSON answer did not parse")
+        return
+    images = _rows(payload, "images")
+    if images is None:
+        why = _shape_reason("a template answer", "images")
+        fields["template.refs"] = unread(label, rc, why)
+        fields["template.image_ids"] = unread(label, rc, why)
         return
     refs = sorted(f"{i.get('repository', '')}:{i.get('tag', '')}" for i in images)
     fields["template.refs"] = field(refs, label, rc)
@@ -284,10 +314,16 @@ def setting_fields(fields: dict[str, Any]) -> None:
             fields[f"setting.{key}"] = unread(label, rc, _clip(err or out or "no answer"))
         return
     try:
-        rows = json.loads(out)
+        payload = json.loads(out)
     except ValueError:
         for key in SETTING_KEYS:
             fields[f"setting.{key}"] = unread(label, rc, "the JSON answer did not parse")
+        return
+    rows = _rows(payload, "settings")
+    if rows is None:
+        why = _shape_reason("a settings answer", "settings")
+        for key in SETTING_KEYS:
+            fields[f"setting.{key}"] = unread(label, rc, why)
         return
     by_key = {r.get("key"): r for r in rows if isinstance(r, dict)}
     for key in SETTING_KEYS:
