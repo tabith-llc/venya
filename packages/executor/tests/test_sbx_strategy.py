@@ -764,8 +764,9 @@ class TestSbxStrategyExecuteCommand:
                 stderr=b"",
             )
             result = strategy.execute_command("echo hello")
-            mock_run.assert_called_once()
-            call_args = mock_run.call_args[0][0]
+            # exec (call 0), then the bounded `sbx policy log` read (leg 1424)
+            assert mock_run.call_count == 2
+            call_args = mock_run.call_args_list[0][0][0]
             assert call_args == ["sbx", "exec", "venya-test123", "sh", "-c", "echo hello"]
             assert result.stdout == b"hello"
 
@@ -794,7 +795,8 @@ class TestSbxStrategyArgvDirect322:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=b"out", stderr=b"")
             strategy.execute_command("display string", **kwargs)
-            return mock_run.call_args[0][0]
+            # call 0 is the exec site; the policy-log read at leg 1424 follows it
+            return mock_run.call_args_list[0][0][0]
 
     def test_argv_tokens_run_direct_no_shell(self):
         """Positive: argv present -> sbx receives the tokens verbatim after the
@@ -820,7 +822,7 @@ class TestSbxStrategyArgvDirect322:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
             strategy.execute_command(rendered)
-        assert mock_run.call_args[0][0] == ["sbx", "exec", "venya-test123", "sh", "-c", rendered]
+        assert mock_run.call_args_list[0][0][0] == ["sbx", "exec", "venya-test123", "sh", "-c", rendered]
 
     def test_empty_argv_rejected_before_exec(self):
         """Empty list is a caller bug, not an exec: fail loud BEFORE any sbx
@@ -896,7 +898,8 @@ class TestSbxStrategyExecuteEnvCwd:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
             strategy.execute_command("cmd", **kwargs)
-            return mock_run.call_args[0][0]
+            # call 0 is the exec site; the policy-log read at leg 1424 follows it
+            return mock_run.call_args_list[0][0][0]
 
     def test_env_only_uses_env_file_never_argv(self, tmp_path):
         strategy = self._strategy(tmp_path)

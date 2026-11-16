@@ -81,8 +81,12 @@ def _exec_run(timeout_capture: dict):
     """Patch ``subprocess.run`` at the exec site and record the bound it carried."""
 
     def _fake_run(cmd, **kwargs):
-        timeout_capture["timeout"] = kwargs.get("timeout")
-        timeout_capture["cmd"] = cmd
+        # The EXEC site only: `execute_command` also makes a bounded `sbx policy log`
+        # read after the exec returns (leg 1424), and this row is about the ceiling that
+        # bounds the command, so the recorder names the call instead of taking the last.
+        if list(cmd)[:2] == ["sbx", "exec"]:
+            timeout_capture["timeout"] = kwargs.get("timeout")
+            timeout_capture["cmd"] = cmd
         return MagicMock(returncode=0, stdout=b"out", stderr=b"")
 
     return patch("subprocess.run", side_effect=_fake_run)
