@@ -2254,6 +2254,29 @@ async def execute_command_on_executor(
     )
     db.add(audit_event)
 
+    # AUDIT EVENT: egress refused. A separate row beside the executed one, not a rewrite
+    # of it: the command ran and the proxy answered it, so `command_executed` with
+    # `exit_code=0` is a true statement about the process and a misleading sole record of
+    # the run. This is the half of the trail that used to read "ran normally" for a
+    # destination the sandbox was never given a path to. Fields carry the refused
+    # destination as the runtime named it; nothing else is added and no output crosses
+    # into the trail here.
+    if result["egress_denied"]:
+        db.add(
+            AuditEvent(
+                event_type="egress_denied",
+                user_id=auth_user["user_id"],
+                fields={
+                    "session_id": session.id,
+                    "executor_id": id,
+                    "command": display_command,
+                    "exit_code": result["exit_code"],
+                    "egress_host": result["egress_denied_host"],
+                },
+                timestamp=now,
+            )
+        )
+
     # Mark session as completed via a bulk UPDATE that tolerates a row that vanished
     # mid-execute (ticket execute-stale-session-update-500) — an ORM flush here raised
     # StaleDataError -> 500 after the command already ran. The audit event above commits

@@ -17,12 +17,14 @@ restricted via `sbx policy allow/deny` rules.
 
 import logging
 import os
+import pwd
 import re
 import shutil
 import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands
 import tempfile
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -34,10 +36,36 @@ from typing import NamedTuple
 # puts the EXEC'D helper under /usr/local/bin instead, lives beside the constant.
 from venya_contract import ASKPASS_HELPER_PATH, CONTAINER_SECRET_DIR
 
-from ..egress_filter import DEFAULT_ALLOWLIST_PATH, EgressFilter, egress_deny_notice
+from ..egress_filter import (
+    DEFAULT_ALLOWLIST_PATH,
+    EgressFilter,
+    ProxyEgressDenial,
+    egress_deny_notice,
+    proxy_egress_denial,
+    proxy_egress_denial_notice,
+    sbx_policy_log_argv,
+)
 from .base import InjectionResult, InjectionStrategy, SecretMount
 
 logger = logging.getLogger("venya.executor.strategies.sbx")
+
+
+def daemon_account() -> str:
+    """The account THIS process runs as, which is the one the sandbox daemon's `sbx login`
+    credentials belong to. An operator reading a denial line needs this name: the runtime's
+    policy log answers for this account and answers nothing for any other (measured both
+    directions on an executor test guest: as the daemon account it lists the refusals, as a login
+    account it refuses with an authentication error)."""
+    name = os.environ.get("USER")
+    if name:
+        return name
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        # No login name and no passwd row: the numeric uid is still an identity an
+        # operator can act on, and a repair line that names nothing is not a repair.
+        return str(os.getuid())
+
 
 # tmpfs base on host — secrets never touch disk
 SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec
@@ -1022,6 +1050,10 @@ class SbxStrategy(InjectionStrategy):
         self.secret_base_fd = secret_base_fd
         self.dns_resolver = dns_resolver
         self.egress_allowlist_path = egress_allowlist_path
+        # The refusal the runtime recorded for the LAST command this instance ran, or None.
+        # `execute_command` writes it on every run, including a clean one, so a value read
+        # after the call always describes that call and never an earlier one.
+        self.egress_denial: ProxyEgressDenial | None = None
         # #578: the explicit --memory cap for every sandbox this strategy
         # creates. None is not "unbounded" — it is "refuse at create", so an
         # unset knob never silently inherits the vendor default (50% of the
@@ -1732,6 +1764,7 @@ class SbxStrategy(InjectionStrategy):
         else:
             cmd += [self._sandbox_name, "sh", "-c", command]
 
+        started_at = datetime.now(UTC)
         try:
             # stdin=DEVNULL: without it the sbx client inherits the DAEMON's stdin, so a
             # guest command that waits on stdin (ssh at a prompt, `read`, a pager) holds the
@@ -1748,31 +1781,98 @@ class SbxStrategy(InjectionStrategy):
             if env_file:
                 self._destroy_env_file(env_file)
                 self._release_fallback_dir()
-        # Report 311, R-2909 item 1: a destination the policy never admitted is
-        # refused by the sandbox network path, which completes the handshake
-        # locally and closes it — so what reached this stream was a PEER's error
-        # message about a peer that received no packet
-        # (`kex_exchange_identification: Connection closed by remote host`, with
-        # the intake file's negative control a probe of a port the operator's own
-        # log shows is blocked, failing the same way). Name the refusal as venya's
-        # own, in the stream the caller reads, and keep the same line in the
-        # journal. Nothing about the command's own output is changed: the notice is
-        # appended, and it carries a destination, a path, an entry count and a
-        # resolver address — never a value, never file contents.
-        notice = egress_deny_notice(
-            (result.stderr or b"").decode("utf-8", "replace"),
-            returncode=result.returncode,
-            command=command,
-            argv=argv,
-            egress=EgressFilter(
-                allowlist_path=Path(self.egress_allowlist_path),
-                dns_resolver=self.dns_resolver or "",
-            ),
+        egress = EgressFilter(
+            allowlist_path=Path(self.egress_allowlist_path),
+            dns_resolver=self.dns_resolver or "",
         )
+        # The runtime's own refusal record is the primary face. A denied egress arrives as a
+        # COMPLETED response: the proxy answers with its own HTTP 403, so this stream can
+        # carry nothing that names the refusal and the exit code is the caller's client
+        # judging that answer — measured again at leg 1424 on an executor test
+        # guest (sbx v0.46.0): plain `curl` exits 0 and `curl --fail` exits 22 over
+        # one and the same denied destination. `sbx policy log` holds the refusal, keyed to
+        # this sandbox's name (which carries the session id), and it outlives the sandbox, so
+        # it is read after the run and said back in the channel the caller reads.
+        self.egress_denial = self._proxy_egress_denial(self._sandbox_name, started_at)
+        notice: str | None = None
+        if self.egress_denial is not None:
+            notice = proxy_egress_denial_notice(
+                self.egress_denial,
+                sandbox_name=self._sandbox_name,
+                daemon_user=daemon_account(),
+                egress=egress,
+            )
+            logger.warning("Sandbox egress denied for %s: %s", self._sandbox_name, notice)
+        else:
+            # Report 311, R-2909 item 1: a destination the policy never admitted is
+            # refused by the sandbox network path, which completes the handshake
+            # locally and closes it — so what reached this stream was a PEER's error
+            # message about a peer that received no packet
+            # (`kex_exchange_identification: Connection closed by remote host`, with
+            # the intake file's negative control a probe of a port the operator's own
+            # log shows is blocked, failing the same way). This is the FALLBACK face now:
+            # it carries the run where the runtime's log did not answer. Name the refusal
+            # as venya's own, in the stream the caller reads, and keep the same line in
+            # the journal. Nothing about the command's own output is changed: the notice
+            # is appended, and it carries a destination, a path, an entry count and a
+            # resolver address — never a value, never file contents.
+            notice = egress_deny_notice(
+                (result.stderr or b"").decode("utf-8", "replace"),
+                returncode=result.returncode,
+                command=command,
+                argv=argv,
+                egress=egress,
+            )
+            if notice:
+                logger.warning("Sandbox egress denial shape for %s: %s", self._sandbox_name, notice)
         if notice:
-            logger.warning("Sandbox egress denial shape for %s: %s", self._sandbox_name, notice)
             result.stderr = (result.stderr or b"") + f"\n{notice}".encode()
         return result
+
+    def _proxy_egress_denial(self, sandbox_name: str, started_at: datetime) -> ProxyEgressDenial | None:
+        """Ask the runtime for a refusal THIS run earned, and return it or None.
+
+        One bounded read of `sbx policy log` for this sandbox, issued after the exec
+        returns. Every failure to answer — a timeout, a non-zero status, output that is not
+        the JSON shape above — returns None, which claims nothing: no notice, no denial
+        field, and the shape fallback at the call site keeps today's behavior. An
+        instrument that did not answer is never read as a clean run or as a refusal.
+        """
+        log_cmd = sbx_policy_log_argv(sandbox_name)
+        try:
+            logged = subprocess.run(  # nosec B603 B607
+                log_cmd,
+                capture_output=True,
+                text=True,
+                timeout=sbx_policy_timeout(),
+                check=False,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "sbx policy log timed out after %s seconds (VENYA_SBX_POLICY_TIMEOUT) for "
+                "sandbox %s — no egress denial is claimed for this run",
+                sbx_policy_timeout(),
+                sandbox_name,
+            )
+            return None
+        if logged.returncode != 0:
+            # The account matters here, and the operator cannot see it from this side: the
+            # log belongs to whoever the sandbox daemon signs in as, so a read from any
+            # other account refuses with an authentication error. Name that, and do not
+            # quote the vendor's own text onward (it is this daemon's log, not the
+            # caller's, and it can carry paths).
+            logger.warning(
+                "sbx policy log refused for sandbox %s (rc %d) as account %r — no egress "
+                "denial is claimed for this run; the record answers only for the account "
+                "the sandbox daemon signs in under (`sudo -n sudo -u <that account> %s`)",
+                sandbox_name,
+                logged.returncode,
+                daemon_account(),
+                " ".join(log_cmd),
+            )
+            return None
+        return proxy_egress_denial(logged.stdout, sandbox_name=sandbox_name, started_at=started_at)
 
     def remove_sandbox(self) -> int:
         """Remove the sandbox and all its contents.

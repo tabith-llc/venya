@@ -89,6 +89,19 @@ certificate verified from inside a sandbox is verified **against that proxy**, n
 against the endpoint an operator assumes was reached. The deny-by-default guarantee
 above is unchanged by this; what it governs is payload.
 
+**How a refusal reaches the operator.** The proxy answers a denied request as a
+**completed HTTP 403 of its own**, so the caller's exit code is its own client's verdict on
+a response it did receive: plain `curl` exits 0 and `curl --fail` exits 22 over one and the
+same denied destination. Venya therefore reads the runtime's own refusal record
+(`sbx policy log <sandbox> --json`, keyed to the sandbox name, which carries the session id,
+and it outlives the sandbox) and says the refusal in all three places the run is seen — the
+output the caller reads, the answer the CLI and the MCP print, and one `egress_denied` audit
+row beside `command_executed`. That record belongs to the account the sandbox daemon signs
+in under; read it as that account, e.g. `sudo -n sudo -u venya sbx policy log <sandbox>` on
+an executor guest — the same verb from a login account answers nothing, which is a
+visibility wall and not an empty log. Open refusals, each with its allow and dismiss verbs,
+are on `sudo -n sudo -u venya sbx policy approval ls`.
+
 **Host firewall on an executor:** **8443/tcp inbound** from the core, **443/tcp outbound**
 to the core (and to Docker Hub for template pulls). Target reachability is configured in
 the sbx egress allowlist, not the host firewall.
