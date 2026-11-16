@@ -16,7 +16,9 @@ reads to the caller as somebody else's broken network: ``describe()`` names the
 path, the entry count and the resolver at start and at every create,
 ``proxy_egress_denial()`` reads the refusal out of the runtime's own log and
 ``proxy_egress_denial_notice()`` says it back to the caller, ``egress_deny_notice()``
-relabels the transport-close shape as venya's own where the log did not answer, and
+relabels the transport-close shape as venya's own where the log did not answer,
+``proxy_egress_log_outcome()`` is the three-way read behind the first of those — refused, nothing
+refused, or an answer this build cannot read, named as its own outcome — and
 ``resolver_address_problem()`` refuses a resolver value that names no host.
 """
 
@@ -26,8 +28,10 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
+
+from .sandbox_shape import rows_from_any_face
 
 logger = logging.getLogger("venya.executor.egress")
 
@@ -464,14 +468,30 @@ def egress_deny_notice(
 # sandbox name (which carries the venya session id) and it survives the sandbox. Read this
 # record and say it back: that is what makes a denied run distinguishable in both channels.
 #
-# Measured face, sbx v0.46.0 on an executor test guest (leg 1424): the verb is
+# Measured faces, both captured from the tool and kept as fixtures under
+# `packages/executor/tests/fixtures/` (leg 1440), on an executor test guest:
+#
+# v0.46.0 (``sbx version: v0.46.0 991967dc…``, first read by leg 1424) — the verb is
 # `sbx policy log [SANDBOX] --json` and its answer is
 #   {"allowed_hosts": [...],
 #    "blocked_hosts": [{"host": "example.com:80", "vm_name": "<sandbox>",
 #      "proxy_type": "forward", "rule": "no applicable policies for op(...)",
 #      "last_seen": "<RFC3339 UTC>", "since": "<RFC3339 UTC>", "count_since": 1,
-#      "reason": "No matching allow rule (default deny)"}]}
-# `blocked_hosts` rows are HISTORY, not this run: the same host keeps its earlier row after
+#      "reason": "No matching allow rule (default deny)}"}
+#
+# v0.50.1 (``sbx version v0.50.1 ddb0268d…``, the estate face leg 1435 met, captured here on a
+# test guest by leg 1440) — same verb, same rows, different names:
+#   {"allowed": [],
+#    "blocked": [{"sandbox_id": "<sandbox>", "host": "example.com:443",
+#      "proxy_type": "forward", "rule": "...", "reason": "No matching allow rule (default deny)",
+#      "count": 1, "first_seen": "<RFC3339 UTC>", "last_seen": "<RFC3339 UTC>"}]}
+#
+# The rows are read by field name from either envelope through `sandbox_shape.rows_from_any_face`
+# — one seam, no second shape table — because the installer sets a vendor version FLOOR and no
+# ceiling, so both faces are admissible on a customer machine and an unseen release is still
+# unseen. Nothing here branches on a version number.
+#
+# `blocked_hosts` / `blocked` rows are HISTORY, not this run: the same host keeps its earlier row after
 # an allow rule is added, so a reader that ignored `last_seen` would mark a later, genuinely
 # delivered run as denied. That window is what `started_at` below is for.
 
@@ -482,6 +502,61 @@ class ProxyEgressDenial(NamedTuple):
     host: str
     reason: str
     hits: int
+
+
+#: The three things one `sbx policy log` answer can honestly say.
+#: `denied` and `clear` are claims about THIS run; `unrecognised` is a claim about the
+#: instrument, and it is never either of the other two.
+EGRESS_LOG_DENIED = "denied"
+EGRESS_LOG_CLEAR = "clear"
+EGRESS_LOG_UNRECOGNISED = "unrecognised"
+
+#: The names the runtime has been measured using for one refusal list, and for the row that
+#: says which sandbox it belongs to. Read from the captures in `tests/fixtures/`, not from a
+#: version table: a version test would be a guess about a release nobody has met.
+POLICY_LOG_LIST_KEYS: tuple[str, ...] = ("blocked_hosts", "blocked")
+POLICY_LOG_SANDBOX_KEYS: tuple[str, ...] = ("vm_name", "sandbox_id")
+POLICY_LOG_COUNT_KEYS: tuple[str, ...] = ("count_since", "count")
+
+
+class ProxyEgressLogOutcome(NamedTuple):
+    """What one policy-log read says, with the reason kept beside it.
+
+    `denial` is set only for `denied`. `detail` is a short, value-free description of what the
+    answer looked like, and it is what the operator-facing sentence names when the shape is not
+    one this build can read.
+    """
+
+    shape: str
+    denial: ProxyEgressDenial | None = None
+    detail: str = ""
+
+    @property
+    def unrecognised(self) -> bool:
+        """The answer arrived, and this build could not read it — the one outcome that must never
+        be reported as a clean run."""
+        return self.shape == EGRESS_LOG_UNRECOGNISED
+
+
+def _row_value(row: dict[str, Any], names: tuple[str, ...]) -> Any:
+    """The first of `names` this row actually carries."""
+    for name in names:
+        if name in row:
+            return row[name]
+    return None
+
+
+def _describe_answer(parsed: Any) -> str:
+    """Which keys the answer did carry — names only, never values.
+
+    An operator reading the unrecognised sentence needs to know what the runtime said, not what
+    it refused, and a row value can carry a destination the caller should not see echoed.
+    """
+    if isinstance(parsed, dict):
+        return "top-level keys: " + ", ".join(sorted(str(key) for key in parsed))
+    if isinstance(parsed, list):
+        return f"a top-level array of {len(parsed)} rows"
+    return f"a {type(parsed).__name__}"
 
 
 def sbx_policy_log_argv(sandbox_name: str) -> list[str]:
@@ -507,37 +582,71 @@ def _log_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def proxy_egress_denial(
+def proxy_egress_log_outcome(
     log_output: str | bytes,
     *,
     sandbox_name: str,
     started_at: datetime,
-) -> ProxyEgressDenial | None:
-    """The refusal THIS run earned, or None.
+) -> ProxyEgressLogOutcome:
+    """Read one `sbx policy log --json` answer and say which of three things it is.
 
-    None is also the answer for a log that did not answer, for JSON that does not parse in
-    the shape above, and for rows whose `last_seen` predates `started_at`: this function
-    claims a denial only from the runtime's own record of the window it was given, and an
-    unreadable instrument is not evidence that traffic was refused.
+    `denied` — the runtime recorded a refusal for this sandbox inside this run's window.
+    `clear` — the answer is one this build reads, and it holds no refusal for this sandbox in
+    this window, including the history case: an older row for the same host is not this run.
+    `unrecognised` — an answer came back and this build could not read it: no refusal list under
+    either measured name, rows that name no sandbox, JSON that does not arrive whole, or an
+    envelope that is not the one this verb prints.
+
+    The third case is the one this function exists to separate from the second. Both used to
+    answer `None`, which let a vendor release that renamed two fields report a refused run as an
+    allowed one — the one claim a customer must not be handed silently. An unreadable instrument
+    is still not evidence that traffic was refused, so this never promotes an `unrecognised`
+    answer into a denial either; it names its own limit and the caller says it out loud.
     """
     if isinstance(log_output, bytes):
         log_output = log_output.decode("utf-8", "replace")
     try:
         parsed = json.loads(log_output)
     except (TypeError, ValueError):
-        return None
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("blocked_hosts"), list):
-        return None
+        return ProxyEgressLogOutcome(EGRESS_LOG_UNRECOGNISED, None, "the answer did not arrive as one JSON value")
+
+    rows = rows_from_any_face(parsed, *POLICY_LOG_LIST_KEYS)
+    if rows is None:
+        return ProxyEgressLogOutcome(
+            EGRESS_LOG_UNRECOGNISED,
+            None,
+            f"no refusal list under {' or '.join(repr(key) for key in POLICY_LOG_LIST_KEYS)} "
+            f"({_describe_answer(parsed)})",
+        )
+    if not rows:
+        return ProxyEgressLogOutcome(EGRESS_LOG_CLEAR, None, "an empty refusal list")
+
+    named = [row for row in rows if _row_value(row, POLICY_LOG_SANDBOX_KEYS) is not None]
+    if not named:
+        return ProxyEgressLogOutcome(
+            EGRESS_LOG_UNRECOGNISED,
+            None,
+            f"{len(rows)} rows, none naming a sandbox under "
+            f"{' or '.join(repr(key) for key in POLICY_LOG_SANDBOX_KEYS)}",
+        )
+
+    mine = [row for row in named if _row_value(row, POLICY_LOG_SANDBOX_KEYS) == sandbox_name]
+    if not mine:
+        return ProxyEgressLogOutcome(EGRESS_LOG_CLEAR, None, f"{len(named)} rows, none for this sandbox")
 
     newest: tuple[datetime, ProxyEgressDenial] | None = None
-    for row in parsed["blocked_hosts"]:
-        if not isinstance(row, dict) or row.get("vm_name") != sandbox_name:
-            continue
+    unusable = 0
+    for row in mine:
         host = row.get("host")
         seen = _log_timestamp(row.get("last_seen"))
         if not isinstance(host, str) or not host or seen is None or seen < started_at:
+            # A missing `last_seen` on a row that does name this sandbox is a field the runtime
+            # no longer prints, not a quiet run: count it and speak if the window holds nothing
+            # else, but never claim a refusal from a row with no place in time.
+            if seen is None and isinstance(host, str) and host:
+                unusable += 1
             continue
-        raw_hits = row.get("count_since")
+        raw_hits = _row_value(row, POLICY_LOG_COUNT_KEYS)
         raw_reason = row.get("reason")
         denial = ProxyEgressDenial(
             host=host,
@@ -546,7 +655,33 @@ def proxy_egress_denial(
         )
         if newest is None or seen > newest[0]:
             newest = (seen, denial)
-    return newest[1] if newest else None
+    if newest:
+        return ProxyEgressLogOutcome(EGRESS_LOG_DENIED, newest[1], "this run's refusal recorded")
+    if unusable:
+        return ProxyEgressLogOutcome(
+            EGRESS_LOG_UNRECOGNISED,
+            None,
+            f"{unusable} rows for this sandbox carry no usable `last_seen` timestamp",
+        )
+    return ProxyEgressLogOutcome(
+        EGRESS_LOG_CLEAR, None, f"{len(mine)} rows for this sandbox, all before this run began"
+    )
+
+
+def proxy_egress_denial(
+    log_output: str | bytes,
+    *,
+    sandbox_name: str,
+    started_at: datetime,
+) -> ProxyEgressDenial | None:
+    """The refusal THIS run earned, or None.
+
+    The two-value view of `proxy_egress_log_outcome`, kept because a caller that only forwards a
+    denial needs exactly that. A reader that must tell "nothing was refused" apart from "this
+    answer is not one I can read" calls the outcome function instead: an unreadable instrument is
+    not evidence that traffic was refused, and it is no longer evidence that it was allowed.
+    """
+    return proxy_egress_log_outcome(log_output, sandbox_name=sandbox_name, started_at=started_at).denial
 
 
 def proxy_egress_denial_notice(
@@ -578,4 +713,31 @@ def proxy_egress_denial_notice(
         f"any other account answers nothing, which is a visibility wall and not an empty log. "
         f"Open refusals, each with its allow and dismiss verbs, are on "
         f"`sudo -n sudo -u {daemon_user} sbx policy approval ls`."
+    )
+
+
+def proxy_egress_unrecognised_notice(
+    outcome: ProxyEgressLogOutcome,
+    *,
+    sandbox_name: str,
+    daemon_user: str,
+    tool_version: str,
+) -> str:
+    """The caller-visible sentence for an answer this build could not read.
+
+    Three things and no more: which tool was asked, the version it reported, and that the refusal
+    could not be confirmed. It claims neither a denial nor a clean run — the record exists, in a
+    form venya has not learned — and the repair line names the account that can read it by hand,
+    because a policy log belongs to whoever the sandbox daemon signs in as. `outcome.detail` carries
+    key NAMES only, so nothing the runtime refused travels onward in this sentence.
+    """
+    return (
+        f"venya: the sandbox runtime answered the egress record for this run in a shape venya cannot "
+        f"read ({outcome.detail}), so whether the proxy refused this run's destination could not be "
+        f"confirmed. Tool: {tool_version or 'no sbx version is recorded on this executor'}; sandbox {sandbox_name}. "
+        f"This is not a report that the traffic was allowed, and it is not a refusal claim either. "
+        f"Read the record by hand on the executor host as {daemon_user!r}, the account the sandbox "
+        f"daemon signs in under: `sudo -n sudo -u {daemon_user} sbx policy log {sandbox_name}`. A new "
+        f"vendor name for the refusal list is one entry in "
+        f"`egress_filter.POLICY_LOG_LIST_KEYS` plus a capture beside it in `tests/fixtures/`."
     )

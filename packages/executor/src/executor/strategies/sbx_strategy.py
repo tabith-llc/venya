@@ -40,9 +40,11 @@ from ..egress_filter import (
     DEFAULT_ALLOWLIST_PATH,
     EgressFilter,
     ProxyEgressDenial,
+    ProxyEgressLogOutcome,
     egress_deny_notice,
-    proxy_egress_denial,
     proxy_egress_denial_notice,
+    proxy_egress_log_outcome,
+    proxy_egress_unrecognised_notice,
     sbx_policy_log_argv,
 )
 from .base import InjectionResult, InjectionStrategy, SecretMount
@@ -1793,7 +1795,8 @@ class SbxStrategy(InjectionStrategy):
         # one and the same denied destination. `sbx policy log` holds the refusal, keyed to
         # this sandbox's name (which carries the session id), and it outlives the sandbox, so
         # it is read after the run and said back in the channel the caller reads.
-        self.egress_denial = self._proxy_egress_denial(self._sandbox_name, started_at)
+        outcome = self._proxy_egress_log_outcome(self._sandbox_name, started_at)
+        self.egress_denial = outcome.denial if outcome is not None else None
         notice: str | None = None
         if self.egress_denial is not None:
             notice = proxy_egress_denial_notice(
@@ -1825,18 +1828,31 @@ class SbxStrategy(InjectionStrategy):
             )
             if notice:
                 logger.warning("Sandbox egress denial shape for %s: %s", self._sandbox_name, notice)
+        if outcome is not None and outcome.unrecognised:
+            # The runtime answered and venya could not read it. That is reported beside whatever
+            # the transport face had to say, because silence here is the exact outcome #798 exists
+            # to remove: a refused run must not be handed to the caller as an allowed one.
+            unrecognised = proxy_egress_unrecognised_notice(
+                outcome,
+                sandbox_name=self._sandbox_name,
+                daemon_user=daemon_account(),
+                tool_version=self._recorded_sbx_version(),
+            )
+            logger.warning("Sandbox egress record unreadable in shape for %s: %s", self._sandbox_name, outcome.detail)
+            notice = f"{notice}\n{unrecognised}" if notice else unrecognised
         if notice:
             result.stderr = (result.stderr or b"") + f"\n{notice}".encode()
         return result
 
-    def _proxy_egress_denial(self, sandbox_name: str, started_at: datetime) -> ProxyEgressDenial | None:
-        """Ask the runtime for a refusal THIS run earned, and return it or None.
+    def _proxy_egress_log_outcome(self, sandbox_name: str, started_at: datetime) -> ProxyEgressLogOutcome | None:
+        """Ask the runtime what it recorded for THIS run, and say which of three things came back.
 
-        One bounded read of `sbx policy log` for this sandbox, issued after the exec
-        returns. Every failure to answer — a timeout, a non-zero status, output that is not
-        the JSON shape above — returns None, which claims nothing: no notice, no denial
-        field, and the shape fallback at the call site keeps today's behavior. An
-        instrument that did not answer is never read as a clean run or as a refusal.
+        One bounded read of `sbx policy log` for this sandbox, issued after the exec returns.
+        `None` means the instrument did not answer at all — a timeout or a non-zero status — and
+        the call site then keeps today's shape fallback and claims nothing in either direction.
+        An answer is read by `proxy_egress_log_outcome`, which separates a refused run, a run with
+        nothing refused, and a run whose record this build cannot read; only the last of those adds
+        the "could not be confirmed" sentence, and none of them is ever inferred from silence.
         """
         log_cmd = sbx_policy_log_argv(sandbox_name)
         try:
@@ -1872,7 +1888,40 @@ class SbxStrategy(InjectionStrategy):
                 " ".join(log_cmd),
             )
             return None
-        return proxy_egress_denial(logged.stdout, sandbox_name=sandbox_name, started_at=started_at)
+        if not logged.stdout.strip():
+            # rc 0 with no bytes is the instrument giving nothing to read, not an answer in a form
+            # venya cannot parse: it goes the way of a timeout, so a silent reader stays silent and
+            # the transport fallback keeps its chance. A NON-blank body this build cannot read is
+            # the third outcome, and that one is reported to the caller.
+            logger.warning(
+                "sbx policy log answered nothing for sandbox %s (rc 0, empty body) as account %r — "
+                "no egress outcome is claimed for this run",
+                sandbox_name,
+                daemon_account(),
+            )
+            return None
+        return proxy_egress_log_outcome(logged.stdout, sandbox_name=sandbox_name, started_at=started_at)
+
+    def _recorded_sbx_version(self) -> str:
+        """The vendor face this executor already recorded, read without a new vendor call.
+
+        The unreadable-record sentence names a version, because #798 is a drift story and an
+        operator needs to know which face the build believes it is talking to. The recorded face
+        file (`sandbox_shape`, written at install and re-read at boot) already holds it, so this is
+        a file read, not a third subprocess: two vendor calls per exec — the command, then the
+        bounded `sbx policy log` — is a pinned posture
+        (`test_sbx_strategy.py::test_execute_command_runs_in_sandbox`), and reporting an anomaly is
+        not a licence to widen it. With no recorded face on the host the answer is empty, and the
+        sentence says that plainly rather than inventing a number.
+        """
+        from ..sandbox_shape import read_record
+
+        recorded = read_record()
+        if not recorded:
+            return ""
+        entry = recorded.get("fields", {}).get("sbx.version_line")
+        value = entry.get("value") if isinstance(entry, dict) else None
+        return value.strip() if isinstance(value, str) else ""
 
     def remove_sandbox(self) -> int:
         """Remove the sandbox and all its contents.

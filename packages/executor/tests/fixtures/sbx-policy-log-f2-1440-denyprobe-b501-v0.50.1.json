@@ -1,0 +1,55 @@
+{
+  "allowed": [],
+  "blocked": [
+    {
+      "sandbox_id": "f2-1440-denyprobe-b501",
+      "host": "example.com:80",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:example.com:80)",
+      "reason": "No matching allow rule (default deny)",
+      "count": 1,
+      "first_seen": "2026-11-16T21:57:13.66900777Z",
+      "last_seen": "2026-11-16T21:57:13.66900777Z"
+    },
+    {
+      "sandbox_id": "f2-1440-denyprobe-b501",
+      "host": "archive.ubuntu.com:80",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:archive.ubuntu.com:80)",
+      "reason": "No matching allow rule (default deny)",
+      "count": 3,
+      "first_seen": "2026-11-16T21:57:13.487202501Z",
+      "last_seen": "2026-11-16T21:57:13.49484123Z"
+    },
+    {
+      "sandbox_id": "f2-1440-denyprobe-b501",
+      "host": "security.ubuntu.com:80",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:security.ubuntu.com:80)",
+      "reason": "No matching allow rule (default deny)",
+      "count": 1,
+      "first_seen": "2026-11-16T21:57:13.487330739Z",
+      "last_seen": "2026-11-16T21:57:13.487330739Z"
+    },
+    {
+      "sandbox_id": "f2-1440-denyprobe-b501",
+      "host": "cli.github.com:443",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:cli.github.com:443)",
+      "reason": "No matching allow rule (default deny)",
+      "count": 1,
+      "first_seen": "2026-11-16T21:57:13.487300954Z",
+      "last_seen": "2026-11-16T21:57:13.487300954Z"
+    },
+    {
+      "sandbox_id": "f2-1440-denyprobe-b501",
+      "host": "download.docker.com:443",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:download.docker.com:443)",
+      "reason": "No matching allow rule (default deny)",
+      "count": 1,
+      "first_seen": "2026-11-16T21:57:13.487265589Z",
+      "last_seen": "2026-11-16T21:57:13.487265589Z"
+    }
+  ]
+}
