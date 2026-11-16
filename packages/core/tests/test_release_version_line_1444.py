@@ -27,7 +27,7 @@ timestamp and converted: naive timestamps are refused, never assumed to be someb
 **Red today, by design.** This tree declares ``0.1.0beta3``; ``README.md`` carries no version line;
 the ``venya.ai`` page still says ``Version 0.1.0alpha15`` with no date. A check that read green
 against that face would be manufacturing a release act nobody performed. The lines that carry the
-version land in legs 1445/1446, so this gate is meant to be red until then and to go green when they
+version land in the follow-up legs of that ruling, so this gate is meant to be red until then and to go green when they
 merge — not to be softened now.
 
 What this gate deliberately does not do:
@@ -232,7 +232,7 @@ class TestRealTree:
     """These cells read this repository as it stands, and they are red today.
 
     That is the point of the leg: the rule is standing, the artifacts do not yet carry the line, and
-    the gate says so in the suite every lane runs. The fix is legs 1445/1446 writing the lines, not
+    the gate says so in the suite every lane runs. The fix is the follow-up legs of that ruling writing the lines, not
     this check giving way.
     """
 
