@@ -195,6 +195,24 @@ def _shape_reason(what: str, key: str) -> str:
     return f"the answer parsed but is not {what}: expected an array of rows, or an object with a {key!r} array"
 
 
+def rows_from_any_face(payload: Any, *keys: str) -> list[dict[str, Any]] | None:
+    """The vendor's rows, trying each envelope name it has been seen answering under.
+
+    One seam for every reader of a `sbx … --json` answer. ``_rows`` already holds both shapes this
+    codebase has measured from the tool — a top-level array of rows, or an object carrying them under
+    ``key`` — and what moves between releases is the NAME of that key: `sbx policy log` puts refusals
+    under ``blocked_hosts`` at v0.46.0 and under ``blocked`` at v0.50.1, both captured verbatim in
+    `packages/executor/tests/fixtures/`. A second shape table somewhere else is how the two faces
+    drift apart again, so every reader comes through here. ``None`` means the answer is not that
+    answer at all, and the caller says that out loud instead of reading silence as success.
+    """
+    for key in keys:
+        rows = _rows(payload, key)
+        if rows is not None:
+            return rows
+    return None
+
+
 def dpkg_fields(fields: dict[str, Any]) -> None:
     """Vendor package name and version, from one ``dpkg-query`` (absent off-Debian = unread)."""
     label = "dpkg-query -W -f='${Package} ${Version}' docker-sbx"

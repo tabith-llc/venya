@@ -1,0 +1,55 @@
+{
+  "blocked_hosts": [
+    {
+      "host": "example.com:80",
+      "vm_name": "f2-1440-denyprobe",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:example.com:80)",
+      "last_seen": "2026-11-16T21:55:00.006241974Z",
+      "since": "2026-11-16T21:55:00.006241974Z",
+      "count_since": 1,
+      "reason": "No matching allow rule (default deny)"
+    },
+    {
+      "host": "archive.ubuntu.com:80",
+      "vm_name": "f2-1440-denyprobe",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:archive.ubuntu.com:80)",
+      "last_seen": "2026-11-16T21:54:49.754198397Z",
+      "since": "2026-11-16T21:54:49.741969819Z",
+      "count_since": 3,
+      "reason": "No matching allow rule (default deny)"
+    },
+    {
+      "host": "download.docker.com:443",
+      "vm_name": "f2-1440-denyprobe",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:download.docker.com:443)",
+      "last_seen": "2026-11-16T21:54:49.742314587Z",
+      "since": "2026-11-16T21:54:49.742314587Z",
+      "count_since": 1,
+      "reason": "No matching allow rule (default deny)"
+    },
+    {
+      "host": "cli.github.com:443",
+      "vm_name": "f2-1440-denyprobe",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:cli.github.com:443)",
+      "last_seen": "2026-11-16T21:54:49.742211406Z",
+      "since": "2026-11-16T21:54:49.742211406Z",
+      "count_since": 1,
+      "reason": "No matching allow rule (default deny)"
+    },
+    {
+      "host": "security.ubuntu.com:80",
+      "vm_name": "f2-1440-denyprobe",
+      "proxy_type": "forward",
+      "rule": "no applicable policies for op(action=net:connect:tcp, resource=net:domain:security.ubuntu.com:80)",
+      "last_seen": "2026-11-16T21:54:49.741774156Z",
+      "since": "2026-11-16T21:54:49.741774156Z",
+      "count_since": 1,
+      "reason": "No matching allow rule (default deny)"
+    }
+  ],
+  "allowed_hosts": []
+}
