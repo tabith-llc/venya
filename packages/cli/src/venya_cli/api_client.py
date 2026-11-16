@@ -829,7 +829,12 @@ class APIClient:
                         str(base_url),
                         site="the venya API request",
                         ticket="cli-dial-sites-missing-https-guard",
-                        detail="this transport carries your bearer token, secrets and audit calls",
+                        detail=(
+                            "this transport carries your bearer token, secrets and audit calls; "
+                            "the URL resolved from --core-url / --server-url (where the verb "
+                            "carries them), VENYA_SERVER_URL, then config.json, and for the exec "
+                            "verbs /etc/venya/executor.toml"
+                        ),
                     )
                 )
             # What this dial actually presents. The RF-8b session-only seam clears the

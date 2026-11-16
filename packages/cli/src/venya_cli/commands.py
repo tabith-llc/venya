@@ -195,7 +195,7 @@ def run_command(args: Any) -> int:
         getattr(args, "server_url", None)
         or getattr(args, "core_url", None)
         or os.environ.get("VENYA_SERVER_URL")
-        or None
+        or _exec_url_from_host_config(args)  # executor.toml, else None; see file foot
     )
     # RF-8b: `admin cert renew` is the one admin command that must NOT be waved
     # through on the admin certificate — the mint it calls refuses a
@@ -3718,7 +3718,7 @@ def _get_server_url(args: Any) -> str:
     except Exception:  # nosec B110  # noqa: S110
         pass
 
-    executor_config_path = getattr(args, "config_path", "/etc/venya/executor.toml")
+    executor_config_path = getattr(args, "config_path", EXECUTOR_TOML_PATH)
     try:
         import tomllib
 
@@ -5902,3 +5902,54 @@ def cmd_admin_reissue_recovery_code(client: APIClient, args: Any) -> int:
     print("This code is shown ONCE — store it securely with your off-site backup set:")
     print(f"  {result['recovery_code']}")
     return 0
+
+
+# Below the last `file:line` coordinate this file carries on
+# `docs/beta-known-limitations.md`. The three exec verbs that dial the core through the
+# SHARED client, and now carry the exec-family URL flag pair (`--core-url` /
+# `--server-url`, dest=core_url), must consult `/etc/venya/executor.toml` — the fourth
+# link of the precedence chain their own resolver documents just above, which the
+# chokepoint in `run_command` had never read. `heartbeat` and `cert renew` are
+# deliberately NOT listed:
+# they resolve the URL through `_get_server_url` and build their own mTLS client, so the
+# shared client's chain never decides which core they dial. `exec status` is NOT listed
+# either — body-verified, it issues no request (it reads the local cert and prints the
+# resolved URL), so it does not need the chokepoint to consult the host config.
+_EXEC_URL_TOML_VERBS = frozenset({"audit", "list", "availability"})
+
+
+def _exec_url_from_host_config(args: Any) -> str | None:
+    """The fourth precedence link for the shared-client exec verbs, or None.
+
+    (comment moved below the last cited coordinate in this file, beside the function
+    it explains, so this line costs the page's pins nothing:)
+
+    The documented chain is flag > VENYA_SERVER_URL > config.json > executor.toml >
+    unknown -- `_get_server_url`'s own docstring, which the chokepoint in `run_command`
+    stopped reading after config.json. An operator who passed no flag on a host with no
+    usable config.json therefore reached the plaintext default and a refusal that named
+    no repair he could use. Returns None -- "hand the client its own config chain,
+    exactly as before" -- whenever a flag, the env, or a config.json the operator
+    actually wrote has answered, so every other command stays byte-identical.
+    """
+    if getattr(args, "command", None) != "exec":
+        return None
+    if getattr(args, "exec_command", None) not in _EXEC_URL_TOML_VERBS:
+        return None
+    if getattr(args, "server_url", None) or getattr(args, "core_url", None):
+        return None
+    if os.environ.get("VENYA_SERVER_URL"):
+        return None
+    from .api_client import Config as CLIConfig
+
+    try:
+        configured = CLIConfig().server_url
+    except Exception:  # nosec B110 — an unreadable config is "nothing configured"
+        configured = None
+    if configured and configured != DEFAULT_SERVER_URL:
+        return None
+    resolved = _get_server_url(args)
+    # "unknown" is that resolver's SENTINEL for "nothing named a core" — never a dial
+    # target. Handing it to the client would turn a clear plaintext refusal into
+    # `server URL must be https:// — got 'unknown'`.
+    return resolved if resolved and resolved != "unknown" else None

@@ -1340,6 +1340,7 @@ venya exec audit [EXECUTOR_ID] [OPTIONS]
 |----------|----------|----------------|---------|-------------|
 | `EXECUTOR_ID` (positional, nargs=?) | no | string | — | Executor ID to audit (default: read from local cert file) |
 | `--cert-path` | no | string | `/etc/venya/executor/executor.crt` | Path to executor certificate file (used for ID fallback, default: /etc/venya/executor/executor.crt) |
+| `--core-url`, `--server-url` | no | string | — | Core server URL (default: VENYA_SERVER_URL, then config.json, then executor.toml) |
 | `--hours` | no | int | — | Query last N hours |
 | `--days` | no | int | — | Query last N days |
 | `--limit` | no | int | `100` | Max results (default: 100) |
@@ -1380,6 +1381,7 @@ venya exec list [OPTIONS]
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `--json` | no | flag | false (flag) | Output raw JSON |
+| `--core-url`, `--server-url` | no | string | — | Core server URL (default: VENYA_SERVER_URL, then config.json, then executor.toml) |
 
 **Examples**
 
@@ -1399,6 +1401,7 @@ venya exec availability [OPTIONS]
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `--json` | no | flag | false (flag) | Output raw JSON |
+| `--core-url`, `--server-url` | no | string | — | Core server URL (default: VENYA_SERVER_URL, then config.json, then executor.toml) |
 
 **Examples**
 

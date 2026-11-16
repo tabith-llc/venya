@@ -843,6 +843,17 @@ def create_parser() -> argparse.ArgumentParser:
         default="/etc/venya/executor/executor.crt",
         help="Path to executor certificate file (used for ID fallback, default: /etc/venya/executor/executor.crt)",
     )
+    # The exec-family URL flag pair, same form as `register` and `heartbeat` above
+    # (dest=core_url). `audit`, `list` and `availability` dial the core through the
+    # shared client, so without it the operator's only way to name a core was a
+    # config file edit on the host.
+    audit_parser.add_argument(
+        "--core-url",
+        "--server-url",
+        dest="core_url",
+        default=None,
+        help="Core server URL (default: VENYA_SERVER_URL, then config.json, then executor.toml)",
+    )
     audit_parser.add_argument(
         "--hours",
         type=int,
@@ -881,6 +892,16 @@ def create_parser() -> argparse.ArgumentParser:
         "list", help="List registered executors with heartbeat-reported versions (admin)"
     )
     exec_list_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    # URL flag pair — see the exec-audit note. This verb's admin client-certificate
+    # requirement is unchanged: the flag names WHICH core to dial, never how it is
+    # authenticated.
+    exec_list_parser.add_argument(
+        "--core-url",
+        "--server-url",
+        dest="core_url",
+        default=None,
+        help="Core server URL (default: VENYA_SERVER_URL, then config.json, then executor.toml)",
+    )
 
     # exec availability
     exec_availability_parser = exec_subparsers.add_parser(
@@ -898,6 +919,14 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
     exec_availability_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    # URL flag pair — see the exec-audit note.
+    exec_availability_parser.add_argument(
+        "--core-url",
+        "--server-url",
+        dest="core_url",
+        default=None,
+        help="Core server URL (default: VENYA_SERVER_URL, then config.json, then executor.toml)",
+    )
 
     # config
     config_parser = subparsers.add_parser("config", help="Manage CLI configuration")
