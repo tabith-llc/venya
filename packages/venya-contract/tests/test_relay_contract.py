@@ -172,3 +172,41 @@ def test_request_round_trip_with_env():
     assert parsed.env[0].secret_id == 7
     assert parsed.env[1].literal_value == ASKPASS_HELPER_PATH
     assert parsed.askpass_helper is True
+
+
+# --- egress-denial additions (leg 1424, iid #798) ----------------------------
+# Coordinated contract change, same discipline as the env/askpass pair above: both
+# directions of the compatibility matrix are pinned. The pair is DEFAULTED because a
+# refused egress arrives as a completed HTTP 403 from the sandbox proxy, so `exit_code`
+# is the caller's own client grading that answer and cannot separate a delivered request
+# from a denied one — 0 for plain `curl`, 22 for `curl --fail`, over the same refusal.
+
+
+def test_old_relay_payload_parses_with_egress_defaults():
+    """Compat direction 1: a body WITHOUT the new keys (exactly the four pre-#798 keys)
+    parses on the NEW model with inert defaults — an un-updated executor is not a denial."""
+    old_payload = {"exit_code": 0, "stdout": "ok", "stderr": "", "masked_count": 0}
+    resp = RelayResponse(**old_payload)
+    assert resp.egress_denied is False
+    assert resp.egress_denied_host == ""
+
+
+def test_egress_denial_round_trips_exactly():
+    """The refused destination crosses as structured data, not as prose to be parsed."""
+    resp = RelayResponse(
+        exit_code=0,
+        stdout="",
+        stderr="venya: the sandbox proxy refused this run's egress",
+        egress_denied=True,
+        egress_denied_host="example.com:80",
+    )
+    parsed = RelayResponse(**json.loads(json.dumps(resp.model_dump())))
+    assert parsed == resp
+    assert parsed.egress_denied is True and parsed.egress_denied_host == "example.com:80"
+
+
+def test_renamed_egress_field_is_refused_not_dropped():
+    """Direction 2, the loud half: a one-sided rename on either peer fails instead of
+    silently reading as a clean run — the failure direction this pair must never take."""
+    with pytest.raises(ValidationError):
+        RelayResponse(exit_code=0, stdout="", stderr="", egress_denied=True, egress_host="example.com:80")

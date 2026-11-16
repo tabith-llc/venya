@@ -11,17 +11,22 @@ Returns a list of hosts (IPs, CIDRs, hostnames) to allow via sbx policy.
 
 Fail-closed: missing or empty file -> only DNS resolver is allowed.
 
-Three doors make a closed set observable, because a deny that reports nothing
+Four doors make a closed set observable, because a deny that reports nothing
 reads to the caller as somebody else's broken network: ``describe()`` names the
 path, the entry count and the resolver at start and at every create,
-``egress_deny_notice()`` relabels the runtime's refusal as venya's own, and
+``proxy_egress_denial()`` reads the refusal out of the runtime's own log and
+``proxy_egress_denial_notice()`` says it back to the caller, ``egress_deny_notice()``
+relabels the transport-close shape as venya's own where the log did not answer, and
 ``resolver_address_problem()`` refuses a resolver value that names no host.
 """
 
 import ipaddress
+import json
 import logging
 import re
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 logger = logging.getLogger("venya.executor.egress")
@@ -188,9 +193,10 @@ def find_destination(tokens: list[str]) -> str | None:
     and one local file, and the file must not win. A bare dotted token is read
     only behind a command that takes a remote host.
 
-    shortcut: a best-effort read of the caller's own tokens, because no field
-    from the sandbox says which address it refused. Upgrade when the runtime
-    reports its own deny with the destination on it.
+    shortcut: a best-effort read of the caller's own tokens, used by the shape notice
+    below when the runtime's log did not answer. The runtime DOES report its own deny with
+    the destination on it — see `proxy_egress_denial`, which is the primary face — so this
+    reading is only the fallback. Upgrade when the shape notice itself retires.
     """
     for token in tokens:
         host = _host_candidate(token, allow_bare=False)
@@ -446,4 +452,130 @@ def egress_deny_notice(
         f"{_allowlist_state(egress, entries)} {target} The file is read once, when the sandbox is "
         f"created, and the only resolver address the policy allows is {egress.dns_resolver}."
         f"{closer}"
+    )
+
+
+# --- the runtime's own refusal record -------------------------------------------------
+# A refused egress is not a failed connection. The sandbox proxy completes the handshake,
+# answers the request with its own HTTP 403 and closes, so `find_deny_signature` above
+# never fires: the number the caller reads is its OWN client judging a response it did
+# receive — plain `curl` answers 0 and `curl --fail` answers 22 over one and the same
+# refusal. The denial itself is recorded by the runtime, in `sbx policy log`, keyed to the
+# sandbox name (which carries the venya session id) and it survives the sandbox. Read this
+# record and say it back: that is what makes a denied run distinguishable in both channels.
+#
+# Measured face, sbx v0.46.0 on an executor test guest (leg 1424): the verb is
+# `sbx policy log [SANDBOX] --json` and its answer is
+#   {"allowed_hosts": [...],
+#    "blocked_hosts": [{"host": "example.com:80", "vm_name": "<sandbox>",
+#      "proxy_type": "forward", "rule": "no applicable policies for op(...)",
+#      "last_seen": "<RFC3339 UTC>", "since": "<RFC3339 UTC>", "count_since": 1,
+#      "reason": "No matching allow rule (default deny)"}]}
+# `blocked_hosts` rows are HISTORY, not this run: the same host keeps its earlier row after
+# an allow rule is added, so a reader that ignored `last_seen` would mark a later, genuinely
+# delivered run as denied. That window is what `started_at` below is for.
+
+
+class ProxyEgressDenial(NamedTuple):
+    """One refused destination, as the runtime recorded it."""
+
+    host: str
+    reason: str
+    hits: int
+
+
+def sbx_policy_log_argv(sandbox_name: str) -> list[str]:
+    """The argv that reads ONE sandbox's own policy log, in machine form."""
+    return ["sbx", "policy", "log", sandbox_name, "--json"]
+
+
+def _log_timestamp(value: object) -> datetime | None:
+    """One log instant as an aware datetime, or None when it is not a usable one.
+
+    A stamp that names no zone is not evidence about a run window written in UTC, so this
+    returns None rather than guessing: the paired answer from `proxy_egress_denial` is then
+    "nothing claimed", which is today's behavior, not a wrong claim.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def proxy_egress_denial(
+    log_output: str | bytes,
+    *,
+    sandbox_name: str,
+    started_at: datetime,
+) -> ProxyEgressDenial | None:
+    """The refusal THIS run earned, or None.
+
+    None is also the answer for a log that did not answer, for JSON that does not parse in
+    the shape above, and for rows whose `last_seen` predates `started_at`: this function
+    claims a denial only from the runtime's own record of the window it was given, and an
+    unreadable instrument is not evidence that traffic was refused.
+    """
+    if isinstance(log_output, bytes):
+        log_output = log_output.decode("utf-8", "replace")
+    try:
+        parsed = json.loads(log_output)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("blocked_hosts"), list):
+        return None
+
+    newest: tuple[datetime, ProxyEgressDenial] | None = None
+    for row in parsed["blocked_hosts"]:
+        if not isinstance(row, dict) or row.get("vm_name") != sandbox_name:
+            continue
+        host = row.get("host")
+        seen = _log_timestamp(row.get("last_seen"))
+        if not isinstance(host, str) or not host or seen is None or seen < started_at:
+            continue
+        raw_hits = row.get("count_since")
+        raw_reason = row.get("reason")
+        denial = ProxyEgressDenial(
+            host=host,
+            reason=raw_reason if isinstance(raw_reason, str) else "",
+            hits=raw_hits if isinstance(raw_hits, int) and not isinstance(raw_hits, bool) else 1,
+        )
+        if newest is None or seen > newest[0]:
+            newest = (seen, denial)
+    return newest[1] if newest else None
+
+
+def proxy_egress_denial_notice(
+    denial: ProxyEgressDenial,
+    *,
+    sandbox_name: str,
+    daemon_user: str,
+    egress: EgressFilter,
+) -> str:
+    """The caller-visible sentence for a refusal the runtime itself recorded.
+
+    Carries the refused ``host:port``, the runtime's own reason, and the repair line. The
+    repair line names WHO can read the record and HOW: the log belongs to the account the
+    sandbox daemon signs in under, and the same verb from any other account answers nothing
+    (measured both directions on an executor test guest, and filed for the estate face too). It
+    claims nothing the record does not: no rule text, no guest output, no value.
+    """
+    reason = f" ({denial.reason})" if denial.reason else ""
+    times = f" ({denial.hits} time{'s' if denial.hits != 1 else ''})" if denial.hits > 0 else ""
+    return (
+        f"venya: the sandbox proxy refused this run's egress to {denial.host}{reason}{times}. "
+        f"That is a completed refusal, not a broken connection: the exit code above is your own "
+        f"client's answer to this refusal, so it does not tell a delivered request from a denied "
+        f"one. {_allowlist_state(egress, egress._entries())} The file is read once, when the "
+        f"sandbox is created, and the only resolver address the policy allows is "
+        f"{egress.dns_resolver}. Read the runtime's own record on the executor host as "
+        f"{daemon_user!r}, the account the sandbox daemon signs in under: "
+        f"`sudo -n sudo -u {daemon_user} sbx policy log {sandbox_name}` — the same command from "
+        f"any other account answers nothing, which is a visibility wall and not an empty log. "
+        f"Open refusals, each with its allow and dismiss verbs, are on "
+        f"`sudo -n sudo -u {daemon_user} sbx policy approval ls`."
     )

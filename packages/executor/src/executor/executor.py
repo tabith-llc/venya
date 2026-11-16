@@ -86,6 +86,14 @@ class CommandResult:
     output_truncated: bool = False
     original_stdout_size: int = 0
     original_stderr_size: int = 0
+    # The sandbox proxy refused this run's egress and said so in its own log. `exit_code`
+    # cannot carry that: the refusal arrives as a completed HTTP 403, so the number is the
+    # caller's client judging a response it did receive (0 for plain `curl`, 22 for
+    # `curl --fail`, over one and the same denial). The host is what the runtime named, or
+    # empty. Both default clean, so the direct path and every non-sandbox strategy are
+    # unchanged by their absence.
+    egress_denied: bool = False
+    egress_denied_host: str = ""
 
 
 MAX_OUTPUT_BYTES = 262144  # 256 KB per stream
@@ -686,6 +694,20 @@ class Executor:
                     exit_code=result.exit_code,
                     duration_ms=round(duration_ms, 2),
                 )
+                # The distinct row for a refused egress. `command_executed` stays exactly
+                # as it is — the command DID run, and a row that says otherwise would be a
+                # wrong record — but a trail whose only line for this run reads
+                # "command_executed, exit_code=0" describes a denied run as a delivered one.
+                # Emitted only where the runtime recorded the refusal, never on a clean run
+                # and never on a log that did not answer (paired negative:
+                # tests/test_egress_denial_reporting_1424.py).
+                if result.egress_denied:
+                    self.audit_logger.emit(
+                        "egress_denied",
+                        command=command_str,
+                        exit_code=result.exit_code,
+                        egress_host=result.egress_denied_host,
+                    )
 
             return result
 
@@ -1076,9 +1098,14 @@ class Executor:
             # Apply network policy from allowlist file
             strategy.apply_network_policy(sandbox_name)
 
-            # Execute command inside sandbox
+            # Execute command inside the sandbox
             logger.info("Executing in sandbox: %s", command)
             result = strategy.execute_command(command, env_override=env_override, cwd=cwd, argv=argv)
+            # The strategy reads the runtime's refusal record after the exec returns; None
+            # means either no refusal or a record that did not answer, and neither is a
+            # claim. Read off the instance, not the CompletedProcess: the vendor's answer
+            # carries no field for it, which is the whole finding.
+            egress_denial = getattr(strategy, "egress_denial", None)
 
             # Record true pre-slice sizes BEFORE capping — truncation
             # metadata must describe the real output, not the sliced copy
@@ -1107,6 +1134,7 @@ class Executor:
                 injections,
                 original_stdout_size=original_stdout_size,
                 original_stderr_size=original_stderr_size,
+                egress_denial=egress_denial,
             )
 
         except subprocess.TimeoutExpired as exc:
@@ -1185,12 +1213,19 @@ class Executor:
         injections: list[SecretBundle],
         original_stdout_size: int | None = None,
         original_stderr_size: int | None = None,
+        egress_denial: object | None = None,
     ) -> CommandResult:
         """Run Stage 1 + Stage 2 filtering and build CommandResult.
 
         This is the shared post-processing path for both direct subprocess
         and sandbox execution. The filtering logic is identical
         regardless of how the process was launched.
+
+        ``egress_denial`` is the refusal the sandbox runtime recorded for THIS run, or
+        None. It rides into the result as a named field because no exit code can: a
+        refused destination arrives as a completed response, so the caller's own client
+        answers for it. Passing None (the direct path, any non-sandbox strategy, a log
+        that did not answer) leaves both fields at their clean defaults.
 
         Args:
             command: Original command string.
@@ -1253,6 +1288,8 @@ class Executor:
             output_truncated=stdout_truncated or stderr_truncated,
             original_stdout_size=original_stdout_size,
             original_stderr_size=original_stderr_size,
+            egress_denied=egress_denial is not None,
+            egress_denied_host=str(getattr(egress_denial, "host", "") or ""),
         )
 
     # ================================================================

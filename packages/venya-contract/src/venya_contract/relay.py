@@ -214,6 +214,16 @@ class RelayResponse(BaseModel):
     ``/executors/{id}/execute`` endpoint: the field set is identical, so the server
     does not re-declare a local copy (the previous ``ExecuteResponse`` was exactly
     such a copy and is removed).
+
+    ``egress_denied`` / ``egress_denied_host`` carry the sandbox proxy's own refusal,
+    read from the runtime's policy log by the executor. Both are DEFAULTED, so a body
+    written by an executor that predates them still parses (direction 1 of the
+    compatibility matrix, pinned in ``test_relay_contract``). The pair exists because a
+    refused egress arrives as a completed HTTP 403: ``exit_code`` is the caller's own
+    client judging a response it did receive, so it reads 0 for a plain ``curl`` and 22
+    for ``curl --fail`` over the same refusal, and no exit code can separate the two
+    outcomes. The host is ``host:port`` as the proxy named it, or empty when the runtime
+    refused without naming one.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -222,3 +232,5 @@ class RelayResponse(BaseModel):
     stdout: str
     stderr: str
     masked_count: int = Field(default=0, description="Number of [REDACTED:...] markers in output")
+    egress_denied: bool = Field(default=False, description="Sandbox policy refused this run's egress")
+    egress_denied_host: str = Field(default="", description="host:port the sandbox proxy refused, or empty")

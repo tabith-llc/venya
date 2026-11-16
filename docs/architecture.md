@@ -220,6 +220,13 @@ consequences follow from that enforcement point, not from anything Venya does:
 - **A certificate check run from inside a sandbox is a check of that proxy, not
   of the remote endpoint.** A chain the sandbox reports as verified may be the
   inspection proxy's leaf, issued by the CA the image already trusts.
+- **A refusal is answered as a completed request, so no exit code can tell it
+  from a delivery.** The proxy replies with its own HTTP 403 and the caller's
+  client grades that answer. Venya reads the runtime's refusal record
+  (`sbx policy log`, keyed to the sandbox name and outliving it) and reports the
+  denial to the caller, in the answer, and as one `egress_denied` audit row;
+  `docs/FIREWALL.md` names the account that can read the record and the repair
+  verbs. The command's own exit code is left exactly as its client reported it.
 The executor service runs under a seccomp profile, `PrivateTmp`, and no
 `CAP_IPC_LOCK` (mlock is confined to the core by design; the pair that pins it is
 `packages/core/tests/test_capability_isolation.py` and

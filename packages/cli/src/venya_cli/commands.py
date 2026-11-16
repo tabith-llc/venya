@@ -1767,6 +1767,21 @@ def cmd_run(client: APIClient, args: Any) -> int:
         if masked_count > 0:
             print(f"\n({masked_count} secret(s) masked in output)", file=sys.stderr)
 
+        # A refused egress is said in its own sentence, in the operator's own channel, and
+        # the returned code below is left exactly as the client reported it: this is not a
+        # place where venya second-guesses the caller's own exit code. The refusal arrives as
+        # a completed HTTP 403 from the sandbox proxy, so a 0 here can mean "your client was
+        # answered by the proxy" rather than "the destination answered".
+        if exec_result.get("egress_denied"):
+            denied_host = exec_result.get("egress_denied_host") or "a destination"
+            print(
+                f"\nvenya: egress to {denied_host} was refused by the sandbox policy, so this "
+                f"run never reached it. The exit code below is your own client's answer to that "
+                f"refusal, not a delivered request; the runtime's refusal record and the account "
+                f"that can read it are named in the output above.",
+                file=sys.stderr,
+            )
+
         # The answer names the executor it ran on, echoed from the caller's own
         # configured id — never inferred from the command text (#712 AC5), the same
         # shape the merged MCP face prints at server.py `run_command` (#712).
