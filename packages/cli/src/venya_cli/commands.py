@@ -2117,9 +2117,9 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
     if not cert_path or not key_path:
         missing = "--cert-path / VENYA_ADMIN_CERT" if not cert_path else "--key-path / VENYA_ADMIN_KEY"
         print(
-            f"Error: renew has nowhere to write — {missing} is not set. Name both an "
-            "output certificate path and an output key path (or set the pair this "
-            "workstation already uses, VENYA_ADMIN_CERT / VENYA_ADMIN_KEY). Nothing "
+            f"Error: renew has nowhere to write — {missing} is not set, and this command needs "
+            "BOTH output paths named together: --cert-path (or VENYA_ADMIN_CERT) for the "
+            "certificate AND --key-path (or VENYA_ADMIN_KEY) for the private key. Nothing "
             "was minted, no request was sent and no ceremony was asked for.",
             file=sys.stderr,
         )

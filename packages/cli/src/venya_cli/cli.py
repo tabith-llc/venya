@@ -586,7 +586,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="Mint a fresh short-lived admin certificate (session + security-key ceremony)",
         description=(
             "Mint a fresh short-lived admin certificate from the core and write the "
-            "certificate and its NEW private key locally, atomically. This needs a "
+            "certificate and its NEW private key locally, atomically. A first mint needs "
+            "three things set before it can write anything: an output certificate path "
+            "(--cert-path / VENYA_ADMIN_CERT), an output key path (--key-path / "
+            "VENYA_ADMIN_KEY), and the passphrase that encrypts the key it writes "
+            "(VENYA_ADMIN_CA_KEY_PASSPHRASE); with any one of the three missing the command "
+            "refuses and nothing is minted. It also needs a "
             "login session (run `venya login` first) and one security-key ceremony. "
             "The renewal never presents the old certificate: the mint is bound to the "
             "session, so an already-expired credential is not a credential this "
