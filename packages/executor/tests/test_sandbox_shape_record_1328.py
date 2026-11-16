@@ -49,6 +49,10 @@ PRESENT_NOT_WRITABLE = "agent\nVENYA_RT P /var/run/docker.sock\n"
 MEASURED_BUILD_SHA = "991967dc90ce0d9a440cd1df1bdf3e395c5a2693"  # pragma: allowlist secret
 MEASURED_IMAGE_ID = "b178ca62ec2e"  # pragma: allowlist secret
 
+# Two faces, one answer: v0.50.1 prints this body as a TOP-LEVEL ARRAY (`sbx template ls --json`, read
+# at the estate in leg 1418 and filed as the bug leg 1425 fixes), while the object form below is the
+# face leg 1328 captured. Both are read now; this fixture stays the object-face control and
+# `WYOMING_TEMPLATE_LS_ARRAY` is derived from it, so "the two faces agree" is a real equality test.
 WYOMING_TEMPLATE_LS = json.dumps(
     {
         "images": [
@@ -719,3 +723,141 @@ class TestCliIsASecondInstrument:
         assert "unread: 2" in printed, "template.refs and template.image_ids both went unread and must be counted"
         assert "not authenticated" in printed
         assert json.loads(path.read_text())["written_by"] == "installer"
+
+
+# ---------------------------------------------------------------------------
+# leg 1425 — `sbx template ls --json` answers with a TOP-LEVEL ARRAY on v0.50.1, and the
+# recorder read `.get("images")` off it. `.get` on a list raises AttributeError, the arm
+# caught (ValueError, AttributeError) together, and the field went out as "the JSON answer
+# did not parse" AT RC 0 — a clean vendor answer reported as a broken one, on the two fields
+# that carry which image the mutable `shell` tag resolved to. The two faces must record the
+# same values, and shape must stop borrowing the parser's sentence.
+# ---------------------------------------------------------------------------
+
+WYOMING_TEMPLATE_LS_ARRAY = json.dumps(json.loads(WYOMING_TEMPLATE_LS)["images"])
+
+_OK_BASE = {
+    "dpkg-query -W": (0, "docker-sbx\t0.50.1-1~ubuntu.26.04~resolute", ""),
+    "sbx version": (0, f"sbx version: v0.50.1 {MEASURED_BUILD_SHA}\n", ""),
+    "sbx settings": (0, SETTINGS_JSON, ""),
+}
+
+
+def answer_instrument(template=None, settings=None):
+    """A ``run_instrument`` seam that answers one verb with a chosen body and refuses inspect.
+
+    ``template inspect`` stays refused because it is refused on every measured face (leg 1326);
+    a cell here is about the list answer, not about a digest that has never been printed.
+    """
+
+    def run(argv, timeout=shape.INSTRUMENT_TIMEOUT):
+        key = " ".join(argv[:3])
+        if template is not None and key == "sbx template ls":
+            return 0, template, ""
+        if settings is not None and key == "sbx settings list":
+            return 0, settings, ""
+        if key == "sbx template inspect":
+            return 1, "", INSPECT_REFUSAL
+        return _OK_BASE.get(" ".join(argv[:2]), (1, "", "unstubbed"))
+
+    return run
+
+
+class TestTheArrayFaceIsATemplateAnswer:
+    def collect(self, monkeypatch, **kwargs):
+        monkeypatch.setattr(shape, "run_instrument", answer_instrument(**kwargs))
+        return shape.collect_face(with_sandbox_view=False)["fields"]
+
+    def test_both_faces_record_the_same_values(self, monkeypatch):
+        """The contract is the existing sort and the ``repo:tag#id`` join — the reader changed, not the shape."""
+        array = self.collect(monkeypatch, template=WYOMING_TEMPLATE_LS_ARRAY)
+        obj = self.collect(monkeypatch, template=WYOMING_TEMPLATE_LS)
+        for key in ("template.refs", "template.image_ids"):
+            assert array[key]["state"] == "ok", array[key]
+            assert array[key]["value"] == obj[key]["value"], f"{key} differs between the two faces"
+        assert array["template.refs"]["value"] == ["docker.io/docker/sandbox-templates:shell-docker"]
+        assert array["template.image_ids"]["value"] == [
+            f"docker.io/docker/sandbox-templates:shell-docker#{MEASURED_IMAGE_ID}"
+        ], "the image id is the load-bearing half — the tag it rides on is mutable"
+
+    def test_a_several_row_array_keeps_the_sort_the_object_face_has(self, monkeypatch):
+        rows = json.dumps(
+            [
+                {"repository": "z", "tag": "2", "id": "id-z"},
+                {"repository": "a", "tag": "1", "id": "id-a"},
+            ]
+        )
+        fields = self.collect(monkeypatch, template=rows)
+        assert fields["template.refs"]["value"] == ["a:1", "z:2"]
+        assert fields["template.image_ids"]["value"] == ["a:1#id-a", "z:2#id-z"]
+
+    @pytest.mark.parametrize("answer", ["[]", '{"images": []}', '{"images": null}'])
+    def test_an_empty_answer_is_recorded_empty_rather_than_invented(self, monkeypatch, answer):
+        """`[]` IS a template answer that carries no templates — the same fact `{"images": []}` says."""
+        fields = self.collect(monkeypatch, template=answer)
+        assert fields["template.refs"]["value"] == []
+        assert fields["template.refs"]["state"] == "ok"
+
+    @pytest.mark.parametrize("answer", ['{"data": []}', '["shell"]', '{"images": [7]}', '"a string"', "42"])
+    def test_a_shape_mismatch_names_shape_and_never_the_parser(self, monkeypatch, answer):
+        fields = self.collect(monkeypatch, template=answer)
+        for key in ("template.refs", "template.image_ids"):
+            assert fields[key]["state"] == "unread", f"{key} waved a shape mismatch through: {fields[key]}"
+            assert "not a template answer" in fields[key]["reason"], fields[key]["reason"]
+            assert "did not parse" not in fields[key]["reason"], "the two facts must not share a sentence"
+
+    def test_paired_negative_a_body_that_truly_does_not_parse_still_says_so(self, monkeypatch):
+        for answer in ['{"images": [', "not json at all", ""]:
+            fields = self.collect(monkeypatch, template=answer)
+            assert fields["template.refs"]["reason"] == "the JSON answer did not parse", answer
+            assert fields["template.image_ids"]["reason"] == "the JSON answer did not parse", answer
+
+    def test_an_object_naming_no_images_key_is_shape_not_a_silently_empty_answer(self, monkeypatch):
+        """Before this leg `{"data": ...}` recorded refs=[] and looked like "no templates exist"."""
+        fields = self.collect(monkeypatch, template='{"foo": 1}')
+        assert fields["template.refs"]["state"] == "unread"
+        assert "not a template answer" in fields["template.refs"]["reason"]
+
+    def test_the_array_face_still_pins_the_digest_field_as_unread_on_a_refused_inspect(self, monkeypatch):
+        fields = self.collect(monkeypatch, template=WYOMING_TEMPLATE_LS_ARRAY)
+        digest = fields["template.digest.docker.io/docker/sandbox-templates:shell-docker"]
+        assert digest["state"] == "unread" and digest["rc"] == 1
+        assert "--cloud" in digest["reason"], "the refusal wording still travels with the field"
+
+
+class TestTheSettingsAnswerKeepsItsOwnShapeSentence:
+    """The sibling instrument (`sbx settings list --json`) writes the same field family, so it got
+    the same audit: a shape answer used to land on the capability sentence, which tells an
+    operator the build does not expose the setting when in fact it answered and we misread it."""
+
+    def collect(self, monkeypatch, settings):
+        monkeypatch.setattr(shape, "run_instrument", answer_instrument(settings=settings))
+        return shape.collect_face(with_sandbox_view=False)["fields"]
+
+    def test_the_array_face_records_values_as_it_always_did(self, monkeypatch):
+        fields = self.collect(monkeypatch, SETTINGS_JSON)
+        assert fields["setting.skills.defaultMode"]["value"] == "readonly"
+        assert fields["setting.ssh.agentForwardingEnabled"]["value"] is True
+
+    def test_the_object_face_records_the_same_values(self, monkeypatch):
+        fields = self.collect(monkeypatch, json.dumps({"settings": json.loads(SETTINGS_JSON)}))
+        assert fields["setting.skills.defaultMode"]["value"] == "readonly"
+        assert fields["setting.skills.defaultMode"]["state"] == "ok"
+
+    def test_a_shape_answer_names_shape_not_a_missing_setting(self, monkeypatch):
+        fields = self.collect(monkeypatch, '{"policy": {"a": 1}}')
+        for key in shape.SETTING_KEYS:
+            row = fields[f"setting.{key}"]
+            assert row["state"] == "unread"
+            assert "not a settings answer" in row["reason"], row["reason"]
+            assert "no setting named" not in row["reason"], "the capability sentence is a different fact"
+
+    def test_paired_negative_an_unparseable_body_still_says_parse(self, monkeypatch):
+        fields = self.collect(monkeypatch, "[{")
+        for key in shape.SETTING_KEYS:
+            assert fields[f"setting.{key}"]["reason"] == "the JSON answer did not parse"
+
+    def test_a_list_that_truly_lists_nothing_still_says_no_such_setting(self, monkeypatch):
+        """The capability sentence is kept where it is the truth: an empty array answered, no rows."""
+        fields = self.collect(monkeypatch, "[]")
+        assert "no setting named" in fields[f"setting.{shape.SETTING_KEYS[0]}"]["reason"]
