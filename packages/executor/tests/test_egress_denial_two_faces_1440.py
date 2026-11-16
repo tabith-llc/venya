@@ -31,7 +31,6 @@ from types import SimpleNamespace
 import pytest
 
 from executor import egress_filter as ef
-from executor import sandbox_shape
 from executor.executor import CommandValidator, Executor
 from executor.strategies import sbx_strategy as sbx_module
 from executor.strategies.sbx_strategy import SbxStrategy
@@ -56,6 +55,7 @@ FACE_0501_SHA = "bab15e3e94c3b57a793215c925f48771bfcb986287b2e5a9261a5718fc0ca8c
 
 REFUSED_HOST = "example.com:80"
 REFUSED_REASON = "No matching allow rule (default deny)"
+RECORDED_FACE = "sbx version v0.50.1 ddb0268d7124b9cf98955d0b08ffd71a0dfcebe4"
 
 
 def _text(path: Path) -> str:
@@ -255,15 +255,25 @@ class TestTheStrategySaysItOutLoud:
         allowlist = tmp_path / "egress-allowlist.txt"
         allowlist.write_text("")
         monkeypatch.setattr(sbx_module, "datetime", SimpleNamespace(now=lambda tz: self.clock))
-        monkeypatch.setattr(
-            sandbox_shape,
-            "run_instrument",
-            lambda argv, timeout=sandbox_shape.INSTRUMENT_TIMEOUT: (
-                0,
-                "sbx version v0.50.1 ddb0268d7124b9cf98955d0b08ffd71a0dfcebe4\n",
-                "",
+        # The recorded face the installer writes; the unreadable-record sentence names the version
+        # it holds rather than opening a third vendor call.
+        recorded = tmp_path / "sandbox-shape.json"
+        recorded.write_text(
+            json.dumps(
+                {
+                    "fields": {
+                        "sbx.version_line": {
+                            "value": RECORDED_FACE,
+                            "state": "ok",
+                            "instrument": "sbx version",
+                            "rc": 0,
+                        }
+                    }
+                }
             ),
+            encoding="utf-8",
         )
+        monkeypatch.setenv("VENYA_SANDBOX_SHAPE_FILE", str(recorded))
         s = SbxStrategy(dns_resolver="192.0.2.53", egress_allowlist_path=allowlist, sandbox_memory_mb=512)
         s._sandbox_name = SANDBOX_0501
         return s
@@ -337,6 +347,63 @@ class TestTheStrategySaysItOutLoud:
         stderr = result.stderr.decode()
         assert "shape of a sandbox egress denial" in stderr, "the older face still speaks"
         assert "could not be confirmed" in stderr, "and the unreadable record is named beside it"
+
+    def test_an_answer_of_nothing_bytes_is_the_instrument_not_an_unreadable_shape(self, strategy, monkeypatch):
+        """★ The boundary this leg had to learn the hard way: rc 0 with an EMPTY body is the log
+        giving nothing to read, which is today's silent path, not the third outcome. Reported as
+        "unrecognised" it would editorialise over every clean run and cost a second vendor call to
+        describe an answer that never arrived — the 311 and 366 cells are the paired negatives that
+        caught it at the gate."""
+        self._patch_log(monkeypatch, "")
+        calls = []
+        real_run = subprocess.run
+
+        def counting_run(cmd, **kwargs):
+            calls.append(cmd)
+            return (
+                SimpleNamespace(returncode=0, stdout="", stderr="")
+                if cmd[:2] != ["sbx", "exec"]
+                else self._exec_answer()
+            )
+
+        monkeypatch.setattr(subprocess, "run", counting_run)
+        result = strategy.execute_command("curl -sS http://example.com/", argv=["curl", "-sS", "http://example.com/"])
+        assert [c[:2] for c in calls] == [
+            ["sbx", "exec"],
+            ["sbx", "policy"],
+        ], "the empty answer must not open a third vendor call"
+        assert strategy.egress_denial is None
+        assert "could not be confirmed" not in result.stderr.decode()
+        assert real_run is not None
+
+    def test_the_version_named_is_the_recorded_face_not_a_third_vendor_call(self, tmp_path, monkeypatch):
+        """The notice names a version, and naming it must not widen the vendor-call posture.
+
+        Two calls per exec — the command, then the bounded `sbx policy log` — is pinned by
+        `test_sbx_strategy.py`; this cell pins the other half: the recorded face file is the source,
+        and when a host has no recorded face the sentence says so instead of guessing a number.
+        """
+        allowlist = tmp_path / "egress-allowlist.txt"
+        allowlist.write_text("")
+        monkeypatch.setattr(sbx_module, "datetime", SimpleNamespace(now=lambda tz: self.clock))
+        monkeypatch.delenv("VENYA_SANDBOX_SHAPE_FILE", raising=False)
+        monkeypatch.setattr(sbx_module.SbxStrategy, "_recorded_sbx_version", lambda self: "")
+        s = SbxStrategy(dns_resolver="192.0.2.53", egress_allowlist_path=allowlist, sandbox_memory_mb=512)
+        s._sandbox_name = SANDBOX_0501
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:2] == ["sbx", "exec"]:
+                return self._exec_answer()
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"refusals": []}), stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = s.execute_command("curl -sS http://example.com/", argv=["curl", "-sS", "x"])
+        assert [c[:2] for c in calls] == [["sbx", "exec"], ["sbx", "policy"]], "no third call"
+        line = result.stderr.decode()
+        assert "could not be confirmed" in line
+        assert "no sbx version is recorded" in line, "the limit is named, not papered over"
 
     def test_a_read_that_refuses_still_claims_nothing_and_adds_no_unknown_line(self, strategy, monkeypatch):
         """★ And its pair: rc 1 from the log is "the instrument did not answer", not "the answer is

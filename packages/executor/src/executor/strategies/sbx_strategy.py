@@ -1836,7 +1836,7 @@ class SbxStrategy(InjectionStrategy):
                 outcome,
                 sandbox_name=self._sandbox_name,
                 daemon_user=daemon_account(),
-                tool_version=self._sbx_version_line(),
+                tool_version=self._recorded_sbx_version(),
             )
             logger.warning("Sandbox egress record unreadable in shape for %s: %s", self._sandbox_name, outcome.detail)
             notice = f"{notice}\n{unrecognised}" if notice else unrecognised
@@ -1888,22 +1888,40 @@ class SbxStrategy(InjectionStrategy):
                 " ".join(log_cmd),
             )
             return None
+        if not logged.stdout.strip():
+            # rc 0 with no bytes is the instrument giving nothing to read, not an answer in a form
+            # venya cannot parse: it goes the way of a timeout, so a silent reader stays silent and
+            # the transport fallback keeps its chance. A NON-blank body this build cannot read is
+            # the third outcome, and that one is reported to the caller.
+            logger.warning(
+                "sbx policy log answered nothing for sandbox %s (rc 0, empty body) as account %r — "
+                "no egress outcome is claimed for this run",
+                sandbox_name,
+                daemon_account(),
+            )
+            return None
         return proxy_egress_log_outcome(logged.stdout, sandbox_name=sandbox_name, started_at=started_at)
 
-    def _sbx_version_line(self) -> str:
-        """One line naming the vendor face this build just met, for the unreadable-record notice.
+    def _recorded_sbx_version(self) -> str:
+        """The vendor face this executor already recorded, read without a new vendor call.
 
-        Asked only on that path, once per run at worst, through the same read-only instrument seam
-        `sandbox_shape` already uses to record a face at install and at boot. An absent or
-        unanswering CLI is reported as such rather than guessed at: the sentence is about a limit
-        of this build, so it must not smuggle in an inferred version.
+        The unreadable-record sentence names a version, because #798 is a drift story and an
+        operator needs to know which face the build believes it is talking to. The recorded face
+        file (`sandbox_shape`, written at install and re-read at boot) already holds it, so this is
+        a file read, not a third subprocess: two vendor calls per exec — the command, then the
+        bounded `sbx policy log` — is a pinned posture
+        (`test_sbx_strategy.py::test_execute_command_runs_in_sandbox`), and reporting an anomaly is
+        not a licence to widen it. With no recorded face on the host the answer is empty, and the
+        sentence says that plainly rather than inventing a number.
         """
-        from ..sandbox_shape import run_instrument
+        from ..sandbox_shape import read_record
 
-        rc, out, err = run_instrument(["sbx", "version"])
-        if rc != 0:
+        recorded = read_record()
+        if not recorded:
             return ""
-        return (out or err).strip().splitlines()[0] if (out or err).strip() else ""
+        entry = recorded.get("fields", {}).get("sbx.version_line")
+        value = entry.get("value") if isinstance(entry, dict) else None
+        return value.strip() if isinstance(value, str) else ""
 
     def remove_sandbox(self) -> int:
         """Remove the sandbox and all its contents.

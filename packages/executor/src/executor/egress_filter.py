@@ -734,7 +734,7 @@ def proxy_egress_unrecognised_notice(
     return (
         f"venya: the sandbox runtime answered the egress record for this run in a shape venya cannot "
         f"read ({outcome.detail}), so whether the proxy refused this run's destination could not be "
-        f"confirmed. Tool: {tool_version or '`sbx version` did not answer'}; sandbox {sandbox_name}. "
+        f"confirmed. Tool: {tool_version or 'no sbx version is recorded on this executor'}; sandbox {sandbox_name}. "
         f"This is not a report that the traffic was allowed, and it is not a refusal claim either. "
         f"Read the record by hand on the executor host as {daemon_user!r}, the account the sandbox "
         f"daemon signs in under: `sudo -n sudo -u {daemon_user} sbx policy log {sandbox_name}`. A new "
