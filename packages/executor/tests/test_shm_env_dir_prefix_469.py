@@ -125,8 +125,12 @@ class TestFallbackDirIsOwnedAndRemoved:
         strategy = _fallback_strategy(base)
         seen: list[str] = []
 
-        def _spy(*args, **kwargs):
-            seen[:] = sorted(p.name for p in base.iterdir())
+        def _spy(cmd, *args, **kwargs):
+            # "while the exec is in flight" now has to be said, not assumed: the policy-log
+            # read at leg 1424 runs after the env dir is taken back, so the spy records the
+            # exec call only.
+            if list(cmd)[:2] == ["sbx", "exec"]:
+                seen[:] = sorted(p.name for p in base.iterdir())
             return MagicMock(returncode=0, stdout=b"", stderr=b"")
 
         with patch("subprocess.run", side_effect=_spy):

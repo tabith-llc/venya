@@ -74,6 +74,7 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `cp_result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec B603 B607` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `logged = subprocess.run(  # nosec B603 B607` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/server/scripts/gen_beta_terms_pins.py` | `import subprocess  # nosec B404 — own git reads, fixed argv` |
 | `packages/server/scripts/gen_beta_terms_pins.py` | `r = subprocess.run(  # nosec B603 B607 — fixed argv, git on PATH` |

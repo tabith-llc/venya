@@ -54,8 +54,9 @@ class TestExecStdinDevNull366:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
             strategy.execute_command("sudo -S id < /run/secrets/venya/3")
-        assert mock_run.call_count == 1
-        assert mock_run.call_args.kwargs["stdin"] is subprocess.DEVNULL
+        # exec, then the bounded `sbx policy log` read (leg 1424); the exec site is call 0.
+        assert mock_run.call_count == 2
+        assert mock_run.call_args_list[0].kwargs["stdin"] is subprocess.DEVNULL
 
     def test_direct_argv_posture_passes_stdin_devnull(self):
         """The no-shell posture (#322 C3) reaches the SAME run site, so it gets
@@ -65,10 +66,11 @@ class TestExecStdinDevNull366:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
             strategy.execute_command("ignored", argv=["/usr/bin/ssh", "host", "uptime"])
-        assert mock_run.call_count == 1
-        cmd = mock_run.call_args.args[0]
+        # exec (call 0), then the bounded policy-log read (leg 1424)
+        assert mock_run.call_count == 2
+        cmd = mock_run.call_args_list[0].args[0]
         assert cmd == ["sbx", "exec", "venya-test123", "/usr/bin/ssh", "host", "uptime"]
-        assert mock_run.call_args.kwargs["stdin"] is subprocess.DEVNULL
+        assert mock_run.call_args_list[0].kwargs["stdin"] is subprocess.DEVNULL
 
     def test_existing_exec_kwargs_are_preserved_alongside_the_fix(self):
         """Deletion beats addition, and an added kwarg must not cost us an
@@ -78,7 +80,7 @@ class TestExecStdinDevNull366:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=b"out", stderr=b"")
             strategy.execute_command("echo hello")
-        kwargs = mock_run.call_args.kwargs
+        kwargs = mock_run.call_args_list[0].kwargs  # the exec site, not the log read
         assert kwargs["capture_output"] is True
         assert kwargs["timeout"] == 3600
         assert kwargs["check"] is False
@@ -91,7 +93,7 @@ class TestExecStdinDevNull366:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
             strategy.execute_command("echo hello")
-        recorded = mock_run.call_args.kwargs
+        recorded = mock_run.call_args_list[0].kwargs  # the exec site
         assert "stdin" in recorded, "the exec run site stopped controlling stdin"
         assert recorded["stdin"] is subprocess.DEVNULL
 
@@ -141,7 +143,7 @@ class TestSecretInjectionStdinUntouched366:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
             strategy.execute_command("echo hi")
-            exec_kwargs = mock_run.call_args.kwargs
+            exec_kwargs = mock_run.call_args_list[0].kwargs  # the exec site, not the log read
         assert exec_kwargs["stdin"] is subprocess.DEVNULL
         # And the same strategy, asked to remove a sandbox, must not have had its
         # rm call rewritten by this change (timeout 30, no stdin control).
@@ -163,4 +165,4 @@ def test_prompt_command_shape_is_pinned_for_both_postures(posture):
             strategy.execute_command("ssh host uptime")
         else:
             strategy.execute_command("ignored", argv=["ssh", "host", "uptime"])
-        assert mock_run.call_args.kwargs["stdin"] is subprocess.DEVNULL
+        assert mock_run.call_args_list[0].kwargs["stdin"] is subprocess.DEVNULL

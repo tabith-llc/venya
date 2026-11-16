@@ -259,6 +259,12 @@ class ExecuteHandler(BaseHTTPRequestHandler):
                     stdout=result.stdout.decode("utf-8", "replace"),
                     stderr=result.stderr.decode("utf-8", "replace"),
                     masked_count=len(result.masked_secret_ids),
+                    # The refusal the runtime recorded, as a field and not only as text in
+                    # stderr: a caller that reads the envelope must be able to tell a denied
+                    # run from a delivered one without parsing prose. `getattr` because a
+                    # stand-in engine in the existing cells returns a bare result object.
+                    egress_denied=getattr(result, "egress_denied", False),
+                    egress_denied_host=getattr(result, "egress_denied_host", ""),
                 ).model_dump(),
             )
         finally:

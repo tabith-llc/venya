@@ -276,7 +276,8 @@ async def list_tools() -> list[Tool]:
 # `command_rejected` write do; login and revocation rows do not, so their lines are untouched),
 # and within such a row each key appears only where that row actually holds it — `duration_ms`
 # exists on the executor forwarder alone, so inventing `duration_ms=N/A` would put a field on
-# the line that the ledger never stored. Values interpolate with `!r`, not `{}`: this block
+# the line that the ledger never stored. `egress_host` is the refused destination on the
+# `egress_denied` row and appears nowhere else, for the same reason. Values interpolate with `!r`, not `{}`: this block
 # joins its lines with "\n", and the stored text is the ruled argv rendering
 # (`render_command` — every element quoted as `shlex.join` quotes it, except a ruled
 # session-bound redirect pair, #733), which wraps a newline
@@ -284,7 +285,7 @@ async def list_tools() -> list[Tool]:
 # agent as a second forged audit record. `exit_code` keeps three visible states: no clause
 # (never stored), `=None` (stored null — the relay-timeout row's honest "unknown, the caller
 # left", tagged by its own `outcome=` clause), and `=0` (a real zero).
-_AUDIT_DETAIL_KEYS = ("command", "exit_code", "duration_ms", "outcome", "session_id")
+_AUDIT_DETAIL_KEYS = ("command", "exit_code", "duration_ms", "outcome", "session_id", "egress_host")
 
 
 @app.call_tool()
@@ -369,6 +370,19 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # argument — never inferred from the command text (#712 AC5). Without it a
             # sandbox answer and a production answer read identically (#712).
             lines = [f"Command exited with code {exit_code}. (executor={executor_id})"]
+            if result.get("egress_denied"):
+                # The refusal is said BEFORE the output: the exit code on the line above is
+                # the agent's own client judging the proxy's completed 403, so 0 here does
+                # not mean the destination was reached. The record itself, and who can read
+                # it, arrive in the stderr the caller already prints.
+                denied_host = result.get("egress_denied_host") or "a destination"
+                lines.insert(
+                    1,
+                    f"Egress to {denied_host} was refused by the sandbox policy: the request "
+                    f"never reached its destination, and the exit code above is your client's "
+                    f"answer to that refusal, not a delivered request. The runtime's refusal "
+                    f"record and the account that can read it are named in stderr below.",
+                )
             if stdout:
                 lines.append(f"\nstdout:\n{stdout}")
             if stderr:

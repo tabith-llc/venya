@@ -42,6 +42,11 @@ EVENT_TYPES = (
     "credential_injected",
     "command_executed",
     "command_rejected",
+    # A refused egress, read from the sandbox runtime's own policy log. It is a separate
+    # row and not a relabelled `command_executed`: the command DID run, and the proxy
+    # answered it — the destination just was never reached. `exit_code` on the executed row
+    # cannot carry this, because a refusal arrives as a completed HTTP response.
+    "egress_denied",
     "token_revocation_failed",
     # #586: the relay accept gate refused a connection (revoked credential, or no
     # revocation answer this boot). Recorded because a silent refusal is invisible
