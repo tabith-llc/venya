@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**86 suppression lines across 29 files.**
+**87 suppression lines across 29 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
