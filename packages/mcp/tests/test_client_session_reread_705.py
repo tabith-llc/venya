@@ -9,15 +9,17 @@
 The client used to hold only the token it read at construction, so an operator who logged
 in after the server started had to restart it before any tool call worked. Now the file is
 statted per call and read only when its mtime moves, a refused refresh asks it once more,
-and the expired-session sentence names which of three states it found.
+and the session sentence names which of three states it found.
 
-Cells follow leg 1555's four negatives, as amended by the lead at 17:29:
+Cells follow leg 1555's negatives, as amended by the lead at 17:29:
 
 (a) a file holding the SAME token cannot loop — one read, then the usual error;
 (b) a success path costs a stat, not a read — the hot path stays one in-memory token;
 (c) the re-read never puts a token value in the log (checked on the log face);
 (d) a file that is gone, unreadable or unparseable answers the same session error;
-(e) the sentence names the resolved path and which of the three states it found.
+(e) the sentence names the resolved path and which of the three states it found;
+(f) #706, folded in at 17:40 by the collision rule: a state that never held a token is not
+    called expired, and the state that WAS refused still is — one cell per distinction.
 
 The remedy wording is asserted on its stable stem, not byte-for-byte: leg 1554 edits the
 verb inside that same sentence, and a cell pinning the whole string would fail on landing
@@ -40,6 +42,7 @@ STARTUP_TOKEN = "startup-token"
 DISK_TOKEN = "login-landed-after-startup-token"
 OTHER_CORE = "https://venya-core-2"
 STEM = "Venya session expired and could not be renewed"
+NEVER_HELD = "This process never held a token"
 
 
 def _write(path: Path, token: str | None, server_url: str = "https://venya-core-1") -> None:
@@ -322,12 +325,16 @@ async def test_broken_session_file_answers_the_session_error(tmp_path: Path, sha
     with pytest.raises(SessionExpiredError) as exc_info:
         await client._request("GET", "/api/v1/test")
 
-    assert STEM in str(exc_info.value)
+    message = str(exc_info.value)
     if entry == "refused_refresh":
         # the token in hand was dialled and refused; the file offered nothing to retry with
+        assert STEM in message
         assert http.request.await_count == 1
         assert client._access_token == STARTUP_TOKEN
     else:
+        # #706: nothing was ever dialled, so nothing may claim a session expired
+        assert NEVER_HELD in message
+        assert STEM not in message
         assert http.request.await_count == 0
         assert client._access_token is None
 
@@ -336,14 +343,18 @@ async def test_broken_session_file_answers_the_session_error(tmp_path: Path, sha
 
 
 @pytest.mark.parametrize(
-    ("shape", "expect"),
+    ("shape", "expect", "remedy"),
     [
-        ("no_file", "there is no session file at"),
-        ("no_key", "holds no access_token"),
-        ("refused", "was refused by the core"),
+        ("no_file", "there is no session file at", "venya login"),
+        ("no_key", "holds no access_token", "venya login"),
+        # the refused state keeps dev's remedy fragment untouched: leg 1554 owns that
+        # sentence (#776), and this leg owns the states
+        ("refused", "was refused by the core", "Run the `venya` CLI"),
     ],
 )
-async def test_the_sentence_names_the_state_and_the_resolved_path(tmp_path: Path, shape: str, expect: str) -> None:
+async def test_the_sentence_names_the_state_and_the_resolved_path(
+    tmp_path: Path, shape: str, expect: str, remedy: str
+) -> None:
     """Three states, three remedies, one sentence (#705's operator half)."""
     path = tmp_path / "venya-config.json"
 
@@ -370,4 +381,75 @@ async def test_the_sentence_names_the_state_and_the_resolved_path(tmp_path: Path
     message = str(exc_info.value)
     assert expect in message
     assert str(path) in message  # the path this process resolved, not a placeholder
-    assert "venya" in message  # a remedy is still named beside the state
+    assert remedy in message  # the remedy travels with the state that names it
+
+
+# --- #706: a session that never existed is not an expired one ---------------
+
+
+async def test_a_never_held_session_is_not_called_expired(tmp_path: Path) -> None:
+    """The file is there and holds no token: no expiry claim, no refusal claim, no restart.
+
+    RED at base, where this state printed "Venya session expired …" and asked the operator
+    to approve a key as though a refresh had just been refused — the hour of owner time
+    #706 was filed for.
+    """
+    path = tmp_path / "config.json"
+    client = _client(path, token=None)
+    client._http = _ok_http()
+
+    with pytest.raises(SessionExpiredError) as exc_info:
+        await client._request("GET", "/api/v1/test")
+
+    message = str(exc_info.value)
+    assert NEVER_HELD in message
+    assert "no restart is needed" in message
+    # the false claims are the ones #706 was filed about, by their own words
+    assert "session expired" not in message
+    assert STEM not in message
+    assert "was refused" not in message
+    assert "restart the MCP server" not in message
+    assert "venya list" not in message
+    assert "nothing expired" in message  # it says the truth, not merely not the lie
+    assert "venya login" in message
+    assert str(path) in message
+
+
+async def test_a_refused_token_is_still_called_expired(tmp_path: Path) -> None:
+    """#706 AC2's paired negative: making the no-token case honest does not soften this one."""
+    path = tmp_path / "config.json"
+    client = _client(path)
+
+    http = MagicMock()
+    http.post = AsyncMock(return_value=_response(401))
+    http.request = AsyncMock(side_effect=[_response(401)])
+    client._http = http
+
+    with pytest.raises(SessionExpiredError) as exc_info:
+        await client._request("GET", "/api/v1/test")
+
+    message = str(exc_info.value)
+    assert STEM in message
+    assert "was refused by the core" in message
+    assert NEVER_HELD not in message
+    # AC3: the refusal it observed is named, and no status code it did not observe is
+    assert "401" not in message
+
+
+def test_the_startup_precondition_names_the_path_and_the_login(tmp_path: Path) -> None:
+    """`MCPConfig._load`, the third site (#706's "count is honest" paragraph).
+
+    This state really does need a start afterwards — a server that never came up has
+    nothing that can reload — so that tail stays, the verb becomes the one that renews, and
+    the stem the run-entry and version-surface cells pin is unchanged.
+    """
+    path = tmp_path / "absent-config.json"
+    with pytest.raises(FileNotFoundError) as exc_info:
+        MCPConfig(path)
+
+    message = str(exc_info.value)
+    assert "No Venya session token found" in message  # the pinned stem, unweakened
+    assert str(path) in message
+    assert "venya login" in message
+    assert "venya list" not in message  # a read verb is not a way back (#776)
+    assert "expired" not in message.lower()

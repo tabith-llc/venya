@@ -103,10 +103,15 @@ class MCPConfig:
 
     def _load(self) -> None:
         if not self.path.exists():
+            # The startup precondition, in the same shape as the running server's sentence
+            # (#705, #706): it names the path this process resolved and the verb that
+            # creates it, and it does not call a session that never existed an expired one.
+            # Restart is still the right tail HERE, and only here: a server that never
+            # started has nothing that can reload.
             raise FileNotFoundError(
-                "No Venya session token found. "
-                "Run the `venya` CLI (e.g. `venya list`) and approve your "
-                "security key, then restart the MCP server."
+                f"No Venya session token found: there is no session file at {self.path}. "
+                "Run `venya login <USER_ID>` and approve your security key to create it, "
+                "then start the MCP server again."
             )
         self._data = json.loads(self.path.read_text())
 

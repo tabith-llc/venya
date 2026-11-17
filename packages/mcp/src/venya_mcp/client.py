@@ -153,7 +153,8 @@ class VenyaClient:
     5. On 401 with a refused refresh → re-read the session file once and retry once
        with any token it holds that differs from the refused one (#705)
     6. If nothing newer turned up → SessionExpiredError, naming the resolved path and
-       which of the three states it found
+       which of the three states it found: a never-held session says so in those words and
+       is not called expired (#706), a refused token is (#705)
 
     TLS: verified against VENYA_CA_CERT at startup. No silent downgrade. The constructor takes no
     trust default (#571): ``verify`` must name the Venya CA bundle, or be exactly ``False`` for
@@ -195,27 +196,37 @@ class VenyaClient:
         return {"Authorization": f"Bearer {self._access_token}"}
 
     def _session_error(self, *, refused: bool = False) -> SessionExpiredError:
-        """The expired-session sentence, naming the resolved path and the state it is in.
+        """The session sentence, naming the resolved path, the state, and the remedy that fits it.
 
-        Three states reach this point and the remedy differs for each, so the text says
-        which one it found (#705): there is no session file at the path at all, a file is
-        there but holds no ``access_token`` (the shape that made a running server answer
-        "expired" when nothing had expired — an unreadable or unparseable file lands here
-        too, because nothing usable could be read from it), or a token was read and the
-        core refused it. The path is the one this process resolved, VENYA_CONFIG first, so
-        an operator pointed at the wrong file can see that.
+        Three states reach this point and they are not the same fault (#705, #706): there is
+        no session file at the path; a file is there but holds no ``access_token`` (the shape
+        that made a running server answer "expired" when nothing had expired — an unreadable
+        or unparseable file lands here too, because nothing usable could be read from it); or
+        a token was dialled and the core refused it. The first two have never held a session,
+        so they do not get the word "expired", do not get a restart they no longer need, and
+        are not told the core refused anything — no request went out. Only the third state
+        observed a refusal, and it keeps dev's remedy wording untouched: leg 1554 owns that
+        sentence (#776), and this leg owns the states. The path is the one this process
+        resolved, VENYA_CONFIG first, so an operator pointed at the wrong file can see that.
         """
         path = self.config.path
         if refused:
-            state = f"the access_token read from {path} was refused by the core"
-        elif not path.exists():
-            state = f"there is no session file at {path}"
-        else:
-            state = f"the session file at {path} holds no access_token"
+            return SessionExpiredError(
+                f"Venya session expired and could not be renewed (the access_token read from "
+                f"{path} was refused by the core). "
+                "Run the `venya` CLI (e.g. `venya list`) and approve your "
+                "security key, then restart the MCP server."
+            )
+        where = (
+            f"there is no session file at {path}"
+            if not path.exists()
+            else f"the session file at {path} holds no access_token"
+        )
         return SessionExpiredError(
-            f"Venya session expired and could not be renewed ({state}). "
-            "Run the `venya` CLI (e.g. `venya list`) and approve your "
-            "security key, then restart the MCP server."
+            f"No Venya session to send ({where}). This process never held a token, so nothing "
+            "expired and the core refused no request. Run `venya login <USER_ID>` and approve "
+            "your security key; the server reads the session file again on its next call, so "
+            "no restart is needed."
         )
 
     def _adopt(self, disk_token: str | None) -> bool:
