@@ -338,10 +338,12 @@ async def test_a_second_burst_refreshes_again(tmp_path: Path) -> None:
         # The core honors only a token it minted itself; "old-token" and "expired-again" are not.
         if kw["headers"]["Authorization"].removeprefix("Bearer ").startswith("burst"):
             return _response(200, {"ok": True})
+        await asyncio.sleep(0)
         return _response(401)
 
     async def fake_post(url: str, **kw: Any) -> MagicMock:
         posts.append(url)
+        await asyncio.sleep(_BURST_SECONDS)
         return _response(200, {"access_token": next(tokens)})
 
     client = _client(config)
