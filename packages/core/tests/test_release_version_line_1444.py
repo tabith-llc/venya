@@ -19,9 +19,12 @@ compares the three faces that would hold those facts:
   a dated historical note is not read as a claim.
 
 The **date face is UTC**. This box runs local time while tags, the ledger and the room run UTC, so a
-date written off the workstation clock can land a day off — ``v0.1.0beta1`` is tagged
-``2026-10-23T01:40:31-06:00``, and a same-instant stamp at ``18:11`` would be ``2026-10-30`` in UTC.
-Dates are therefore compared against the tag that carries the version, read as an offset-aware
+date written off the workstation clock can land a day off. The crossing shape is the one that matters:
+``2026-09-17T20:30:00-07:00`` is ``2026-09-18T03:30:00Z`` — the UTC calendar day is the one AFTER the day
+the offset spells. Both instruments in ``TestReleaseDateReader`` therefore have to read the same **field**
+(the committer stamp) in the same **clock** (UTC); ``v0.1.0beta1`` and ``v0.1.0beta2`` are stamped
+``-06:00`` and do not cross, which is why a venue holding only those two tags cannot see a clock bug at all.
+Dates are compared against the tag that carries the version, read as an offset-aware
 timestamp and converted: naive timestamps are refused, never assumed to be somebody's local time.
 
 **Red today, by design.** This tree declares ``0.1.0beta3``; ``README.md`` carries no version line;
@@ -146,6 +149,136 @@ def release_date_utc(root: Path, version: str) -> str | None:
         if iso:
             return utc_date(iso)
     return None
+
+
+# --------------------------------------------------------------------------- the date instruments
+
+#: The calendar form both instruments render. A date, no time, no clock suffix.
+_DATE_FORM = "%Y-%m-%d"
+
+
+def _git_env(hermetic: bool = False, **extra: str) -> dict[str, str]:
+    """The environment an instrument reading runs under: always ``TZ=UTC``.
+
+    ``hermetic=True`` also points ``GIT_CONFIG_GLOBAL`` / ``GIT_CONFIG_SYSTEM`` at ``os.devnull``, for the
+    throwaway fixture repo only: a fixture must not inherit this host's global git settings — including the
+    fleet's armed commit hooks, which are a venue rule and must never decide a test verdict. A reading of a
+    real venue stays on the box's own config, because that is where ``safe.directory`` lives and an instrument
+    that cannot open the repository it is measuring is not measuring anything.
+    """
+    env = {**os.environ, "TZ": "UTC", **extra}
+    if hermetic:
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_CONFIG_SYSTEM"] = os.devnull
+    return env
+
+
+def _run_git(root: Path, *args: str, hermetic: bool = False) -> str:
+    """A git reading that must succeed: fixed argv, shell disabled, bounded by timeout, rc is the check."""
+    out = subprocess.run(  # nosec B603 B607 — fixed argv, shell disabled, constant "git" on PATH
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env=_git_env(hermetic=hermetic),
+    )
+    assert out.returncode == 0, f"git {' '.join(args)} at {root} rc {out.returncode}: {out.stderr.strip()[:200]}"
+    return out.stdout.strip()
+
+
+def committer_date_utc(root: Path, name: str, hermetic: bool = False) -> str:
+    """Instrument two: the tag's committer stamp rendered as a UTC calendar date, by git itself.
+
+    ``format-local:`` is the variant that honours ``TZ``. ``%cd`` is the committer stamp, the same field
+    ``release_date_utc()`` reads through ``%cI`` — two instruments have to be pointed at one field before
+    their agreement means anything, and ``%ad`` (author) against ``%cI`` (committer) was the second way this
+    cell could compare two different instants.
+    """
+    return _run_git(root, "log", "-1", "--format=%cd", f"--date=format-local:{_DATE_FORM}", name, hermetic=hermetic)
+
+
+def committer_date_at_stored_offset(root: Path, name: str, hermetic: bool = False) -> str:
+    """The reading this cell used to make, kept on purpose as the control that can still fire.
+
+    ``--date=format:`` renders in the commit's OWN stored offset and ignores ``TZ``, so ``TZ=UTC`` beside it
+    is a statement the instrument does not obey. On the planted tag below it answers a day earlier than the
+    UTC reading, which is what makes the agreement in ``committer_date_utc`` a measurement rather than a tautology.
+    """
+    return _run_git(root, "log", "-1", "--format=%cd", f"--date=format:{_DATE_FORM}", name, hermetic=hermetic)
+
+
+def release_tag_names(root: Path) -> list[str]:
+    """The tags the cross-check runs over, by a predicate: ``git tag -l``, kept where ``VERSION`` matches.
+
+    ``VERSION`` is this file's own version pattern — the one that decides what counts as a release claim on a
+    page — so the denominator of the tag check is the same grammar as the claim it guards, and not "whatever
+    refs this venue happens to hold". Measured on this box: the authority remote carries TWO tags
+    (``git ls-remote --tags <authority-remote>``), while one lane's venue held 52 refs including ``tmp928``,
+    ``ghprobe--alpha.8`` and an ``archive/tickets-50ceec0`` ref-tag. A guard whose verdict moves with that
+    accumulation is not a guard. A mirror whose NAME carries the version grammar stays in: it points at a
+    release commit, and the instrument comparison is valid over it.
+    """
+    return sorted(t for t in (_git(root, "tag", "-l") or "").split() if VERSION.search(t))
+
+
+#: A stamp written twenty-three minutes before that offset's own midnight: the UTC day is the day AFTER the
+#: one the offset spells. This is the shape that split the two instruments.
+CROSSING_STAMP = "2026-09-17T20:30:00-07:00"
+CROSSING_UTC_DAY = "2026-09-18"
+CROSSING_OFFSET_DAY = "2026-09-17"
+CROSSING_TAG = "v0.0.0-crossing"
+#: The other shape a real venue carries: a stamp whose offset and UTC day are the same number — `v0.0.0beta1`'s
+#: own committer stamp. A venue holding only tags like this one cannot see a clock defect at all.
+NONCROSSING_STAMP = "2026-10-23T01:40:31-06:00"
+SCRATCH_REF = "tmp928"
+
+
+def planted_venue(repo: Path, tags: dict[str, str]) -> Path:
+    """A throwaway repo carrying ``tags`` (name -> committer stamp): a venue whose contents you control.
+
+    Why plant a venue instead of reading this one: the case at issue is a tag whose stored offset lands it on a
+    different UTC day, and no venue is obliged to hold one. This lane's venue holds two tags, neither of which
+    crosses, and passed the old instrument happily — so that cell could not see the defect it later went red
+    about. A planted venue makes the comparison fire on every host, empty venue or full, and lets the
+    denominator be tested against a named scratch ref instead of trusting which tags a lane left behind.
+    """
+    repo.mkdir(parents=True, exist_ok=True)
+
+    def run(stamp: str, *args: str) -> None:
+        out = subprocess.run(  # nosec B603 B607 — fixed argv, shell disabled, constant "git" on PATH
+            ["git", *args],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=_git_env(hermetic=True, GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp),
+        )
+        assert out.returncode == 0, f"fixture git {args[0]!r} rc {out.returncode}: {out.stderr.strip()[:200]}"
+
+    run(NONCROSSING_STAMP, "init", "-q", ".")
+    for name, stamp in tags.items():
+        run(
+            stamp,
+            "-c",
+            "user.name=Release Date Fixture",
+            "-c",
+            "user.email=fixture@invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            f"planted {name}",
+        )
+        run(stamp, "tag", name)
+    return repo
+
+
+def planted_crossing_tag(repo: Path) -> Path:
+    """A venue carrying exactly one release-shaped tag, stamped across a UTC day boundary."""
+    return planted_venue(repo, {CROSSING_TAG: CROSSING_STAMP})
 
 
 def top_line(readme_text: str) -> str | None:
@@ -324,31 +457,80 @@ class TestRealTree:
 
 
 class TestReleaseDateReader:
-    """The clock instrument itself, cross-checked against a second mechanism on real tags."""
+    """The clock instrument itself, cross-checked against a second mechanism on a denominator that does not move.
 
-    def test_every_tag_here_dates_the_same_way_under_two_instruments(self):
-        """`utc_date()` converting %cI, and `git --date=format:%Y-%m-%d` with TZ=UTC, on the same tags.
+    Both instruments read ONE field (the committer stamp) in ONE clock (UTC), and the comparison is anchored
+    by a planted tag that straddles a UTC day, so it fires on any host — not only on a venue that happens to
+    hold a crossing tag, which is how this cell came to be green in one lane's clone and red in another's on
+    identical bytes.
+    """
 
-        Two instruments, one answer: the conversion is not trusted because it is tidy. The cell reads
-        the tags that exist and refuses to pass on an empty list, so a face with no tags cannot make
-        it green by looking trivially satisfied.
+    def test_the_instruments_agree_on_a_planted_tag_that_crosses_a_utc_day(self, tmp_path):
+        """The case the old reading got wrong: `2026-09-17T20:30:00-07:00` is `2026-09-18` in UTC."""
+        repo = planted_crossing_tag(tmp_path / "crossing")
+        iso = _run_git(repo, "log", "-1", "--format=%cI", CROSSING_TAG, hermetic=True)
+        assert iso, "the planted tag has no committer timestamp — the fixture did not build"
+        assert utc_date(iso) == CROSSING_UTC_DAY, f"python reader: {utc_date(iso)}"
+        assert committer_date_utc(repo, CROSSING_TAG, hermetic=True) == CROSSING_UTC_DAY
+
+    def test_the_paired_negative_the_stored_offset_reading_disagrees_on_that_same_tag(self, tmp_path):
+        """The comparison can fire: the form this cell used to run prints the OTHER day on the same tag.
+
+        Two instruments agreeing is worth nothing until you have seen them capable of disagreeing. Here the
+        same commit, with `TZ=UTC` set for both, answers `2026-09-17` under `--date=format:` and `2026-09-18`
+        under `--date=format-local:`. Revert the instrument and the cell above goes red; that is the proof
+        this file asked for and did not have.
         """
-        tags = sorted((_git(_ROOT, "tag", "-l") or "").split())
-        assert tags, "no tags in this venue — the instrument comparison did not happen"
-        env = {**os.environ, "TZ": "UTC"}
-        for tag in tags:
+        repo = planted_crossing_tag(tmp_path / "negative")
+        assert committer_date_at_stored_offset(repo, CROSSING_TAG, hermetic=True) == CROSSING_OFFSET_DAY
+        assert committer_date_utc(repo, CROSSING_TAG, hermetic=True) == CROSSING_UTC_DAY
+
+    def test_every_release_tag_here_dates_the_same_way_under_two_instruments(self):
+        """The venue half, over a named denominator: the tags here whose name carries the release grammar.
+
+        An empty set is not a silent pass — the instrument is already proved on the planted tag, which every
+        host carries by construction. What this loop adds is the real tags, and it prints how many it read so
+        a count in a report can be re-derived instead of trusted.
+        """
+        names = release_tag_names(_ROOT)
+        print(f"\ndenominator: {len(names)} release tag(s) at {_ROOT}: {names}")
+        for tag in names:
             iso = _git(_ROOT, "log", "-1", "--format=%cI", tag)
             assert iso, f"{tag}: no committer timestamp"
-            out = subprocess.run(  # nosec B603 B607 — fixed argv, shell disabled, the tree is this repo
-                ["git", "log", "-1", "--format=%ad", "--date=format:%Y-%m-%d", tag],
-                cwd=_ROOT,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-                env=env,
-            )
-            assert utc_date(iso) == out.stdout.strip(), f"{tag}: {utc_date(iso)} vs {out.stdout.strip()}"
+            git_day = committer_date_utc(_ROOT, tag)
+            assert utc_date(iso) == git_day, f"{tag}: {utc_date(iso)} vs {git_day}"
+
+    def test_the_denominator_is_a_predicate_and_not_an_accident(self):
+        """Both directions of the filter, on the names actually measured in a lane venue.
+
+        The dropped list is that venue's scratch — a probe tag, a scratch dated tag, an archive ref-tag — so
+        the predicate is checked against the shape that made this cell's verdict move, not a convenient list.
+        """
+        kept = ["v0.1.0beta1", "v0.1.0beta2", "v0.1.0alpha12", "v0.1.0-alpha12", "github-v0.1.0-alpha12", CROSSING_TAG]
+        dropped = ["tmp928", "ghprobe--alpha.8", "archive/tickets-50ceec0", "HEAD"]
+        assert [n for n in kept if VERSION.search(n)] == kept, "the predicate dropped a release name"
+        assert [n for n in dropped if VERSION.search(n)] == [], "the predicate kept a ref naming no version"
+
+    def test_the_loop_fires_on_a_planted_venue_holding_a_crossing_tag(self, tmp_path):
+        """The venue loop, on data this host controls: two release names (one crossing) and one scratch ref.
+
+        This closes the hole the two instrument cells cannot: nothing but the venue's own tag set exercised the
+        loop body, and on a venue of non-crossing tags the loop passed under the wrong instrument too. Here the
+        scratch ref is planted beside the release names, so the denominator is seen to drop it by name while
+        the comparison still runs over both tags that count — including the one that crosses.
+        """
+        repo = planted_venue(
+            tmp_path / "venue",
+            {CROSSING_TAG: CROSSING_STAMP, "v0.0.0-plain": NONCROSSING_STAMP, SCRATCH_REF: CROSSING_STAMP},
+        )
+        names = release_tag_names(repo)
+        assert set(names) == {CROSSING_TAG, "v0.0.0-plain"}, f"denominator moved: {names}"
+        assert SCRATCH_REF not in names
+        for tag in names:
+            iso = _run_git(repo, "log", "-1", "--format=%cI", tag, hermetic=True)
+            git_day = committer_date_utc(repo, tag, hermetic=True)
+            assert utc_date(iso) == git_day, f"{tag}: {utc_date(iso)} vs {git_day}"
+        assert utc_date(_run_git(repo, "log", "-1", "--format=%cI", CROSSING_TAG, hermetic=True)) == CROSSING_UTC_DAY
 
     def test_the_untagged_version_has_no_date_to_compare(self):
         """The face tonight: ``0.1.0beta3`` is declared and tagged by nobody, so nothing is released.
