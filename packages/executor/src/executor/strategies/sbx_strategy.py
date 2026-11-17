@@ -1056,6 +1056,10 @@ class SbxStrategy(InjectionStrategy):
         # `execute_command` writes it on every run, including a clean one, so a value read
         # after the call always describes that call and never an earlier one.
         self.egress_denial: ProxyEgressDenial | None = None
+        # #805: the third thing the same read can say — an answer came back and this build could
+        # not parse it. It is kept beside the refusal and never inside it, because it is a claim
+        # about the instrument and not about the traffic. Written on every run, like the slot above.
+        self.egress_log_unreadable: bool = False
         # #578: the explicit --memory cap for every sandbox this strategy
         # creates. None is not "unbounded" — it is "refuse at create", so an
         # unset knob never silently inherits the vendor default (50% of the
@@ -1797,6 +1801,7 @@ class SbxStrategy(InjectionStrategy):
         # it is read after the run and said back in the channel the caller reads.
         outcome = self._proxy_egress_log_outcome(self._sandbox_name, started_at)
         self.egress_denial = outcome.denial if outcome is not None else None
+        self.egress_log_unreadable = outcome is not None and outcome.unrecognised
         notice: str | None = None
         if self.egress_denial is not None:
             notice = proxy_egress_denial_notice(

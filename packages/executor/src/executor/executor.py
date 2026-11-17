@@ -94,6 +94,12 @@ class CommandResult:
     # unchanged by their absence.
     egress_denied: bool = False
     egress_denied_host: str = ""
+    # The runtime's own egress record came back for this run and this build could not read it
+    # (#805). This is a statement about the instrument, never about the traffic: it does not set
+    # `egress_denied` and it does not clear it. It exists so the trail can tell "nothing was
+    # refused" apart from "I could not tell", which is the one question a denied run and a clean
+    # run used to answer with the same bytes.
+    egress_log_unreadable: bool = False
 
 
 MAX_OUTPUT_BYTES = 262144  # 256 KB per stream
@@ -708,6 +714,16 @@ class Executor:
                         exit_code=result.exit_code,
                         egress_host=result.egress_denied_host,
                     )
+                # The instrument's own row, for the run whose record this build could not read.
+                # It is not a denial row and carries no destination: #805's requirement is that the
+                # trail stop answering the same bytes for "nothing was refused" and "I could not
+                # tell", and letter A still bars promoting the unreadable answer into a refusal.
+                if result.egress_log_unreadable:
+                    self.audit_logger.emit(
+                        "egress_log_unreadable",
+                        command=command_str,
+                        exit_code=result.exit_code,
+                    )
 
             return result
 
@@ -1106,6 +1122,10 @@ class Executor:
             # claim. Read off the instance, not the CompletedProcess: the vendor's answer
             # carries no field for it, which is the whole finding.
             egress_denial = getattr(strategy, "egress_denial", None)
+            # Read off the same instance for the same reason: the vendor's answer carries no field
+            # for it. `getattr` because a stand-in engine in the existing cells has no such slot,
+            # and an absent slot is a run this instrument had nothing to say about, not a finding.
+            egress_log_unreadable = bool(getattr(strategy, "egress_log_unreadable", False))
 
             # Record true pre-slice sizes BEFORE capping — truncation
             # metadata must describe the real output, not the sliced copy
@@ -1135,6 +1155,7 @@ class Executor:
                 original_stdout_size=original_stdout_size,
                 original_stderr_size=original_stderr_size,
                 egress_denial=egress_denial,
+                egress_log_unreadable=egress_log_unreadable,
             )
 
         except subprocess.TimeoutExpired as exc:
@@ -1214,6 +1235,7 @@ class Executor:
         original_stdout_size: int | None = None,
         original_stderr_size: int | None = None,
         egress_denial: object | None = None,
+        egress_log_unreadable: bool = False,
     ) -> CommandResult:
         """Run Stage 1 + Stage 2 filtering and build CommandResult.
 
@@ -1226,6 +1248,10 @@ class Executor:
         refused destination arrives as a completed response, so the caller's own client
         answers for it. Passing None (the direct path, any non-sandbox strategy, a log
         that did not answer) leaves both fields at their clean defaults.
+
+        ``egress_log_unreadable`` is the third answer the same read can give: the record arrived
+        and this build could not parse it. It rides as its own field so the trail can distinguish
+        it from a clean run, and it never feeds the denial pair below (#805, letter A).
 
         Args:
             command: Original command string.
@@ -1290,6 +1316,7 @@ class Executor:
             original_stderr_size=original_stderr_size,
             egress_denied=egress_denial is not None,
             egress_denied_host=str(getattr(egress_denial, "host", "") or ""),
+            egress_log_unreadable=egress_log_unreadable,
         )
 
     # ================================================================

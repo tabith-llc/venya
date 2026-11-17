@@ -197,7 +197,7 @@ one secret per fingerprintable value and compose at consumption time
 The executor spool accepts a FIXED event tuple
 (`packages/executor/src/executor/audit.py:EVENT_TYPES`:
 `credential_injected`, `command_executed`, `command_rejected`, `egress_denied`,
-`token_revocation_failed`, and — added by #586, unrelated to shapes —
+`egress_log_unreadable`, `token_revocation_failed`, and — added by #586, unrelated to shapes —
 `relay_refused` for the relay listener's accept-gate refusals). Attribution is
 already complete without any shape-specific event: `execution_session_created`
 records the user and the secret KEYS; `command_executed` records
@@ -207,6 +207,9 @@ the secret ids. The shape is derivable from secret metadata — a
 (`egress_denied` is likewise unrelated to shapes: it records a destination the
 sandbox proxy refused, which no exit code can carry — see
 `packages/executor/src/executor/egress_filter.py:proxy_egress_denial`.)
+(`egress_log_unreadable` is unrelated to shapes too: it records that the runtime answered and
+venya could not read the answer — #805. It is a statement about the instrument, so it never
+travels as `egress_denied`.)
 
 ## 9. Who may author shapes (authorization split)
 

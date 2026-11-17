@@ -224,6 +224,13 @@ class RelayResponse(BaseModel):
     for ``curl --fail`` over the same refusal, and no exit code can separate the two
     outcomes. The host is ``host:port`` as the proxy named it, or empty when the runtime
     refused without naming one.
+
+    ``egress_log_unreadable`` is DEFAULTED for the same reason and carries the third answer the
+    executor's own read of that log can give: the runtime replied and this build could not parse
+    the reply (#805). It is a claim about the instrument, so it never travels as
+    ``egress_denied`` — an unreadable record is not evidence that traffic was refused — and the
+    core needs it as a field, not as prose in ``stderr``, because the core is what writes the
+    operator's trail row for the run.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -234,3 +241,7 @@ class RelayResponse(BaseModel):
     masked_count: int = Field(default=0, description="Number of [REDACTED:...] markers in output")
     egress_denied: bool = Field(default=False, description="Sandbox policy refused this run's egress")
     egress_denied_host: str = Field(default="", description="host:port the sandbox proxy refused, or empty")
+    egress_log_unreadable: bool = Field(
+        default=False,
+        description="the sandbox egress record came back and this build could not read it",
+    )
