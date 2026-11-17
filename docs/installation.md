@@ -1052,6 +1052,12 @@ only, not a security boundary.
   vendor's own wording (https://docs.docker.com/ai/sandboxes/troubleshooting/,
   accessed 2026-10-09). The `503` itself is Venya's own mapping of an
   unauthenticated executor — it is not a status code the vendor returns.
+- The executor starts and then exits, with `cannot verify sandbox runtime isolation` in its journal: the
+  pre-flight probe could not create its throwaway sandbox, so the daemon refused the work rather than claim an
+  answer it did not have. Create one by hand (`sudo -H -u venya sbx create …` + `sbx rm --force`), or run the
+  installer's warm, then restart `venya-executor`. If the vendor's own answer says authentication, the `503`
+  entry above is the one that applies. `VENYA_SBX_RT_PROBE_TIMEOUT` raises the 60 s bound for a host that needs
+  a cold pull — raise it, do not remove the check.
 - `503` with `global network policy has not been initialized`: run
   `sudo -H -u venya sbx policy init deny-all` on the executor (the
   installer does this automatically since the 2026-09 fix).
