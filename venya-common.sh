@@ -1271,9 +1271,9 @@ venya_warn_cli_face_mismatch() {
         return 0  # the two faces agree — silent
     fi
     if [ -n "$cli_face" ]; then
-        warn "Build-face note: the user CLI for '${user:-$HOME}' is build ${cli_face}; this install deployed ${deployed_face}."
+        warn "Build-face note: the user CLI for '${user:-root}' is build ${cli_face}; this install deployed ${deployed_face}."
     else
-        warn "Build-face note: the user CLI for '${user:-$HOME}' carries no readable build face; this install deployed ${deployed_face}."
+        warn "Build-face note: the user CLI for '${user:-root}' carries no readable build face; this install deployed ${deployed_face}."
     fi
     warn "  On a core host, 'venya --version' describes that client CLI, not the server tree above."
     warn "  To bring the CLI onto this build: run install-venya-cli.sh as the same user (no sudo)."

@@ -13,4 +13,4 @@ e8f9c6bfdb7e33277daac630ea582c2c278d23c695973907974f76fdc03385cb  uninstall-veny
 7f9285620c14ae931ee3631c6a8b8162a42b21a949119d9fdd75a808a0e86165  uninstall-venya-cli.sh  served uninstaller, workstation
 3240548c33d1211925ba6de549ad2b9c58809734ea3b86527d0f3af869e04db8  uninstall-venya-core.sh  served uninstaller, root-run
 ccc5f0e92a88c163f4a6148a4a9e05c78a7d69bb567074250906eba4b6b01efd  uninstall-venya-executor.sh  served uninstaller, root-run
-d37d3063781ab2b022960e60536c64933e6392fb93e5bfe10882dfbe0076596f  venya-common.sh  shared library, fetched by installers
+ce6a12352a0c3dc07ccdadb46423ebaaf57ef9d89e6018d2d9cd3add951afca9  venya-common.sh  shared library, fetched by installers
