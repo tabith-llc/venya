@@ -178,10 +178,12 @@ class VenyaClient:
 
     def _headers(self) -> dict[str, str]:
         if not self._access_token:
+            # The remedy names the renewing verb only. A read verb is not a way back:
+            # a refused transparent refresh clears the stored token (#776).
             raise SessionExpiredError(
                 "Venya session expired and could not be renewed. "
-                "Run the `venya` CLI (e.g. `venya list`) and approve your "
-                "security key, then restart the MCP server."
+                "Run `venya login <USER_ID>` and approve your security key, "
+                "then restart the MCP server."
             )
         return {"Authorization": f"Bearer {self._access_token}"}
 
@@ -249,10 +251,11 @@ class VenyaClient:
                     method, url, json=json_body, params=params, headers=self._headers(), **extra
                 )
             else:
+                # Same sentence as `_headers()` — the renewing verb, never a read verb (#776).
                 raise SessionExpiredError(
                     "Venya session expired and could not be renewed. "
-                    "Run the `venya` CLI (e.g. `venya list`) and approve your "
-                    "security key, then restart the MCP server."
+                    "Run `venya login <USER_ID>` and approve your security key, "
+                    "then restart the MCP server."
                 )
 
         if resp.status_code >= 400:
