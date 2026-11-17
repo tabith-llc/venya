@@ -149,7 +149,7 @@ def session_error_text(path: Path, *, refused: bool = False) -> str:
     than hand-building a sentence. The path is the one this process resolved, VENYA_CONFIG
     first, so an operator pointed at the wrong file can see that.
     """
-    tail = f"{RENEW_CLAUSE}; the MCP server reads the session file again on its next call, " "so no restart is needed."
+    tail = f"{RENEW_CLAUSE}; the MCP server reads the file again on its next call, so no restart is needed."
     if refused:
         return (
             f"Venya session expired and could not be renewed (the access_token read from "
@@ -227,6 +227,8 @@ class VenyaClient:
         if not self._access_token:
             self._adopt(self.config.reload())
         if not self._access_token:
+            # The remedy names the renewing verb only — a read verb is not a way back, since a
+            # refused transparent refresh clears the stored token (#776, leg 1554).
             raise self._session_error()
         return {"Authorization": f"Bearer {self._access_token}"}
 
@@ -333,6 +335,7 @@ class VenyaClient:
                     method, url, json=json_body, params=params, headers=self._headers(), **extra
                 )
             else:
+                # Same renewing clause as `_headers()`, never a read verb (#776, leg 1554).
                 raise self._session_error(refused=True)
 
         if resp.status_code >= 400:
