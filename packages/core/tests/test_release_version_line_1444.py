@@ -35,11 +35,13 @@ What this gate deliberately does not do:
 * It does not require a tag. The version line is written before the tag is cut, so an untagged
   declared version simply has no date to compare against; the README and the site still have to
   agree with the plates, and with each other on the version.
-* It does not reach the network. A test that fetches ``venya.ai`` goes red on any air-gapped
-  install, and the promise guarded here is a source-tree promise. The page is read from
-  ``$VENYA_SITE_SOURCE`` when set, else ``/projects/tabith-websites/venya.ai/live/index.html`` when
-  it exists; when neither is present the site cell SKIPS and names the face left unproven. A skip is
-  not a pass — ``pytest -rs`` prints it by name, and the fleet gate host has the path.
+* It does not reach the network, and it does not guess which page you meant. A test that fetches
+  ``venya.ai`` goes red on any air-gapped install, and the promise guarded here is a promise about a source
+  tree. The page comes from ``$VENYA_SITE_SOURCE`` and from nowhere else: a working copy of another
+  repository's capture slot can be weeks behind its own authority face and behind the bytes actually being
+  served, and reading such a file silently is how a check ends up stating something false about a
+  customer-facing page. When the variable is unset the site cell SKIPS and names the face left unproven.
+  A skip is not a pass — ``pytest -rs`` prints it by name.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ import re
 import shutil
 import subprocess  # nosec B404 — the cross-check runs `git` beside the tree, same seam as core/version.py
 import tomllib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -69,14 +71,30 @@ _PLATES = {
     "venya-contract": "packages/venya-contract/pyproject.toml",
 }
 
-#: Set this to compare a page whose source is not on this host.
+#: The page to compare is named, never assumed. Set this to a capture you believe in.
 SITE_SOURCE_ENV = "VENYA_SITE_SOURCE"
-SITE_SOURCE_DEFAULT = Path("/projects/tabith-websites/venya.ai/live/index.html")
+#: No default path. A working copy of another repository's capture slot can be weeks behind both its own
+#: authority face and the bytes being served, and reading it silently produces a confident false statement
+#: about a customer-facing page. Measured at this pen: the local `venya.ai/live/index.html` is 30,576 bytes
+#: claiming `Version 0.1.0alpha15`, while the site serves 57,155 bytes and says `v0.1.0beta2 is current as
+#: of 30 October 2026` — and those 57,155 bytes are what the sites repo's own authority face holds. So the
+#: site half compares `$VENYA_SITE_SOURCE` when it names a readable file, and otherwise SKIPS and says so.
+SITE_SOURCE_DEFAULT = None
 
 #: A version, with or without a leading ``v``, prerelease spelled or PEP 440 letters.
 VERSION = re.compile(r"\b[vV]?(\d+\.\d+\.\d+(?:[-.]?(?:alpha|beta|rc|dev)\d*)?)\b")
-#: The one date form the rule allows — a calendar date, no time, no clock suffix.
+#: The date forms the rule allows — a calendar date, no time, no clock suffix.
 UTC_DATE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+#: The two word orders a human date is actually written in, named rather than guessed at: the product page
+#: uses `30 October 2026`, a README would use `October 30, 2026`. Anything else ("October 2026", "last
+#: month") matches nothing here and stays a refusal, which is the reason to list forms instead of parsing prose.
+_MONTHS = "January|February|March|April|May|June|July|August|September|October|November|December"
+#: Month names resolved here, not through `%B`, so the answer does not depend on the locale of the seat that
+#: runs the suite — and a release day is a **calendar date**, not a datetime, which is the form this repo's
+#: own rule asks for.
+_MONTH_NUMBER = {name.lower(): number for number, name in enumerate(_MONTHS.split("|"), start=1)}
+LONG_DATE = re.compile(r"\b(" + _MONTHS + r")\s+(\d{1,2}),\s*(\d{4})", re.IGNORECASE)
+LONG_DATE_DAY_FIRST = re.compile(r"\b(\d{1,2})\s+(" + _MONTHS + r"),?\s*(\d{4})", re.IGNORECASE)
 #: A version token is a CLAIM only beside one of these words (the #640 rule, for the #640 reason).
 CLAIM_WORD = re.compile(r"\b(version|releas\w*)\b", re.IGNORECASE)
 
@@ -143,11 +161,52 @@ def top_line(readme_text: str) -> str | None:
     return None
 
 
+def iso_of_prose(text: str) -> str | None:
+    """A human-written calendar date rendered as ISO, or None. `October 30, 2026` -> `2026-10-30`.
+
+    The rule states a date and a clock, not a typography, so the comparison is by value: a README may carry
+    the ISO form while the page carries words for the same day. An impossible or partial date answers None and
+    is refused as missing, never coerced into a value it did not state.
+    """
+    for pattern, order in ((LONG_DATE, "mdy"), (LONG_DATE_DAY_FIRST, "dmy")):
+        match = pattern.search(text)
+        if not match:
+            continue
+        if order == "mdy":
+            month_name, day, year = match.group(1), match.group(2), match.group(3)
+        else:
+            day, month_name, year = match.group(1), match.group(2), match.group(3)
+        month = _MONTH_NUMBER.get(month_name.lower())
+        if month is None:
+            continue
+        try:
+            return date(int(year), month, int(day)).isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 def facts(text: str) -> tuple[str | None, str | None]:
-    """The version and the date a line states; None for a field that is not in it."""
+    """The version and the date a line states, the date in ISO form; None for a field that is not in it."""
     version = VERSION.search(text)
-    date = UTC_DATE.search(text)
-    return (version.group(1) if version else None, date.group(1) if date else None)
+    iso = UTC_DATE.search(text)
+    date = iso.group(1) if iso else iso_of_prose(text)
+    return (version.group(1) if version else None, date)
+
+
+def untagged_note(declared: str | None, line_date: str | None, release_date: str | None) -> str:
+    """The sentence a date carries when no tag exists to check it against — never a failure of its own.
+
+    A version line is drafted before the tag is stamped, so its day is a statement about the future until the
+    tag exists. Saying so is the honest face; the note disappears the moment a tag answers it, at which point
+    a disagreement turns the real-tree cell red. So the grace cannot outlive the release it covers.
+    """
+    if declared is None or release_date is not None or line_date is None:
+        return ""
+    return (
+        f"NOTE  the README dates {declared} as {line_date!r} and no tag names that version, so the date is "
+        "UNVERIFIED — a tag on a different UTC day turns this line red, which is the point of the rule"
+    )
 
 
 def visible_text(html: str) -> list[str]:
@@ -168,11 +227,11 @@ def site_claims(html: str) -> list[str]:
 
 
 def site_source_path() -> Path | None:
-    """The page this tree is compared against, or None when no copy of it is reachable from here."""
+    """The page named by $VENYA_SITE_SOURCE, or None. None is a named SKIP, never a pass."""
     env = (os.environ.get(SITE_SOURCE_ENV) or "").strip()
-    if env:
+    if env and Path(env).is_file():
         return Path(env)
-    return SITE_SOURCE_DEFAULT if SITE_SOURCE_DEFAULT.is_file() else None
+    return None
 
 
 # --------------------------------------------------------------------------- the comparison
@@ -241,14 +300,19 @@ class TestRealTree:
         line = top_line((_ROOT / "README.md").read_text(encoding="utf-8"))
         release = release_date_utc(_ROOT, declared) if declared else None
         print(f"\ndeclared={declared!r} readme_top_line={line!r} tag_utc_date={release!r}")
-        assert not readme_problems(declared, line, release), "README and the declared version disagree"
+        problems = readme_problems(declared, line, release)
+        note = untagged_note(declared, facts(line)[1] if line else None, release)
+        if note:
+            print(note)
+        assert not problems, "README and the declared version disagree"
 
     def test_the_site_states_the_same_version_and_the_same_date(self):
         site = site_source_path()
         if site is None:
             pytest.skip(
-                f"no copy of the product page reachable: set ${SITE_SOURCE_ENV} or have "
-                f"{SITE_SOURCE_DEFAULT} present — until then the site face is UNPROVEN, not passed"
+                f"no page named: set ${SITE_SOURCE_ENV} to a capture of the product page you mean to compare — "
+                "there is no default path, because a capture that has not been refetched describes the past, "
+                "and a site face left unnamed is UNPROVEN, not passed"
             )
         declared = declared_version(_ROOT)
         release = release_date_utc(_ROOT, declared) if declared else None
@@ -342,6 +406,35 @@ class TestPlantedDefects:
         print(problems)
         assert any("in UTC" in p for p in problems), "a local-clock date must not read green"
         assert readme_problems(self.DECLARED, self.GOOD, utc_date(iso)) == []
+
+    def test_a_human_date_is_read_as_the_same_value_as_the_iso_form(self):
+        """Both word orders the artifacts actually use, and only those."""
+        assert facts("Version 0.1.0beta3, released October 30, 2026")[1] == "2026-10-30"
+        assert facts("v0.1.0beta3 is current as of 30 October 2026")[1] == "2026-10-30"
+        assert facts("Version 0.1.0beta3, released 2026-10-30")[1] == "2026-10-30"
+
+    def test_a_human_date_that_disagrees_in_value_is_red(self):
+        problems = readme_problems(
+            self.DECLARED, "Current release: 0.1.0beta3, released October 30, 2026", self.TAG_UTC
+        )
+        print(problems)
+        assert any("in UTC" in p for p in problems), "a prose date on the wrong day must not read green"
+
+    def test_a_partial_or_impossible_human_date_is_refused_as_missing(self):
+        """`October 2026` names no day and `February 30` names no date — neither coerces into a pass."""
+        assert facts("Current release: 0.1.0beta3, released October 2026")[1] is None
+        assert iso_of_prose("released February 30, 2026") is None
+        assert readme_problems(self.DECLARED, "Current release: 0.1.0beta3, released October 2026", self.TAG_UTC)
+
+    def test_an_untagged_date_is_reported_and_not_refused(self):
+        """The draft state the rule names: a version line written before its tag.
+
+        The note is the disclosure, and it is empty the moment a tag answers the date — so a drafted day
+        cannot sit inside a green suite forever, and a tag on another UTC day turns the real-tree cell red.
+        """
+        assert untagged_note(self.DECLARED, "2026-11-16", None).startswith("NOTE")
+        assert untagged_note(self.DECLARED, "2026-11-16", self.TAG_UTC) == ""
+        assert untagged_note(self.DECLARED, None, None) == ""
 
     def test_a_naive_timestamp_is_refused_not_assumed(self):
         """A timestamp with no offset is somebody's wall clock; guessing here is the defect itself."""
