@@ -768,8 +768,11 @@ does not use the `mcpServers` convention:
 Restart opencode after config changes (config loads once at startup). The
 tools are model-invoked, not slash commands: ask "list the venya secrets",
 don't type `/list_secrets`. On 401/expired: `venya login <user-id>` (key
-touch) and retry — the MCP server reads the refreshed token from the same
-`VENYA_CONFIG` file.
+touch) at a terminal — a server that started with no token picks that login up
+on its next call, no restart needed. A server that already holds a session
+dials that session and nothing else, so a re-login is taken up by restarting
+opencode, which starts the server fresh. The full rule, for every MCP client,
+is under "When the Venya session behind the MCP server expires" below.
 
 ### pi
 
@@ -813,12 +816,11 @@ start; run `/reload` after adding or changing a server outside the session.
 
 Two pi-specific choices in that command:
 
-- **`--exposure direct`.** pi's default exposure for an MCP server is
-  `codemode`: the tools are registered but not declared to the model, and the
-  model reaches them through its own scripts. Venya's four tools are meant to
-  be called by name, so declare them. You can change exposure later from `/mcp`
-  in a session; `pi mcp list` marks tools whose exposure differs from their
-  server's.
+- **`--exposure direct`.** pi's own default for an MCP server is `codemode`,
+  which keeps Venya's four tools one step away from the model's direct view;
+  Venya recommends `direct` so they can be called by name. The mode list,
+  what each mode costs, and how to change the choice are under "Choosing
+  exposure" below.
 - **user-level vs project config.** Add `-l` to write this project's
   `.pi/mcp.json` instead of the user-level file. pi reads the project file only
   after you grant project trust, and a project entry replaces a user-level
@@ -827,7 +829,8 @@ Two pi-specific choices in that command:
 
 If the server shows as failed, read which prerequisite it stopped on: the
 startup checks the session token first, then the CA, so it prints exactly one of
-`No Venya session token found. Run the venya CLI …` (log in — the file at
+`No Venya session token found: there is no session file at <path> … then start
+the MCP server again.` (log in — the file at
 `VENYA_CONFIG`, default `~/.config/venya/config.json`, is missing) or
 `Venya CA certificate not found. Set the VENYA_CA_CERT environment variable …`
 (the CA file `venya setup` installs beside `config.json` is not being passed).
@@ -846,6 +849,103 @@ again, and when the file now holds a different token it says so and declines to 
 it, because nothing in that file names the login that wrote it. So a re-login that
 lands mid-session is taken up by `/mcp reconnect venya`, which restarts the stdio
 server for you in pi.
+
+#### Choosing exposure — pi's four modes
+
+The modes belong to pi; Venya only recommends one. The list below was read at
+pi's own faces on the installed harness (pi 1.5.2): the MCP docs page section
+"Control tool exposure", and `pi mcp add --help`, which prints
+`--exposure <mode>` as `codemode (default), deferred, direct, or hidden`.
+
+| Exposure | What the model sees and can invoke |
+|---|---|
+| `codemode` (pi's default) | Tools are callable from pi's codemode scripts — which find them with `searchTools()`, `describeTool()`, or `ALL_TOOLS` — but they are neither declared to the model nor listed in the codemode description. pi turns the `codemode` tool on for you when such a server connects. |
+| `deferred` | Tools are not declared until `tool_search` loads a match for the next model call. pi turns `tool_search` on for you when such a server connects. |
+| `direct` | Tools are declared to the model like a built-in tool, and are still callable from codemode scripts. |
+| `hidden` | Registered but unreachable — present plumbing, no path in. |
+
+`codemode-deferred` is accepted as an alias for `codemode`. A `toolExposure`
+map overrides the server-level choice tool by tool (exact names win over
+`*` patterns, first match wins among patterns) — that is how you declare one
+or two tools of a large server and keep the rest script-only. Servers whose
+tools are `codemode` or `deferred` still appear by name in the system
+prompt's `mcp_servers` section, with a line on how to reach them; what the
+model does NOT get is the tool declarations themselves.
+
+The cost of a wrong choice is not a failed connection — a `codemode` server
+connects fine and lists fine. The cost is indirection: your agent has to
+search for the tool and script the call instead of simply calling it by name,
+and many won't. Venya's server offers four small, named tools, so the
+registration above uses `--exposure direct`. Read the state back with
+`pi mcp list`; the server line names the exposure and the scope (shape read
+from pi's CLI source at the same face — the second line is the transport, and
+your server's tool list comes from the server itself):
+
+```text
+venya: connected, 4 tools (direct, global)
+  venya-mcp
+  tools: run_command, list_executors, list_secrets, get_audit
+```
+
+If that line reads `(codemode, global)` while you expected calls by name, you
+have a registration to change, not a broken server. Tools whose own exposure
+differs from the server's are marked in the list, e.g.
+`get_audit [hidden]`.
+
+Three ways to change the choice — pi's own verbs, all read at pi 1.5.2:
+
+1. **Re-register.** Run the `pi mcp add venya --exposure <mode> …` command
+   above again with a different `--exposure`: `add` on an existing name
+   replaces its entry.
+2. **In a session.** `/mcp`, select the server, change exposure. The change
+   is saved to the file that defines that server.
+3. **Out of a session.** Edit `exposure` in `~/.pi/agent/mcp.json` — or in
+   `.pi/mcp.json` if you registered with `-l`/`--local`, which pi reads only
+   after you grant project trust — then run `/reload` in any open session.
+   A project entry without `command`/`url` overrides only `enabled`,
+   `exposure`, and `toolExposure` of the user-level server of the same name,
+   which is how one project can keep Venya `direct` while another keeps it
+   script-only.
+
+#### When the Venya session behind the MCP server expires
+
+The MCP server authenticates with **your user access token** — the same one
+`venya login` writes — so your session's lifetime is its lifetime. When calls
+start coming back 401, work the three faces in this order:
+
+1. **Log in at a terminal:** `venya login <user-id>` and approve your security
+   key. This mints a fresh token into the session file.
+2. **Know what the running server can see.** The rule, stated as shipped in the
+   paragraph above: a server that started with no token picks that login up on
+   its next call; no restart is needed. A server that already holds a session
+   dials that session and nothing else — it re-reads the file, and when the
+   file now holds a different token it says so and declines to use it, because
+   nothing in that file names the login that wrote it.
+3. **Take a re-login into a session that is already running:** in pi,
+   `/mcp reconnect venya` restarts the stdio server, which then reads the file
+   fresh (a config edit takes `/reload` instead). opencode has no reconnect
+   verb — restart opencode itself.
+
+The failure text is written to be triaged, not guessed. Each session message
+names the session file it read and which state it found there: there is no
+session file at that path; the file holds no access token; or the token it
+read was refused by the core. The first two are never-held states and say so —
+nothing expired and the core refused no request — and only the third is a
+genuine expiry. `venya config show` gives the disk face:
+`Access Token: [set] (refreshed automatically on the next call)`, or
+`Access Token: [not set]` naming `venya login` as the way back; and a failed
+background refresh keeps your stored token, so a transient refusal never costs
+you the mint ceremony again.
+
+And the general shape of the trap, worth carrying across the whole page:
+**disk state and running state are different faces.** An installer can replace
+`venya-mcp` on disk while the process that started earlier keeps answering
+from the old code, exactly as a login can rewrite the session file while a
+running server dials only the session it obtained itself — and says so, rather
+than quietly acting as the new login. A `--version`-style claim should
+therefore name which face it read — the file on disk, or the process in
+memory — and when the two disagree, restarting or reconnecting the server
+(step 3) is what makes them agree again.
 
 ### Next: create a secret and prove the redaction path
 
