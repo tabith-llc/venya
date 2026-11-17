@@ -225,8 +225,10 @@ class APIClientError(Exception):
     """API client error.
 
     #776 AC5: a raise site that saw an HTTP status attaches it here, so the caller
-    classifies refused (4xx) from transient (5xx) on the fact, never on the message.
-    Sites that saw no status (connection failure, timeout) leave it None — transient.
+    classifies a refused credential (401/403) from a no-verdict one (every other status,
+    and None) on the fact, never on the message. Sites that saw no status (connection
+    failure, timeout) leave it None — no verdict, so the retry is pending. #808: the band
+    was never the question — 429 is volume and 404 is a route, neither is this credential.
     """
 
     status_code: int | None = None
@@ -1147,8 +1149,12 @@ class APIClient:
             # and one raise site now tells the two causes apart: a refused credential
             # keeps the mint ceremony, a transient one says the retry is pending —
             # the credential is alive and no key touch is owed.
+            # #808: only 401 ("not accepted") and 403 ("not allowed") are the core
+            # judging this credential. A 429 is a fact about volume, a 404 about a
+            # route, a 400 about the request — none is proof the token was refused,
+            # so they take the pending arm with everything that saw no status.
             status = e.status_code
-            refused = isinstance(e, APIClientAuthenticationError) or (status is not None and 400 <= status < 500)
+            refused = isinstance(e, APIClientAuthenticationError) or status in (401, 403)
             if refused:
                 raise APIClientAuthenticationError(
                     f"Token refresh failed: {e} — the stored token was left in place; "
@@ -1184,7 +1190,7 @@ class APIClient:
             cls = APIClientAuthenticationError if e.response.status_code == 401 else APIClientError
             error = cls(error_msg)
             # #776 AC5: the status rides on the exception so the refresh caller can
-            # tell a refused credential (4xx) from a transient one (5xx) by fact.
+            # tell a refused credential (401/403) from a no-verdict one by fact.
             error.status_code = e.response.status_code
             raise error
         except httpx2.ConnectError as e:
