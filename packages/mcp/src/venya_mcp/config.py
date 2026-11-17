@@ -202,7 +202,8 @@ class MCPConfig:
         Not the guard — the https:// refusal of #540 stays on ``server_url``, at the point the URL is
         dialled. This is only a report of what the disk says, so a caller can ask whether a token it is
         about to take belongs to the core it dials (#705: refuse a session it cannot attest). It costs
-        nothing to answer, because ``reload`` already parsed the whole file to read the token.
+        nothing to answer, because ``reload`` already parsed the whole file to read the token. A value
+        that is not a string is reported as ``None``: it names no core a caller could compare against.
         """
         return self._disk_server_url
 

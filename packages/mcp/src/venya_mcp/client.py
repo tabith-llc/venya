@@ -284,6 +284,8 @@ class VenyaClient:
         self._disk_reread = False
         # Set only when a read of the file actually found a token this process declined (#705);
         # the session sentence composes it, and it is reset with the re-read budget each request.
+        # shortcut: one flag per request, saying a read saw a value worth declining; a file rewritten
+        # twice inside one request can date the wording, and the upgrade is to re-read at compose time.
         self._adoption_refused = False
 
     async def close(self) -> None:
