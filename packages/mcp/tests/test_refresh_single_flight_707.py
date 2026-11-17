@@ -40,13 +40,24 @@ from venya_mcp.config import MCPConfig
 #: single-flight would never be exercised.
 _BURST_SECONDS = 0.05
 
-# The two session sentences this package ships, as literals: these cells guard the WORDS an
-# operator reads, and a constant imported from the source under test would pass by construction.
-_EXPIRED_SENTENCE = (
-    "Venya session expired and could not be renewed. "
-    "Run `venya login <USER_ID>` and approve your security key, "
-    "then restart the MCP server."
-)
+# The session sentence's INVARIANTS, not one literal. At dev the expired arm answers one whole
+# message; the sibling branch on this family (leg 1555) splits the three states into three wordings,
+# so a byte-equality assert here would pass on dev and go red on the merged face for a reason that
+# has nothing to do with a refresh race -- measured, not guessed: the merged tree of `3bd04925` with
+# this tip failed exactly this cell, and nothing else on either side. What must hold at every face is
+# what `_assert_session_refusal` checks; the dev wording itself stays pinned by
+# `tests/test_remedy_sentence_1554.py`, which is that leg's instrument, not mine.
+
+
+def _assert_session_refusal(message: str) -> None:
+    """This is a session refusal, in the verb that renews, and never a core-unreachability claim."""
+    assert "could not be renewed" in message, f"the refusal does not say what failed: {message!r}"
+    assert (
+        "venya login" in message and "<USER_ID>" in message
+    ), f"the remedy must name the verb that renews: {message!r}"
+    for banned in ("venya list", "venya run"):
+        assert banned not in message, f"the remedy must not send the operator to `{banned}`"
+    assert "no verdict" not in message, f"a refused credential is not reported as an unreachable core: {message!r}"
 
 
 def _config(tmp_path: Path, token: str | None, **keys: Any) -> MCPConfig:
@@ -137,7 +148,8 @@ async def test_refresh_refused_by_the_core_posts_once_and_says_expired(tmp_path:
     assert all(
         isinstance(e, SessionExpiredError) for e in errors
     ), f"a refused refresh must still reach the operator as an expired session: {errors}"
-    assert all(str(e) == _EXPIRED_SENTENCE for e in errors), "and in the ruled words, not a new voice"
+    for err in errors:
+        _assert_session_refusal(str(err))
 
 
 # --- 2. one message per cause: only a refusal may be called expired ---------------------------
