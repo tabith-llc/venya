@@ -2,7 +2,7 @@
 
 Notable changes to Venya will be documented in this file.
 
-## [0.1.0beta3] - 2026-11-16
+## [0.1.0beta3] - 2026-11-17
 
 ### New features
 

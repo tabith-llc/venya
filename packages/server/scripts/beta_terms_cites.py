@@ -98,27 +98,27 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     ),
     f"{E}:775": (E, "def _dial_crl_verdict_for", 1, "pin"),
     # ---- #586 entry: the listener door
-    "packages/executor/src/executor/relay_listener.py:697": (R, "def _build_ssl_context", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:712-723": (
+    'packages/executor/src/executor/relay_listener.py:706': (R, "def _build_ssl_context", 1, "pin"),
+    'packages/executor/src/executor/relay_listener.py:721-732': (
         R,
         "context.verify_mode = ssl.CERT_REQUIRED",
         1,
         "pin",
     ),
-    "packages/executor/src/executor/relay_listener.py:405": (R, "def revocation_accept_reason", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:550": (
+    'packages/executor/src/executor/relay_listener.py:414': (R, "def revocation_accept_reason", 1, "pin"),
+    'packages/executor/src/executor/relay_listener.py:559': (
         R,
         "reason = revocation_accept_reason(self.revocation_state)",
         1,
         "pin",
     ),
-    "packages/executor/src/executor/relay_listener.py:414": (R, "the EXECUTOR-serial list never describes", 1, "pin"),
+    'packages/executor/src/executor/relay_listener.py:423': (R, "the EXECUTOR-serial list never describes", 1, "pin"),
     f"{R}:116": (R, "peer_cn not in self.server.allowed_client_ids", 1, "pin"),
     f"{R}:46": (R, "RELAY_PORT = 8443", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:654": (R, 'host: str = "0.0.0.0"', 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:364-386": (R, "ConnectionRefusedError(reason)", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:718-723": (R, "relay_client_ids is empty", 1, "pin"),
-    "packages/executor/src/executor/relay_listener.py:774": (R, "def reload_ssl_context", 1, "pin"),
+    'packages/executor/src/executor/relay_listener.py:663': (R, 'host: str = "0.0.0.0"', 1, "pin"),
+    'packages/executor/src/executor/relay_listener.py:373-395': (R, "ConnectionRefusedError(reason)", 1, "pin"),
+    'packages/executor/src/executor/relay_listener.py:727-732': (R, "relay_client_ids is empty", 1, "pin"),
+    'packages/executor/src/executor/relay_listener.py:783': (R, "def reload_ssl_context", 1, "pin"),
     # ---- #586 entry: the daemon state machine
     "packages/executor/src/executor/daemon.py:252": (D, "self.revoked = False", 1, "pin"),
     "packages/executor/src/executor/daemon.py:258": (D, "self.revocation_answered = False", 1, "pin"),
@@ -130,11 +130,11 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     "packages/executor/src/executor/daemon.py:1950": (D, "relay_client_ids is empty", 1, "pin"),
     "packages/executor/src/executor/daemon.py:1407": (D, "CA certificate expired", 1, "pin"),
     # ---- installers and CA
-    "install-venya-core.sh:1243": (HC, "-CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key", 2, "pin"),
-    "install-venya-core.sh:1245": (HC, '-CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365', 1, "pin"),
-    "install-venya-core.sh:1236": (HC, '-subj "/O=Venya/CN=${CORE_HOSTNAME}-relay"', 1, "pin"),
-    "install-venya-core.sh:1228": (HC, '-out "$RELAY_DIR/relay-client.key"', 1, "pin"),
-    "install-venya-core.sh:1188": (HC, "-out /etc/venya/tls/server.key", 1, "pin"),
+    'install-venya-core.sh:1247': (HC, "-CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key", 2, "pin"),
+    'install-venya-core.sh:1249': (HC, '-CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365', 1, "pin"),
+    'install-venya-core.sh:1240': (HC, '-subj "/O=Venya/CN=${CORE_HOSTNAME}-relay"', 1, "pin"),
+    'install-venya-core.sh:1232': (HC, '-out "$RELAY_DIR/relay-client.key"', 1, "pin"),
+    'install-venya-core.sh:1192': (HC, "-out /etc/venya/tls/server.key", 1, "pin"),
     ":967": (HC, "chmod 600 /etc/venya/tls/server.key", 1, "pin"),
     ":1007": (HC, 'chmod 600 "$RELAY_DIR/relay-client.key"', 1, "pin"),
     ":1063": (HC, '-out "$INNER_DIR/inner.key"', 1, "pin"),
@@ -186,19 +186,19 @@ MANIFEST: dict[str, tuple[str, str, int, str]] = {
     "packages/cli/src/venya_cli/cli.py:440": (L, '"split-ca-key"', 1, "pin"),
     "packages/executor/src/executor/config.py:422": (CFG, "relay_client_ids: list[str] = Field(", 1, "pin"),
     # ---- the two live NoEncryption() writers and the four comments
-    "packages/cli/src/venya_cli/commands.py:2249": (CM, "NoEncryption(): an admin private key in the clear", 1, "pin"),
+    'packages/cli/src/venya_cli/commands.py:2264': (CM, "NoEncryption(): an admin private key in the clear", 1, "pin"),
     f"{CM}:3241": (CM, "NoEncryption(), an executor private key in the clear beside the cert", 1, "pin"),
     "packages/core/src/core/iam/models.py:744": (M, "class CoreRelayCredential", 1, "pin"),
     f"{CM}:3678": (CM, "the renew path wrote NoEncryption(): an executor private key", 1, "pin"),
     # the page prints these two as BARE `commands.py:N` on the continuation line — same file, so
     # keyed here; the guard still demands the page say a full path (see the ambiguity cell)
-    "packages/cli/src/venya_cli/commands.py:3524": (
+    'packages/cli/src/venya_cli/commands.py:3549': (
         CM,
         "NoEncryption(), an executor private key in the clear beside the cert",
         1,
         "pin",
     ),
-    "packages/cli/src/venya_cli/commands.py:3961": (
+    'packages/cli/src/venya_cli/commands.py:3986': (
         CM,
         "the renew path wrote NoEncryption(): an executor private key",
         1,
