@@ -62,6 +62,7 @@ Notable changes to Venya will be documented in this file.
 - The published install and recovery commands used to write an installer variable after `sudo`, which makes it one of sudo's arguments and keeps the value in that process's command line, readable to other local accounts, for the life of the install; they now set it before `sudo` and pipe into `sudo -E bash -s`, and `docs/cert-rotation-runbook.md` reads the one `VENYA_ADMIN_CA_KEY_PASSPHRASE` line it needs instead of printing the whole env file (#756)
 - Two sentences in `install-venya-core.sh` claimed more than the script does: the unreadable-incoming-version arm of the schema compare warns and continues, where its line said the version guard had refused, and a restore point is taken before migrations run, not before anything changes, so both lines now match the path you are on (#759)
 - An operator whose sandbox tools could not be found no longer receives installation instructions for a package their platform does not publish (#795)
+- When the server tells `venya` it's receiving requests too often, `venya` now waits and retries on its own instead of asking you to log in again. Your saved login is not touched either way (#808)
 
 ## [0.1.0beta2] - 2026-10-28
 
