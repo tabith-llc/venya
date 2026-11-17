@@ -114,3 +114,96 @@ def test_config_show_not_set_names_the_mint_verb(tmp_path, capsys):
     assert "Access Token: [not set]" in out
     assert "venya login" in out
     client.close()
+
+
+# ---------------------------------------------------------------------------
+# Leg 1560 revision — #776 AC5 clause two and finding 2, driven through the
+# REAL _post_raw wrapping (only the transport is mocked, exactly as a live 503):
+# transient arms say RETRY PENDING with no ceremony word; the refused arm keeps
+# the 1556 sentence; never-held stays a third state with a third text (#706).
+# ---------------------------------------------------------------------------
+
+# The shipped 1556 remedy clause, pinned by value so a swing cannot pass it by
+# rewording — the refused arm must carry these bytes.
+_CEREMONY_SENTENCE = (
+    "the stored token was left in place; " "run `venya login <user-id>` to mint a new one (security-key ceremony)"
+)
+
+
+def _drive_status_through_post_raw(client, status_code, detail):
+    """Transport answers `status_code` on the refresh POST; nothing else is mocked."""
+    mock_http = MagicMock()
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = {"detail": detail}
+    resp.raise_for_status.side_effect = httpx2.HTTPStatusError(
+        f"HTTP {status_code}", request=MagicMock(), response=resp
+    )
+    mock_http.request.return_value = resp
+    client._http = mock_http
+
+
+def _refresh_message(client):
+    try:
+        client.refresh_token()
+    except APIClientAuthenticationError as e:
+        return str(e)
+    raise AssertionError("refresh_token must raise")
+
+
+def test_transient_503_says_pending_not_ceremony(tmp_path):
+    """AC5 clause two, RED at the 1556 tip: a 503 must name pending and no ceremony."""
+    client = _client_with_token(tmp_path)
+    before = client.config.config_file.read_bytes()
+    _drive_status_through_post_raw(client, 503, "core busy")
+    msg = _refresh_message(client)
+    assert "ceremony" not in msg
+    assert "venya login" not in msg
+    assert "pending" in msg and "retry" in msg
+    assert "503" in msg  # the cause is named on the fact, not on the server's prose
+    assert client.config.config_file.read_bytes() == before  # clause one still holds
+    client.close()
+
+
+def test_refresh_timeout_says_pending_at_the_same_seam(tmp_path):
+    """Finding 2, RED at the 1556 tip (the class escaped unwrapped): timeout is transient."""
+    client = _client_with_token(tmp_path)
+    before = client.config.config_file.read_bytes()
+    mock_http = MagicMock()
+    mock_http.request.side_effect = httpx2.TimeoutException("read timed out")
+    client._http = mock_http
+    msg = _refresh_message(client)
+    assert "ceremony" not in msg
+    assert "pending" in msg
+    assert "timed out" in msg  # the cause is named
+    assert client.config.config_file.read_bytes() == before
+    client.close()
+
+
+def test_refused_401_keeps_the_1556_ceremony_sentence(tmp_path):
+    """Paired negative against the swing: the refused arm carries the pinned bytes.
+
+    Green at the 1556 tip by design — it pins what 1556 shipped; its bite is the
+    byte-pinned clause plus the pending-word-absent discriminator below, which any
+    over-swing to a unified pending sentence trips.
+    """
+    client = _client_with_token(tmp_path)
+    before = client.config.config_file.read_bytes()
+    _drive_status_through_post_raw(client, 401, "Invalid or expired token")
+    msg = _refresh_message(client)
+    assert _CEREMONY_SENTENCE in msg
+    assert "pending" not in msg
+    assert client.config.config_file.read_bytes() == before
+    client.close()
+
+
+def test_never_held_state_keeps_its_own_text(tmp_path):
+    """#706 discipline: never-held is neither refused nor transient — a third text."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"server_url": "https://core.test"}))
+    client = APIClient(config_file=config_file)
+    msg = _refresh_message(client)
+    assert "No token to refresh" in msg
+    assert "ceremony" not in msg
+    assert "pending" not in msg
+    client.close()
