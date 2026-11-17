@@ -91,8 +91,9 @@ if ($purge -eq 'yes') { $guardRoots += $cfgDir, $legacy }
 foreach ($root in $guardRoots) {
     try { $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop } catch { continue }
     if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { continue }
-    # LinkType and Target are PowerShell 6+ properties; 5.1 carries neither, so a 5.1 run
-    # names the path and the fact that it is a link rather than guessing at the rest.
+    # Name the kind and the target where the shell can read them. This is a capability probe, not
+    # a version test: the tested guest's Windows PowerShell 5.1.26100 answers LinkType=Junction,
+    # and a shell that carries neither property still gets the path and the fact that it is a link.
     $rootWhat = 'reparse point'
     if ($rootItem.PSObject.Properties.Name -contains 'LinkType') { $rootWhat = $rootItem.LinkType }
     if ($rootItem.PSObject.Properties.Name -contains 'Target') {

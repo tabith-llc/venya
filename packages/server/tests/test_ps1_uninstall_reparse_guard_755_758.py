@@ -109,7 +109,8 @@ def test_guard_refusal_names_the_link_and_says_nothing_was_removed() -> None:
     assert "Fail " in guard, "the refusal goes through Fail, which is the nonzero exit in this file"
     assert re.search(r"function Fail\(.*exit 1", SRC), "Fail must still exit nonzero"
     assert "Nothing was removed" in guard
-    # where it points, when the PowerShell version can say so: LinkType and Target are 6+ properties
+    # where it points, when the shell can say so: LinkType and Target are read as capabilities, and
+    # the tested 5.1.26100 guest answers LinkType=Junction, so this is not a version gate.
     assert "LinkType" in guard and "Target" in guard
 
 
