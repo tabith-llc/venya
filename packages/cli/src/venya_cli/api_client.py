@@ -1052,8 +1052,10 @@ class APIClient:
                         )
                         response.raise_for_status()
                         return response.json() if response.content else {}
-                    except APIClientAuthenticationError:
-                        pass
+                    except APIClientAuthenticationError as refresh_error:
+                        # #776: the refresh sentence names the way back; it used to be
+                        # discarded here, leaving the operator only the bare 401.
+                        raise APIClientAuthenticationError(f"{error_msg} — {refresh_error}") from refresh_error
                 raise APIClientAuthenticationError(error_msg)
             raise APIClientError(error_msg)
         except httpx2.ConnectError as e:
@@ -1133,8 +1135,13 @@ class APIClient:
             logger.debug("Token refreshed successfully")
             return self.config.access_token
         except APIClientError as e:
-            self.config.access_token = None
-            raise APIClientAuthenticationError(f"Token refresh failed: {e}") from e
+            # #776: a refused or transient refresh is not proof the stored credential
+            # is dead, and assigning None here rewrote config.json (the setter saves).
+            # The token stays on disk; the way back is the mint verb, named once here.
+            raise APIClientAuthenticationError(
+                f"Token refresh failed: {e} — the stored token was left in place; "
+                "run `venya login <user-id>` to mint a new one (security-key ceremony)"
+            ) from e
 
     def _post_raw(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         """Make a POST request without auto-refresh (for auth endpoints)."""

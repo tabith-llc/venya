@@ -2511,9 +2511,12 @@ def cmd_config_show(client: APIClient) -> int:
     print("Venya CLI Configuration:")
     print(f"  Server URL: {config.server_url}{source_note}")
     if config.access_token:
-        print("  Access Token: [set] (expires soon — run 'venya run' to refresh)")
+        # #776 AC2: this line used to name the execute verb as the refresh path;
+        # refresh is transparent (401-then-retry), so state the real mechanism.
+        print("  Access Token: [set] (refreshed automatically on the next call)")
     else:
-        print("  Access Token: [not set]")
+        # #776 AC3: a machine that has never logged in gets the mint verb too.
+        print("  Access Token: [not set] — run `venya login <user-id>` to mint one (security-key ceremony)")
     ca_path = config.ca_path
     if ca_path.exists():
         try:
