@@ -1224,3 +1224,57 @@ venya_verify_deployment() {
 
     info "Deployment verified — site-packages matches source tarball"
 }
+
+# --- Post-deploy: co-located user CLI build face (#796) ---
+
+venya_warn_cli_face_mismatch() {
+    # A core install replaces the tree under $INSTALL_DIR and never touches a
+    # user's own CLI install (~/.local/bin/venya, a `uv` tool install), so one
+    # host can carry two build faces — and `venya --version` prints the CLI's
+    # own, which after an upgrade names the previous build (ticket #796).
+    # This step reads both faces from the BUILD_COMMIT stamps on disk — the
+    # same beside-module lookup the bundles carry, no request leaves the host —
+    # and names them when they differ. It never fails the install: a CLI on an
+    # older build is not a broken core. It stays silent when the two agree, and
+    # it never prints a face it could not read.
+    local deployed_face stamp home user cli_dir d cli_face
+    stamp="$INSTALL_DIR/packages/core/src/core/BUILD_COMMIT"
+    deployed_face=$(awk 'NF { print $1; exit }' "$stamp" 2>/dev/null) || deployed_face=""
+    if [ -z "$deployed_face" ]; then
+        # No readable face for the tree just deployed (an unstamped bundle): there
+        # is nothing to compare against, and nothing worth printing.
+        return 0
+    fi
+
+    user="${SUDO_USER:-}"
+    if [ -n "$user" ] && [ "$user" != "root" ]; then
+        home=$(getent passwd "$user" 2>/dev/null | cut -d: -f6)
+        [ -n "$home" ] || home="/home/$user"
+    else
+        home="${HOME:-/root}"
+    fi
+
+    # First readable uv-tool layout wins (one python dir per tool venv).
+    cli_dir=""
+    for d in "$home"/.local/share/uv/tools/venya-cli/lib/python*/site-packages/venya_cli; do
+        if [ -d "$d" ]; then
+            cli_dir="$d"
+            break
+        fi
+    done
+    if [ -z "$cli_dir" ]; then
+        return 0  # no co-located user CLI install — nothing to name
+    fi
+
+    cli_face=$(awk 'NF { print $1; exit }' "$cli_dir/BUILD_COMMIT" 2>/dev/null) || cli_face=""
+    if [ "$cli_face" = "$deployed_face" ]; then
+        return 0  # the two faces agree — silent
+    fi
+    if [ -n "$cli_face" ]; then
+        warn "Build-face note: the user CLI for '${user:-$HOME}' is build ${cli_face}; this install deployed ${deployed_face}."
+    else
+        warn "Build-face note: the user CLI for '${user:-$HOME}' carries no readable build face; this install deployed ${deployed_face}."
+    fi
+    warn "  On a core host, 'venya --version' describes that client CLI, not the server tree above."
+    warn "  To bring the CLI onto this build: run install-venya-cli.sh as the same user (no sudo)."
+}

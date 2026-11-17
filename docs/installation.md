@@ -141,6 +141,13 @@ curl -sS https://<core-host>/api/v1/health
 # {"status":"ok","version":"<server-version>","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
 
+About faces on the core host itself: `venya --version` there describes the client CLI
+installed for the signed-in user (`~/.local/bin/venya`, a `uv` tool install), not the
+server tree this installer just deployed — after a core upgrade the two can differ. The
+installer reads both build faces from the `BUILD_COMMIT` stamps on disk and warns,
+naming both, when they differ; re-running `install-venya-cli.sh` as that user brings
+the client onto the new build.
+
 The metrics scrape endpoint is open on the same fresh install with no further step — run this
 **on the core host**, because it binds loopback only (#653):
 
