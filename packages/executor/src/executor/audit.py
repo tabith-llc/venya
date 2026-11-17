@@ -47,6 +47,11 @@ EVENT_TYPES = (
     # answered it — the destination just was never reached. `exit_code` on the executed row
     # cannot carry this, because a refusal arrives as a completed HTTP response.
     "egress_denied",
+    # #805: the runtime answered and this build could not read the answer. A row of its own, and
+    # deliberately not a relabelled `egress_denied` — an unreadable record is not evidence that
+    # traffic was refused. Without it the trail carries one sole row, `command_executed`, and that
+    # row says nothing about which of the two it was: nothing refused, or nothing knowable.
+    "egress_log_unreadable",
     "token_revocation_failed",
     # #586: the relay accept gate refused a connection (revoked credential, or no
     # revocation answer this boot). Recorded because a silent refusal is invisible

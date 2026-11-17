@@ -2277,6 +2277,27 @@ async def execute_command_on_executor(
             )
         )
 
+    # AUDIT EVENT: the egress record could not be read (#805). Its own row, and not a denial row:
+    # the runtime answered and venya could not parse the answer, which says something about the
+    # instrument and nothing about the traffic. The half of the trail this closes is the one a
+    # reader cannot see from the caller's stream — without it the trail carries a sole
+    # `command_executed` row and reads the same for a run with nothing refused and a run whose
+    # policy log venya could not read. No destination is carried, because none was ever named.
+    if result["egress_log_unreadable"]:
+        db.add(
+            AuditEvent(
+                event_type="egress_log_unreadable",
+                user_id=auth_user["user_id"],
+                fields={
+                    "session_id": session.id,
+                    "executor_id": id,
+                    "command": display_command,
+                    "exit_code": result["exit_code"],
+                },
+                timestamp=now,
+            )
+        )
+
     # Mark session as completed via a bulk UPDATE that tolerates a row that vanished
     # mid-execute (ticket execute-stale-session-update-500) — an ORM flush here raised
     # StaleDataError -> 500 after the command already ran. The audit event above commits

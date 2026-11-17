@@ -265,6 +265,9 @@ class ExecuteHandler(BaseHTTPRequestHandler):
                     # stand-in engine in the existing cells returns a bare result object.
                     egress_denied=getattr(result, "egress_denied", False),
                     egress_denied_host=getattr(result, "egress_denied_host", ""),
+                    # #805: the core writes the trail row from this body, so the third answer has to
+                    # cross as structured data too, not only as a sentence in stderr.
+                    egress_log_unreadable=getattr(result, "egress_log_unreadable", False),
                 ).model_dump(),
             )
         finally:
