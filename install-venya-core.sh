@@ -621,6 +621,10 @@ venya_create_venv "venya-core-requirements.txt"
 # --- Verify deployed code ---
 venya_verify_deployment core
 
+# --- Co-located user CLI build face (#796): names both faces when they differ,
+# never fails the install, silent when they agree or nothing is readable ---
+venya_warn_cli_face_mismatch
+
 # --- Create directories ---
 venya_create_directories
 
