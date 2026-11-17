@@ -489,7 +489,10 @@ def egress_deny_notice(
 # The rows are read by field name from either envelope through `sandbox_shape.rows_from_any_face`
 # — one seam, no second shape table — because the installer sets a vendor version FLOOR and no
 # ceiling, so both faces are admissible on a customer machine and an unseen release is still
-# unseen. Nothing here branches on a version number.
+# unseen. Nothing here branches on a version number. The seam returns the name that carries ROWS, so
+# a vestigial empty key left behind by a rename cannot hide the list, and `null_is_shape` is set here
+# and nowhere else: a refusal list that arrives as `null` is a record this build cannot read, while
+# the two recorders sharing `_rows` still write `null` as their own empty answer.
 #
 # `blocked_hosts` / `blocked` rows are HISTORY, not this run: the same host keeps its earlier row after
 # an allow rule is added, so a reader that ignored `last_seen` would mark a later, genuinely
@@ -594,8 +597,8 @@ def proxy_egress_log_outcome(
     `clear` — the answer is one this build reads, and it holds no refusal for this sandbox in
     this window, including the history case: an older row for the same host is not this run.
     `unrecognised` — an answer came back and this build could not read it: no refusal list under
-    either measured name, rows that name no sandbox, JSON that does not arrive whole, or an
-    envelope that is not the one this verb prints.
+    either measured name, a refusal list that arrived as `null`, rows that name no sandbox, JSON
+    that does not arrive whole, or an envelope that is not the one this verb prints.
 
     The third case is the one this function exists to separate from the second. Both used to
     answer `None`, which let a vendor release that renamed two fields report a refused run as an
@@ -610,7 +613,7 @@ def proxy_egress_log_outcome(
     except (TypeError, ValueError):
         return ProxyEgressLogOutcome(EGRESS_LOG_UNRECOGNISED, None, "the answer did not arrive as one JSON value")
 
-    rows = rows_from_any_face(parsed, *POLICY_LOG_LIST_KEYS)
+    rows = rows_from_any_face(parsed, *POLICY_LOG_LIST_KEYS, null_is_shape=True)
     if rows is None:
         return ProxyEgressLogOutcome(
             EGRESS_LOG_UNRECOGNISED,

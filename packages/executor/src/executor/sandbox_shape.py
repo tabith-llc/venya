@@ -171,7 +171,7 @@ def _clip(text: str) -> str:
     return (text or "").strip()[:200]
 
 
-def _rows(payload: Any, key: str) -> list[dict[str, Any]] | None:
+def _rows(payload: Any, key: str, *, null_is_shape: bool = False) -> list[dict[str, Any]] | None:
     """The vendor's rows from either face it answers with, or ``None`` when the answer is not that answer.
 
     ``sbx template ls --json`` and ``sbx settings list --json`` print a top-level ARRAY of rows at
@@ -180,9 +180,17 @@ def _rows(payload: Any, key: str) -> list[dict[str, Any]] | None:
     as "the JSON answer did not parse" points an operator at a parse failure on a machine that
     answered cleanly. ``None`` means shape: an object with no ``key`` at all is shape, while an
     explicit ``null`` or ``[]`` under it stays the empty answer this recorder has always written.
+
+    ``null_is_shape`` moves that last clause for one caller. An explicit ``null`` and an explicit
+    ``[]`` mean the same thing to a recorder that writes both when it has no rows, but not to a
+    reader asked whether the proxy refused a run: there ``null`` is closer to "the record is not
+    there" than to "nothing was refused", so it answers ``None`` (refs #806). ``[]`` is unchanged
+    either way — the captured faces print it, and it stays the empty answer.
     """
     if isinstance(payload, dict):
         if key not in payload:
+            return None
+        if null_is_shape and payload[key] is None:
             return None
         payload = payload[key] or []
     if isinstance(payload, list) and all(isinstance(row, dict) for row in payload):
@@ -195,7 +203,7 @@ def _shape_reason(what: str, key: str) -> str:
     return f"the answer parsed but is not {what}: expected an array of rows, or an object with a {key!r} array"
 
 
-def rows_from_any_face(payload: Any, *keys: str) -> list[dict[str, Any]] | None:
+def rows_from_any_face(payload: Any, *keys: str, null_is_shape: bool = False) -> list[dict[str, Any]] | None:
     """The vendor's rows, trying each envelope name it has been seen answering under.
 
     One seam for every reader of a `sbx … --json` answer. ``_rows`` already holds both shapes this
@@ -205,12 +213,21 @@ def rows_from_any_face(payload: Any, *keys: str) -> list[dict[str, Any]] | None:
     `packages/executor/tests/fixtures/`. A second shape table somewhere else is how the two faces
     drift apart again, so every reader comes through here. ``None`` means the answer is not that
     answer at all, and the caller says that out loud instead of reading silence as success.
+
+    Which NAME is tried first is not a fact about the answer, so the loop returns the first name
+    that carries ROWS and keeps an empty-but-present name only as a fallback: a release that leaves
+    a vestigial ``[]`` under the old name while answering under the new one would otherwise have
+    its refusal read as a clean run (refs #807). ``null_is_shape`` is passed through to ``_rows``
+    for the callers that read ``null`` as no answer at all.
     """
+    empty_rows: list[dict[str, Any]] | None = None
     for key in keys:
-        rows = _rows(payload, key)
-        if rows is not None:
+        rows = _rows(payload, key, null_is_shape=null_is_shape)
+        if rows:
             return rows
-    return None
+        if rows is not None and empty_rows is None:
+            empty_rows = rows
+    return empty_rows
 
 
 def dpkg_fields(fields: dict[str, Any]) -> None:
