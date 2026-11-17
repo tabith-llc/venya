@@ -837,11 +837,15 @@ mode that warns and its shipped message says "never use in production".
 it runs — an unknown one exits 2 before the server starts — so `pi mcp list` and
 `/mcp` are how you read why a server did not come up; `/mcp` shows the full
 connection error and the tail of stderr from a failed stdio server. On
-401/expired: the server says what to do in its own words — *"Run the `venya` CLI
-(e.g. `venya list`) and approve your security key, then restart the MCP server."*
-The running process holds the token it read at startup, so it does not pick up a
-new login on the next call; in pi, `/mcp reconnect venya` restarts the stdio
-server for you.
+401/expired: the server says what to do in its own words — *"Run `venya login
+<USER_ID>` and approve your security key"* — and names the session file it read, so a
+request aimed at the wrong path is visible to you. A server that started with no
+token picks that login up on its next call; no restart is needed. A server that
+already holds a session dials that session and nothing else: it reads the file
+again, and when the file now holds a different token it says so and declines to use
+it, because nothing in that file names the login that wrote it. So a re-login that
+lands mid-session is taken up by `/mcp reconnect venya`, which restarts the stdio
+server for you in pi.
 
 ### Next: create a secret and prove the redaction path
 
