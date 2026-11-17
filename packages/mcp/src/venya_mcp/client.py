@@ -11,6 +11,7 @@ Uses httpx2 (the monorepo-standard httpx fork) for async HTTP.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shlex
@@ -25,16 +26,28 @@ logger = logging.getLogger("venya.mcp")
 
 
 class VenyaAPIError(Exception):
-    """Raised when the Venya API returns an error response."""
+    """Raised when the Venya API returns an error response.
 
-    def __init__(self, status_code: int, detail: str) -> None:
+    ``status_code`` is the status the core actually answered, or ``None`` when it answered
+    nothing at all — a timeout, a refused connection. ``None`` is rendered as "no response"
+    and never as a number: this client must not report a status it did not observe (#707).
+    """
+
+    def __init__(self, status_code: int | None, detail: str) -> None:
         self.status_code = status_code
         self.detail = detail
-        super().__init__(f"Venya API error {status_code}: {detail}")
+        seen = f"{status_code}" if status_code is not None else "with no response"
+        super().__init__(f"Venya API error {seen}: {detail}")
 
 
 class SessionExpiredError(Exception):
-    """Raised when token refresh fails — human must re-authenticate."""
+    """Raised when no usable session could be presented — the human must re-authenticate.
+
+    Which of the causes this carries is told by the message, never by the class: a session
+    the core refused, and a session this process never held, are different faults and the
+    operator reads different words for each (#706). An unreachable core is not carried here
+    at all — that is a ``VenyaAPIError`` (#707).
+    """
 
 
 def _bootstrap_tls_verify() -> bool | str:
@@ -140,6 +153,23 @@ def _require_anchored_verify(verify: object) -> str | bool:
 _EXECUTE_TIMEOUT_SECONDS = 340.0
 
 
+#: #707: the one sentence for every shape in which the core gave no verdict on this session —
+#: a 5xx, a timeout, a refused connection. Modelled on the CLI's transient arm, which #776 landed
+#: for the same fault (``venya_cli/api_client.py``); the mcp package does not depend on venya-cli
+#: (``packages/mcp/pyproject.toml``), so the words are copied deliberately, the same arrangement
+#: as ``_https_refusal`` in ``config.py``. Two facts it carries: the stored session is untouched,
+#: and no security key is owed — so it never appears beside the ceremony wording.
+_NO_VERDICT_DETAIL = (
+    "the Venya core gave no verdict on this session; the stored token was left in place "
+    "and the next call refreshes automatically"
+)
+
+
+#: Statuses that ARE a verdict on the credential: the core reached its own refresh endpoint and
+#: refused this token. Everything else the core answers is not a session judgement (#707).
+_REFRESH_REFUSAL_STATUSES = (401, 403)
+
+
 class VenyaClient:
     """Async HTTP client for the Venya API.
 
@@ -155,6 +185,13 @@ class VenyaClient:
     exists, in words that name no mechanism (R9): either shape ends up trusting something that is
     not the Venya CA.
     """
+
+    #: The one refresh this client exposes to concurrent callers (#707). Declared on the class as
+    #: the "nothing in flight" value rather than in ``__init__``, because the task can only be born
+    #: inside a running loop; ``_refresh`` assigns it on the instance before its first ``await``,
+    #: so two callers cannot both decide to POST. A server-wide client shared by every tool call
+    #: (``server.py`` ``_client``) is what makes that race reachable.
+    _refresh_task: asyncio.Task[bool] | None = None
 
     def __init__(
         self,
@@ -188,11 +225,43 @@ class VenyaClient:
         return {"Authorization": f"Bearer {self._access_token}"}
 
     async def _refresh(self) -> bool:
-        """Attempt to refresh the access token.
+        """Refresh once per burst: concurrent 401s share one POST (#707).
+
+        Every tool call dials through this one client, so a burst of expired-token 401s used
+        to launch one refresh POST each. Two things followed from that: the core saw N refreshes
+        for one session, and a call whose own refresh came back non-200 was reported to its
+        caller as an expired session even when a sibling refresh in the same burst had just
+        succeeded. Now the first caller creates the task and any caller that arrives while it is
+        in flight awaits *that* outcome, so a burst costs exactly one refresh.
+
+        A refused outcome is still a real answer, shared with every waiter — but the caller's 401
+        branch reads the response itself now, so "the core refused" and "the core could not be
+        reached" reach the operator as different sentences (#706, #707).
+
+        Returns True when a token was obtained, False when it was not.
+        """
+        if not self._access_token:
+            return False
+
+        in_flight = self._refresh_task
+        if in_flight is not None and not in_flight.done():
+            logger.info("Joining the token refresh already in flight")
+            return await in_flight
+
+        task: asyncio.Task[bool] = asyncio.ensure_future(self._post_refresh())
+        self._refresh_task = task
+        return await task
+
+    async def _post_refresh(self) -> bool:
+        """The refresh POST itself — reached once per burst, never once per call.
 
         Sends current access token to /api/v1/auth/refresh.
         Server returns a new access_token. Updates config file in-place.
-        Returns True on success, False on failure.
+        Returns True on success, False when the core refused THIS credential.
+
+        Raises ``VenyaAPIError`` when the core gave no verdict on it — a 5xx, a timeout, a
+        refused connection (#707). That distinction is the whole point: only a refusal may be
+        reported to the operator as an expired session.
         """
         if not self._access_token:
             return False
@@ -203,8 +272,14 @@ class VenyaClient:
                 headers=self._headers(),
             )
             if resp.status_code != 200:
-                logger.warning("Token refresh failed: %d", resp.status_code)
-                return False
+                if resp.status_code in _REFRESH_REFUSAL_STATUSES:
+                    logger.warning("Token refresh refused by the core: %d", resp.status_code)
+                    return False
+                # Reached the core, answered with something that is not a judgement on this
+                # credential. The caller's retry cannot fix that, and the operator is not owed
+                # a key ceremony for it (#707).
+                logger.warning("Token refresh got %d from the core", resp.status_code)
+                raise VenyaAPIError(resp.status_code, _NO_VERDICT_DETAIL)
 
             data = resp.json()
             new_token = data.get("access_token")
@@ -218,8 +293,11 @@ class VenyaClient:
             return True
 
         except httpx2.HTTPError as e:
+            # Covers both shapes the caller asked to be told apart: a timeout and a transport
+            # failure. Neither observed a status, so neither may be reported as one, and neither
+            # is evidence that this session expired (#707).
             logger.warning("Token refresh HTTP error: %s", e)
-            return False
+            raise VenyaAPIError(None, _NO_VERDICT_DETAIL) from e
 
     async def _request(
         self,

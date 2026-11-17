@@ -143,9 +143,29 @@ class MCPConfig:
     def update_token(self, new_token: str) -> None:
         """Update the access token, preserving all other keys.
 
+        "All other keys" means the keys the file holds NOW, not the snapshot this process
+        took at startup. This file is shared with the CLI, and publishing a stale snapshot
+        silently reverts a key another writer changed in the meantime — ``server_url`` among
+        them, the one key that decides which core the client dials (#707). So the write is a
+        read-modify-write: re-read the file, replace ``access_token`` only. The in-memory
+        snapshot keeps its own ``server_url``; only the file follows the other writer.
+
         Writes atomically (temp file + os.replace) with 0o600 permissions
         so concurrent CLI reads never see a torn file.
         """
+        try:
+            merged: Any = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            merged = None
+        if not isinstance(merged, dict):
+            # An unreadable file is no reason to lose the refresh: write this process's own
+            # keys and let the next writer re-read. A non-object file lands here too.
+            logger.warning(
+                "Session file %s gave no readable keys; writing this process's own",
+                self.path,
+            )
+            merged = dict(self._data)
+        merged["access_token"] = new_token
         self._data["access_token"] = new_token
         tmp_fd: str | None = None
         try:
@@ -157,7 +177,7 @@ class MCPConfig:
                 delete=False,
             ) as fd:
                 tmp_fd = fd.name
-                fd.write(json.dumps(self._data, indent=2))
+                fd.write(json.dumps(merged, indent=2))
                 fd.flush()
                 os.fchmod(fd.fileno(), 0o600)
             os.replace(tmp_fd, self.path)
