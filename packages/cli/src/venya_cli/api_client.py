@@ -60,6 +60,25 @@ DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 DEFAULT_SERVER_URL = "http://localhost:8000"
 
 
+def unreadable_config_tell(config_file: Path, preserved: Path | None) -> str:
+    """The one sentence a save prints when it could not read what it is replacing (#810).
+
+    Named the paths and the act, never a value: this file is where a bearer token lives, so the
+    tell must not become the leak it is reporting. It also names the verb that puts the core back,
+    read from `docs/cli-reference.md` rather than invented, because the operator has to act on it.
+    """
+    kept = (
+        f"it is kept beside the new file as {preserved.name}"
+        if preserved is not None
+        else "it could not be kept, so its contents are gone"
+    )
+    return (
+        f"warning: {config_file} could not be read as a config, so {kept}; this command wrote only "
+        "the settings it holds. If you had named a core with `venya config set-server <URL>`, name "
+        "it again; anything else that file held is in the kept copy."
+    )
+
+
 def config_source_problem(config_file: Path) -> str | None:
     """Why a config path that was NAMED read as nothing — or ``None`` when it read fine.
 
@@ -540,6 +559,12 @@ class Config:
         # did not (#247). `read` records that bytes were actually parsed into _data.
         self.source_error: str | None = None
         self.read = False
+        # True when the file was there and did not yield a JSON object (#810). It is the writer's
+        # signal, not a refusal: the next save moves those bytes aside instead of publishing the
+        # empty snapshot over them. Deliberately NOT `source_error`, whose two readers in
+        # commands.py answer it by returning non-zero — an unreadable config must still be fixable
+        # by `venya login` and `venya setup`, and a tell that blocks the repair is the worse bug.
+        self.damaged_bytes = False
         self._data: dict[str, Any] = {}
         self._transient_server_url: str | None = None
         self._load()
@@ -548,18 +573,69 @@ class Config:
         """Load config from disk, and record why it yielded nothing."""
         if self.config_file.exists():
             try:
-                self._data = json.loads(self.config_file.read_text())
+                loaded = json.loads(self.config_file.read_text())
             except (json.JSONDecodeError, OSError):
                 self._data = {}
+                self.damaged_bytes = True
             else:
-                self.read = True
+                # A document that is not an object damages the read in the same place: every key
+                # below is a `.get`, and a list or a string has none. It used to be marked as a
+                # successful read and then raise AttributeError out of the reader's side (#810).
+                if isinstance(loaded, dict):
+                    self._data = loaded
+                    self.read = True
+                else:
+                    self._data = {}
+                    self.damaged_bytes = True
         if self.named_by_operator and not self.read:
             self.source_error = config_source_problem(self.config_file)
 
+    def _preserve_unreadable(self) -> Path | None:
+        """Move the bytes this process could not read aside, so a save cannot publish over them.
+
+        A rename, not a copy: the same object ends up beside the new file, so no second
+        token-bearing config is created and the operator's own text — the core they named, any key
+        this tool does not know about — stays readable by hand. Returns the path it moved to, or
+        ``None`` when there was nothing to move (not flagged, not a regular file, or the rename
+        failed, which is logged here and said in the caller's tell).
+
+        A failed rename does not stop the save: refusing the write would strand the very verbs that
+        repair this file (`venya login`, `venya setup`), and an operator who can re-name a core beats
+        one whose ceremony cannot be persisted at all. §4 of the row it came from rules the same way
+        about a louder failure.
+        """
+        if not self.damaged_bytes:
+            return None
+        self.damaged_bytes = False
+        if not self.config_file.is_file():
+            # A path that is not a regular file is not bytes to preserve. It stays where it is and
+            # answers the write the way it always has, loudly, instead of being renamed away.
+            return None
+        backup = self.config_file.with_name(f"{self.config_file.name}.corrupt")
+        try:
+            os.replace(self.config_file, backup)
+        except OSError as e:
+            logger.warning(
+                "Config %s did not read as a config and could not be preserved (%s); "
+                "writing only what this command holds",
+                self.config_file,
+                e,
+            )
+            return None
+        return backup
+
     def save(self) -> None:
-        """Save config to disk with owner-only permissions (0o600)."""
+        """Save config to disk with owner-only permissions (0o600).
+
+        When the file this process read at startup did not parse, those bytes are moved aside first
+        (#810): publishing this reader's empty snapshot would otherwise drop the core the operator
+        had named, silently, and the next command would dial the built-in default. One healthy save
+        prints nothing and creates nothing beside the file.
+        """
         from .at_rest_key import ensure_secret_dir
 
+        needed = self.damaged_bytes
+        preserved = self._preserve_unreadable() if needed else None
         self.config_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_secret_dir(self.config_file.parent)
         tmp_path: str | None = None
@@ -581,6 +657,8 @@ class Config:
                 except OSError:
                     pass
             raise
+        if needed:
+            print(unreadable_config_tell(self.config_file, preserved), file=sys.stderr)
 
     @property
     def server_url(self) -> str:
