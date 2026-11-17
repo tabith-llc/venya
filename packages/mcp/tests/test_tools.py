@@ -8,11 +8,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from mcp.types import TextContent
-from venya_mcp.client import SessionExpiredError, VenyaAPIError, VenyaClient
+from venya_mcp.client import SessionExpiredError, VenyaAPIError, VenyaClient, session_error_text
 from venya_mcp.server import build_client, call_tool
 
 
@@ -573,11 +574,10 @@ async def test_session_expired_error() -> None:
     """SessionExpiredError propagates — SDK converts handler exceptions to isError=True."""
     mock = _make_mock_client()
     mock.run_command = AsyncMock(
-        side_effect=SessionExpiredError(
-            "Venya session expired and could not be renewed. "
-            "Run the `venya` CLI (e.g. `venya list`) and approve your security key, "
-            "then restart the MCP server."
-        )
+        # The shipped text, built by the shipped function (leg 1558 finding F-2). A mock that
+        # hand-typed its own sentence kept a retired remedy alive in the suite: the server reads
+        # the session file again now, so "restart" was no longer what the product says.
+        side_effect=SessionExpiredError(session_error_text(Path("/fixture/venya-config.json"), refused=True))
     )
     with patch("venya_mcp.server.get_client", return_value=mock):
         with pytest.raises(SessionExpiredError) as excinfo:

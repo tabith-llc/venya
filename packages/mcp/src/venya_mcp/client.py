@@ -19,7 +19,7 @@ from pathlib import Path
 
 import httpx2
 
-from .config import MCPConfig
+from .config import RENEW_CLAUSE, MCPConfig
 
 logger = logging.getLogger("venya.mcp")
 
@@ -131,6 +131,41 @@ def _require_anchored_verify(verify: object) -> str | bool:
     )
 
 
+def session_error_text(path: Path, *, refused: bool = False) -> str:
+    """The session sentence, naming the resolved path, the fault, and the one renewing clause.
+
+    Three states reach a refusal and they are not the same fault (#705, #706): there is no
+    session file at the path; a file is there but holds no ``access_token`` (the shape that made
+    a running server answer "expired" when nothing had expired — an unreadable or unparseable
+    file lands here too, because nothing usable could be read from it); or a token was dialled
+    and the core refused it. The first two never held a session, so they do not get the word
+    "expired", do not get a restart this branch made unnecessary, and are not told the core
+    refused anything — no request went out. Only the third state observed a refusal.
+
+    All of them close with ``RENEW_CLAUSE``, the wording leg 1554 ruled for #776: the verb that
+    renews, never one that can clear the token. Composing it from one constant instead of
+    retyping it is what keeps the sites from drifting apart, which is what leg 1558's review
+    found at this face, and it is why a test that needs this message calls this function rather
+    than hand-building a sentence. The path is the one this process resolved, VENYA_CONFIG
+    first, so an operator pointed at the wrong file can see that.
+    """
+    tail = f"{RENEW_CLAUSE}; the MCP server reads the session file again on its next call, " "so no restart is needed."
+    if refused:
+        return (
+            f"Venya session expired and could not be renewed (the access_token read from "
+            f"{path} was refused by the core). {tail}"
+        )
+    where = (
+        f"there is no session file at {path}"
+        if not path.exists()
+        else f"the session file at {path} holds no access_token"
+    )
+    return (
+        f"No Venya session to send ({where}). This process never held a token, so nothing "
+        f"expired and the core refused no request. {tail}"
+    )
+
+
 # Last-fuse read timeout for the long-running execute call: server→executor
 # relay 300s < nginx proxy_read_timeout 330s < 340s here, so a clean upstream
 # error always reaches the agent before this client gives up. The former 30s
@@ -196,38 +231,8 @@ class VenyaClient:
         return {"Authorization": f"Bearer {self._access_token}"}
 
     def _session_error(self, *, refused: bool = False) -> SessionExpiredError:
-        """The session sentence, naming the resolved path, the state, and the remedy that fits it.
-
-        Three states reach this point and they are not the same fault (#705, #706): there is
-        no session file at the path; a file is there but holds no ``access_token`` (the shape
-        that made a running server answer "expired" when nothing had expired — an unreadable
-        or unparseable file lands here too, because nothing usable could be read from it); or
-        a token was dialled and the core refused it. The first two have never held a session,
-        so they do not get the word "expired", do not get a restart they no longer need, and
-        are not told the core refused anything — no request went out. Only the third state
-        observed a refusal, and it keeps dev's remedy wording untouched: leg 1554 owns that
-        sentence (#776), and this leg owns the states. The path is the one this process
-        resolved, VENYA_CONFIG first, so an operator pointed at the wrong file can see that.
-        """
-        path = self.config.path
-        if refused:
-            return SessionExpiredError(
-                f"Venya session expired and could not be renewed (the access_token read from "
-                f"{path} was refused by the core). "
-                "Run the `venya` CLI (e.g. `venya list`) and approve your "
-                "security key, then restart the MCP server."
-            )
-        where = (
-            f"there is no session file at {path}"
-            if not path.exists()
-            else f"the session file at {path} holds no access_token"
-        )
-        return SessionExpiredError(
-            f"No Venya session to send ({where}). This process never held a token, so nothing "
-            "expired and the core refused no request. Run `venya login <USER_ID>` and approve "
-            "your security key; the server reads the session file again on its next call, so "
-            "no restart is needed."
-        )
+        """This client's resolved path, phrased by ``session_error_text``."""
+        return SessionExpiredError(session_error_text(self.config.path, refused=refused))
 
     def _adopt(self, disk_token: str | None) -> bool:
         """Take a token read from the session file, when it differs from the one in hand.

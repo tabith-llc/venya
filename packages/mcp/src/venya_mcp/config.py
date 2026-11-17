@@ -30,6 +30,14 @@ from typing import Any
 logger = logging.getLogger("venya.mcp")
 
 
+#: The ONE renewing clause every session message carries (#705, #706, #776). It names the verb
+#: that renews and no verb that can clear the token: `venya list` reaches the #776 clearing path,
+#: and `venya run` boots a sandbox it cannot enter without a token. It lives in the module that
+#: owns the session file so every site — the two refusals in the client and the startup
+#: precondition below — composes the same words instead of retyping them.
+RENEW_CLAUSE = "Run `venya login <USER_ID>` and approve your security key"
+
+
 class InsecureServerURLError(ValueError):
     """The configured ``server_url`` is not an https:// core URL (#540).
 
@@ -110,8 +118,7 @@ class MCPConfig:
             # started has nothing that can reload.
             raise FileNotFoundError(
                 f"No Venya session token found: there is no session file at {self.path}. "
-                "Run `venya login <USER_ID>` and approve your security key to create it, "
-                "then start the MCP server again."
+                f"{RENEW_CLAUSE} to create it, then start the MCP server again."
             )
         self._data = json.loads(self.path.read_text())
 

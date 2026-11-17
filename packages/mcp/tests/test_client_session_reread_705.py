@@ -19,7 +19,10 @@ Cells follow leg 1555's negatives, as amended by the lead at 17:29:
 (d) a file that is gone, unreadable or unparseable answers the same session error;
 (e) the sentence names the resolved path and which of the three states it found;
 (f) #706, folded in at 17:40 by the collision rule: a state that never held a token is not
-    called expired, and the state that WAS refused still is — one cell per distinction.
+    called expired, and the state that WAS refused still is — one cell per distinction;
+(g) leg 1558's review finding, fixed in source: the renewing clause is one constant composed
+    at all three sites (both client refusals and the startup precondition), so no site can
+    name a verb that clears the token (#776).
 
 The remedy wording is asserted on its stable stem, not byte-for-byte: leg 1554 edits the
 verb inside that same sentence, and a cell pinning the whole string would fail on landing
@@ -35,8 +38,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from venya_mcp.client import SessionExpiredError, VenyaClient
-from venya_mcp.config import MCPConfig
+from venya_mcp.client import SessionExpiredError, VenyaClient, session_error_text
+from venya_mcp.config import RENEW_CLAUSE, MCPConfig
 
 STARTUP_TOKEN = "startup-token"
 DISK_TOKEN = "login-landed-after-startup-token"
@@ -347,9 +350,9 @@ async def test_broken_session_file_answers_the_session_error(tmp_path: Path, sha
     [
         ("no_file", "there is no session file at", "venya login"),
         ("no_key", "holds no access_token", "venya login"),
-        # the refused state keeps dev's remedy fragment untouched: leg 1554 owns that
-        # sentence (#776), and this leg owns the states
-        ("refused", "was refused by the core", "Run the `venya` CLI"),
+        # every state now closes with the one renewing clause leg 1554 ruled for #776 — the
+        # faults differ, the remedy a reader has to act on does not
+        ("refused", "was refused by the core", "venya login"),
     ],
 )
 async def test_the_sentence_names_the_state_and_the_resolved_path(
@@ -434,6 +437,39 @@ async def test_a_refused_token_is_still_called_expired(tmp_path: Path) -> None:
     assert NEVER_HELD not in message
     # AC3: the refusal it observed is named, and no status code it did not observe is
     assert "401" not in message
+    # and the #776 rule holds at this site too, in source rather than in an assertion
+    assert "venya login" in message
+    assert "<USER_ID>" in message
+    for banned in ("venya list", "venya run"):
+        assert banned not in message
+
+
+def test_the_remedy_is_one_clause_at_every_site() -> None:
+    """Three sites, one renewing clause (leg 1558's finding, fixed in source).
+
+    1554 pinned that its two sites answer with one sentence; #706 rules that the two FAULTS
+    must be distinguishable, so whole-message equality is the wrong instrument here. What is
+    true, and what this pins, is that the remedy a reader acts on is composed from one
+    constant at every site — the two client refusals and the startup precondition — so no
+    site can drift back to a verb that clears the token.
+    """
+    path = Path("/fixture/venya-config.json")
+    refused = session_error_text(path, refused=True)
+    never_held = session_error_text(path)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        MCPConfig(path)  # the third site: the startup precondition, no file at all
+    startup_text = str(excinfo.value)
+
+    assert RENEW_CLAUSE in refused
+    assert RENEW_CLAUSE in never_held
+    assert RENEW_CLAUSE in startup_text
+    assert refused != never_held  # #706: the faults stay distinguishable
+    for text in (refused, never_held, startup_text):
+        assert "<USER_ID>" in text
+        assert "MCP server" in text
+        for banned in ("venya list", "venya run"):
+            assert banned not in text
 
 
 def test_the_startup_precondition_names_the_path_and_the_login(tmp_path: Path) -> None:
