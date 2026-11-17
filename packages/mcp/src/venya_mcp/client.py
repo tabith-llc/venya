@@ -145,9 +145,15 @@ class VenyaClient:
 
     Token lifecycle:
     1. Read access_token from config file (written by `venya login`)
-    2. On 401 → POST /api/v1/auth/refresh with current token → get new token
-    3. Update config file in-place with new token (atomic write)
-    4. If refresh also fails → SessionExpiredError (human must re-auth)
+    2. Stat that file per call; when its mtime has moved, read it again, so a
+       `venya login` that lands after this process started is picked up without a
+       restart (#705). A stat is not a read: the hot path stays one in-memory token.
+    3. On 401 → POST /api/v1/auth/refresh with current token → get new token
+    4. Update config file in-place with new token (atomic write)
+    5. On 401 with a refused refresh → re-read the session file once and retry once
+       with any token it holds that differs from the refused one (#705)
+    6. If nothing newer turned up → SessionExpiredError, naming the resolved path and
+       which of the three states it found
 
     TLS: verified against VENYA_CA_CERT at startup. No silent downgrade. The constructor takes no
     trust default (#571): ``verify`` must name the Venya CA bundle, or be exactly ``False`` for
@@ -172,18 +178,73 @@ class VenyaClient:
             timeout=httpx2.Timeout(30.0, connect=10.0),
         )
         self._access_token: str | None = config.access_token
+        # One unconditional session-file re-read per request (#705); _request resets it.
+        # The mtime door does not count against it — it reads only when the file moved.
+        self._disk_reread = False
 
     async def close(self) -> None:
         await self._http.aclose()
 
     def _headers(self) -> dict[str, str]:
+        # The mtime door: one stat per call, a read only when the file moved (#705).
+        self._adopt(self.config.reload_if_changed())
         if not self._access_token:
-            raise SessionExpiredError(
-                "Venya session expired and could not be renewed. "
-                "Run the `venya` CLI (e.g. `venya list`) and approve your "
-                "security key, then restart the MCP server."
-            )
+            self._adopt(self.config.reload())
+        if not self._access_token:
+            raise self._session_error()
         return {"Authorization": f"Bearer {self._access_token}"}
+
+    def _session_error(self, *, refused: bool = False) -> SessionExpiredError:
+        """The expired-session sentence, naming the resolved path and the state it is in.
+
+        Three states reach this point and the remedy differs for each, so the text says
+        which one it found (#705): there is no session file at the path at all, a file is
+        there but holds no ``access_token`` (the shape that made a running server answer
+        "expired" when nothing had expired — an unreadable or unparseable file lands here
+        too, because nothing usable could be read from it), or a token was read and the
+        core refused it. The path is the one this process resolved, VENYA_CONFIG first, so
+        an operator pointed at the wrong file can see that.
+        """
+        path = self.config.path
+        if refused:
+            state = f"the access_token read from {path} was refused by the core"
+        elif not path.exists():
+            state = f"there is no session file at {path}"
+        else:
+            state = f"the session file at {path} holds no access_token"
+        return SessionExpiredError(
+            f"Venya session expired and could not be renewed ({state}). "
+            "Run the `venya` CLI (e.g. `venya list`) and approve your "
+            "security key, then restart the MCP server."
+        )
+
+    def _adopt(self, disk_token: str | None) -> bool:
+        """Take a token read from the session file, when it differs from the one in hand.
+
+        The CLI writes no principal field (its config carries server_url and access_token
+        only), so a swap cannot be proven to be the same operator; what it can do is say
+        plainly that it happened and where, which is what the line below does — the file
+        and the act are named, never the value.
+        """
+        if not disk_token or disk_token == self._access_token:
+            return False
+        self._access_token = disk_token
+        logger.info("Adopted the session token on disk at %s", self.config.path)
+        return True
+
+    def _re_read_after_refusal(self) -> None:
+        """Ask the session file once per request after the core refused a token (#705).
+
+        The mtime door already covers a file that was rewritten; this is the second chance
+        for the shapes it cannot see — a token that is current on disk but refused by the
+        core, or a file whose mtime did not move. Bounded twice over: once per request, and
+        a file still holding the refused value is not adopted, so nothing loops on it.
+        """
+        if self._disk_reread:
+            return
+        self._disk_reread = True
+        if not self._adopt(self.config.reload()):
+            logger.info("No newer session token to adopt at %s", self.config.path)
 
     async def _refresh(self) -> bool:
         """Attempt to refresh the access token.
@@ -238,22 +299,25 @@ class VenyaClient:
         """
         url = f"{self.config.server_url}{path}"
         extra: dict = {"timeout": timeout} if timeout is not None else {}
+        self._disk_reread = False
+        headers = self._headers()
+        sent_token = self._access_token
 
-        resp = await self._http.request(method, url, json=json_body, params=params, headers=self._headers(), **extra)
+        resp = await self._http.request(method, url, json=json_body, params=params, headers=headers, **extra)
 
-        # 401 → try refresh, then retry once
+        # 401 → try the refresh, then the session on disk, then retry once with whatever
+        # newer token is in hand (#705). The retry is decided by the token, not by which
+        # door moved it, so a login that lands mid-call is never thrown away.
         if resp.status_code == 401:
             logger.info("Got 401, attempting token refresh...")
-            if await self._refresh():
+            if not await self._refresh():
+                self._re_read_after_refusal()
+            if self._access_token != sent_token:
                 resp = await self._http.request(
                     method, url, json=json_body, params=params, headers=self._headers(), **extra
                 )
             else:
-                raise SessionExpiredError(
-                    "Venya session expired and could not be renewed. "
-                    "Run the `venya` CLI (e.g. `venya list`) and approve your "
-                    "security key, then restart the MCP server."
-                )
+                raise self._session_error(refused=True)
 
         if resp.status_code >= 400:
             content_type = resp.headers.get("content-type", "")
