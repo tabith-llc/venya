@@ -63,6 +63,7 @@ Notable changes to Venya will be documented in this file.
 - Two sentences in `install-venya-core.sh` claimed more than the script does: the unreadable-incoming-version arm of the schema compare warns and continues, where its line said the version guard had refused, and a restore point is taken before migrations run, not before anything changes, so both lines now match the path you are on (#759)
 - An operator whose sandbox tools could not be found no longer receives installation instructions for a package their platform does not publish (#795)
 - When the server tells `venya` it's receiving requests too often, `venya` now waits and retries on its own instead of asking you to log in again. Your saved login is not touched either way (#808)
+- After you upgrade a core server, `venya --version` on that machine can still be printing the version of the server that was upgraded — it reports the command-line tool's own version, and the tool wasn't reinstalled. The installer now says so at the end of the upgrade: it names both versions it can see on that machine and tells you how to bring the tool onto the new version. Nothing about the install itself changes, and the message stays quiet when the two agree or when there's nothing to compare (#796)
 
 ## [0.1.0beta2] - 2026-10-28
 
