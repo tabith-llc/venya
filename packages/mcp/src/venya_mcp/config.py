@@ -153,6 +153,9 @@ class MCPConfig:
         Writes atomically (temp file + os.replace) with 0o600 permissions
         so concurrent CLI reads never see a torn file.
         """
+        # shortcut: the read-modify-write narrows the window to one file read, it does not
+        # serialise against the CLI; a cross-plane lock on config.json is the upgrade, and it needs
+        # both packages to agree on one primitive.
         try:
             merged: Any = json.loads(self.path.read_text())
         except (OSError, ValueError):
