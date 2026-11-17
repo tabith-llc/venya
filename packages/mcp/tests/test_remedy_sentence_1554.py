@@ -11,6 +11,9 @@ the transparent refresh is refused, and the CLI then clears the stored access to
 sentence sent the operator to `venya list`, so following it destroyed the credential it was trying
 to restore. Both `SessionExpiredError` sites now name `venya login <USER_ID>`, the verb the product
 documents (`docs/cli-reference.md`, `venya login <USER_ID> [OPTIONS]`).
+
+The last cell reaches the third site too, `MCPConfig._load`, which is the startup precondition a
+new server answers with, so every message that offers this remedy is covered by this file.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from venya_mcp.client import SessionExpiredError, VenyaClient
-from venya_mcp.config import MCPConfig
+from venya_mcp.config import RENEW_CLAUSE, MCPConfig
 
 #: Verbs this message must never name. `venya list` reaches the #776 clearing path; `venya run`
 #: boots a sandbox, and with no token left it fails at the auth gate too.
@@ -88,11 +91,30 @@ async def test_refresh_refused_remedy_names_login(tmp_path: Path) -> None:
     _assert_remedy(await _refresh_refused_message(tmp_path))
 
 
-async def test_both_sites_answer_with_one_sentence(tmp_path: Path) -> None:
-    """The paired negative: one operator-facing remedy, so either site reverting goes RED here."""
+async def test_one_renewing_clause_at_every_site(tmp_path: Path) -> None:
+    """The paired negative: one renewing clause, composed at every site that offers a remedy.
+
+    This replaces a cell that asked the two client refusals to answer with one whole sentence.
+    #706 AC1 rules that the fault is named too — a session this process never held is not called
+    an expired one, and a refusal the core did answer is — so those messages are meant to differ,
+    while the remedy a reader acts on is not. `RENEW_CLAUSE` is one constant, and what keeps a
+    site from drifting back to a verb that can clear the token is that each site composes it.
+
+    Instrument record, measured at this venue by mutating the source and reverting it: dropping
+    `RENEW_CLAUSE` from the shared client tail fires nine cells across the two remedy files, this
+    one among them. Dropping it from the startup site fires this cell and the two startup pins in
+    `test_client_session_reread_705.py` and nothing else here — the cell this one replaces drove
+    only the two client helpers, so the startup site was outside its range.
+    """
     for name in ("a", "b"):
         (tmp_path / name).mkdir()
-    first = await _empty_token_message(tmp_path / "a")
-    second = await _refresh_refused_message(tmp_path / "b")
-    assert first == second, "the two sites drifted apart"
-    _assert_remedy(first)
+    never_held = await _empty_token_message(tmp_path / "a")
+    refused = await _refresh_refused_message(tmp_path / "b")
+    with pytest.raises(FileNotFoundError) as excinfo:
+        MCPConfig(tmp_path / "absent.json")  # third site: the server never started
+    startup = str(excinfo.value)
+
+    for message in (never_held, refused, startup):
+        assert RENEW_CLAUSE in message, f"the shared clause is not composed here: {message!r}"
+        _assert_remedy(message)
+    assert never_held != refused, "#706: the two client faults stay distinguishable"

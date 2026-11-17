@@ -20,7 +20,7 @@ from pathlib import Path
 
 import httpx2
 
-from .config import MCPConfig
+from .config import RENEW_CLAUSE, MCPConfig
 
 logger = logging.getLogger("venya.mcp")
 
@@ -144,6 +144,65 @@ def _require_anchored_verify(verify: object) -> str | bool:
     )
 
 
+#: What this client says about a session token on disk that it will not take (#705, refuse-and-tell).
+#: Stated as what was OBSERVED — this process did not obtain that value — and never as a claim about
+#: which login wrote it, because the file names no principal and the bearer is 256 random bits.
+REFUSAL_CLAUSE = (
+    "the session file holds a token this process did not obtain, and it will not use a token it "
+    "cannot tie to its own session"
+)
+
+
+def session_error_text(path: Path, *, refused: bool = False, adoption_refused: bool = False) -> str:
+    """The session sentence, naming the resolved path, the fault, and the one renewing clause.
+
+    Three states reach a refusal and they are not the same fault (#705, #706): there is no
+    session file at the path; a file is there but holds no ``access_token`` (the shape that made
+    a running server answer "expired" when nothing had expired — an unreadable or unparseable
+    file lands here too, because nothing usable could be read from it); or a token was dialled
+    and the core refused it. The first two never held a session, so they do not get the word
+    "expired", do not get a restart this branch made unnecessary, and are not told the core
+    refused anything — no request went out. Only the third state observed a refusal.
+
+    A fourth fact can ride on any of them: the file was read and held a token this process would
+    not take (``adoption_refused``, #705 as the owner ruled it). It changes the middle of the
+    sentence and it changes the tail, because under that ruling the restart is the remedy again —
+    saying "no restart is needed" beside a token the process declined to use would be a lie.
+
+    All of them close with ``RENEW_CLAUSE``, the wording leg 1554 ruled for #776: the verb that
+    renews, never one that can clear the token. Composing it from one constant instead of
+    retyping it is what keeps the sites from drifting apart, which is what leg 1558's review
+    found at this face, and it is why a test that needs this message calls this function rather
+    than hand-building a sentence. The path is the one this process resolved, VENYA_CONFIG
+    first, so an operator pointed at the wrong file can see that.
+    """
+    if adoption_refused:
+        tail = (
+            f"{RENEW_CLAUSE}, then restart or reconnect the MCP server: it dials only the session "
+            "it obtained itself, so a login written after it started is read when it starts again."
+        )
+    else:
+        tail = f"{RENEW_CLAUSE}; the MCP server reads the file again on its next call, so no restart " "is needed."
+    if refused:
+        core = f"the access_token read from {path} was refused by the core"
+        detail = f"{core}, and {REFUSAL_CLAUSE}" if adoption_refused else core
+        return f"Venya session expired and could not be renewed ({detail}). {tail}"
+    if adoption_refused:
+        return (
+            f"No Venya session to send ({REFUSAL_CLAUSE}, at {path}). This process never held a "
+            f"token, so nothing expired and the core refused no request. {tail}"
+        )
+    where = (
+        f"there is no session file at {path}"
+        if not path.exists()
+        else f"the session file at {path} holds no access_token"
+    )
+    return (
+        f"No Venya session to send ({where}). This process never held a token, so nothing "
+        f"expired and the core refused no request. {tail}"
+    )
+
+
 # Last-fuse read timeout for the long-running execute call: server→executor
 # relay 300s < nginx proxy_read_timeout 330s < 340s here, so a clean upstream
 # error always reaches the agent before this client gives up. The former 30s
@@ -175,9 +234,20 @@ class VenyaClient:
 
     Token lifecycle:
     1. Read access_token from config file (written by `venya login`)
-    2. On 401 → POST /api/v1/auth/refresh with current token → get new token
-    3. Update config file in-place with new token (atomic write)
-    4. If refresh also fails → SessionExpiredError (human must re-auth)
+    2. Stat that file per call; when its mtime has moved, read it again. A stat is not a read: the
+       hot path stays one in-memory token. What that read may DO with what it found is decided by
+       step 5 — the file is never a way to change a session this process already has (#705).
+    3. On 401 → POST /api/v1/auth/refresh with current token → get new token
+    4. Update config file in-place with new token (atomic write)
+    5. A token the file holds that differs from the one in hand is REFUSED, and said out loud: the
+       session file carries `server_url` and `access_token` and no principal, and the bearer is 256
+       random bits, so a swap can never be shown to be the same login's. A process holding no token
+       still reads one from the file it was started on — that establishes a session rather than
+       replacing one — and only while the file names the core this process dials (#705)
+    6. If nothing usable is in hand → SessionExpiredError, naming the resolved path and
+       which of the three states it found: a never-held session says so in those words and
+       is not called expired (#706), a refused token is (#705), and a token this process
+       declined to adopt is named as declined (#705)
 
     TLS: verified against VENYA_CA_CERT at startup. No silent downgrade. The constructor takes no
     trust default (#571): ``verify`` must name the Venya CA bundle, or be exactly ``False`` for
@@ -209,20 +279,100 @@ class VenyaClient:
             timeout=httpx2.Timeout(30.0, connect=10.0),
         )
         self._access_token: str | None = config.access_token
+        # One unconditional session-file re-read per request (#705); _request resets it.
+        # The mtime door does not count against it — it reads only when the file moved.
+        self._disk_reread = False
+        # Set only when a read of the file actually found a token this process declined (#705);
+        # the session sentence composes it, and it is reset with the re-read budget each request.
+        # shortcut: one flag per request, saying a read saw a value worth declining; a file rewritten
+        # twice inside one request can date the wording, and the upgrade is to re-read at compose time.
+        self._adoption_refused = False
 
     async def close(self) -> None:
         await self._http.aclose()
 
     def _headers(self) -> dict[str, str]:
+        # The mtime door: one stat per call, a read only when the file moved (#705). What the read
+        # finds is weighed by `_adopt`, which will not trade a session it holds for one it cannot
+        # attest; a process that never had a token still picks the login up here, with no restart.
+        self._adopt(self.config.reload_if_changed())
         if not self._access_token:
-            # The remedy names the renewing verb only. A read verb is not a way back:
-            # a refused transparent refresh clears the stored token (#776).
-            raise SessionExpiredError(
-                "Venya session expired and could not be renewed. "
-                "Run `venya login <USER_ID>` and approve your security key, "
-                "then restart the MCP server."
-            )
+            self._adopt(self.config.reload())
+        if not self._access_token:
+            # The remedy names the renewing verb only — a read verb is not a way back, since a
+            # refused transparent refresh clears the stored token (#776, leg 1554).
+            raise self._session_error()
         return {"Authorization": f"Bearer {self._access_token}"}
+
+    def _session_error(self, *, refused: bool = False) -> SessionExpiredError:
+        """This client's resolved path and observed adoption state, phrased by ``session_error_text``."""
+        return SessionExpiredError(
+            session_error_text(self.config.path, refused=refused, adoption_refused=self._adoption_refused)
+        )
+
+    def _adopt(self, disk_token: str | None) -> bool:
+        """Take the token the session file holds only when this process has no session to displace
+        and the file names the core this process dials.
+
+        The owner ruled #705 refuse-and-tell: the MCP must not use a session token a different
+        principal wrote, and it must say so. What this process can attest is narrow, and it is worth
+        naming — the file carries ``server_url`` and ``access_token`` and no principal (the CLI writes
+        those two keys), the bearer is 256 random bits with no subject to read, and there is no
+        identity call on this path. So a differing value cannot be shown to be the same login's, and
+        this client dials only what it obtained: the file read at construction, or a token the core
+        minted for the session already in hand. Three rules, and no branch logs a value:
+
+        * equal to the token in hand — not an adoption, nothing to decide;
+        * differs while a token is in hand — refused, and ``self._adoption_refused`` records that the
+          file was seen to hold something else, which is the fact the sentence later tells;
+        * nothing in hand — take it, but only while the file names THIS core. That establishes a
+          session instead of replacing one, and it is the same trust the startup read already
+          carries; the file has to say which core it belongs to, so a token minted for another core
+          is never carried here (#705, and the https://-only dial of #540 stays where it is). A file
+          that names no core at all — no ``server_url``, or one that is not a string — is declined on
+          the same grounds as one naming a different core: this process cannot attest that silence
+          still names its own dial.
+        """
+        if not disk_token or disk_token == self._access_token:
+            return False
+        if self._access_token:
+            self._adoption_refused = True
+            logger.info(
+                "Did not adopt the session token on disk at %s: that file names no principal, and "
+                "this process keeps dialling the session it obtained",
+                self.config.path,
+            )
+            return False
+        disk_core = self.config.disk_server_url
+        # A file that names no core cannot be shown to name this one, so "unattested" answers the
+        # same way as "attested elsewhere" (#705 as ruled; the guard used to fall through on None).
+        if disk_core is None or disk_core.rstrip("/") != self.config.server_url:
+            self._adoption_refused = True
+            logger.info(
+                "Did not adopt the session token on disk at %s: that file names %s and this process " "dials %s",
+                self.config.path,
+                disk_core if disk_core is not None else "no server_url",
+                self.config.server_url,
+            )
+            return False
+        self._access_token = disk_token
+        logger.info("Adopted the session token on disk at %s", self.config.path)
+        return True
+
+    def _re_read_after_refusal(self) -> None:
+        """Ask the session file once per request after the core refused a token (#705).
+
+        It is no longer a second chance to swap: under the ruling there is nothing to swap to, so this
+        read does two things only — it settles whether the file holds something other than the refused
+        value, which is what the operator is owed in the refusal sentence, and it leaves the in-hand
+        credential exactly where it was. Bounded once per request, and a file still holding the refused
+        value records nothing, so nothing loops on it.
+        """
+        if self._disk_reread:
+            return
+        self._disk_reread = True
+        if not self._adopt(self.config.reload()):
+            logger.info("No other session token to weigh against the refused one at %s", self.config.path)
 
     async def _refresh(self) -> bool:
         """Refresh once per burst: concurrent 401s share one POST (#707).
@@ -318,23 +468,28 @@ class VenyaClient:
         """
         url = f"{self.config.server_url}{path}"
         extra: dict = {"timeout": timeout} if timeout is not None else {}
+        self._disk_reread = False
+        self._adoption_refused = False
+        headers = self._headers()
+        sent_token = self._access_token
 
-        resp = await self._http.request(method, url, json=json_body, params=params, headers=self._headers(), **extra)
+        resp = await self._http.request(method, url, json=json_body, params=params, headers=headers, **extra)
 
-        # 401 → try refresh, then retry once
+        # 401 → try the refresh, then weigh what the session file holds, then retry once only with a
+        # token this process obtained itself (#705). A differing value on disk is refused and said, so
+        # the retry is reachable from the refresh alone; the state is decided by the token, never by
+        # which door moved it.
         if resp.status_code == 401:
             logger.info("Got 401, attempting token refresh...")
-            if await self._refresh():
+            if not await self._refresh():
+                self._re_read_after_refusal()
+            if self._access_token != sent_token:
                 resp = await self._http.request(
                     method, url, json=json_body, params=params, headers=self._headers(), **extra
                 )
             else:
-                # Same sentence as `_headers()` — the renewing verb, never a read verb (#776).
-                raise SessionExpiredError(
-                    "Venya session expired and could not be renewed. "
-                    "Run `venya login <USER_ID>` and approve your security key, "
-                    "then restart the MCP server."
-                )
+                # Same renewing clause as `_headers()`, never a read verb (#776, leg 1554).
+                raise self._session_error(refused=True)
 
         if resp.status_code >= 400:
             content_type = resp.headers.get("content-type", "")
