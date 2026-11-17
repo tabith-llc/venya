@@ -222,7 +222,14 @@ def version_tuple(reported: str | None) -> tuple | None:
 
 
 class APIClientError(Exception):
-    """API client error."""
+    """API client error.
+
+    #776 AC5: a raise site that saw an HTTP status attaches it here, so the caller
+    classifies refused (4xx) from transient (5xx) on the fact, never on the message.
+    Sites that saw no status (connection failure, timeout) leave it None — transient.
+    """
+
+    status_code: int | None = None
 
 
 class APIClientAuthenticationError(APIClientError):
@@ -1052,8 +1059,10 @@ class APIClient:
                         )
                         response.raise_for_status()
                         return response.json() if response.content else {}
-                    except APIClientAuthenticationError:
-                        pass
+                    except APIClientAuthenticationError as refresh_error:
+                        # #776: the refresh sentence names the way back; it used to be
+                        # discarded here, leaving the operator only the bare 401.
+                        raise APIClientAuthenticationError(f"{error_msg} — {refresh_error}") from refresh_error
                 raise APIClientAuthenticationError(error_msg)
             raise APIClientError(error_msg)
         except httpx2.ConnectError as e:
@@ -1133,8 +1142,23 @@ class APIClient:
             logger.debug("Token refreshed successfully")
             return self.config.access_token
         except APIClientError as e:
-            self.config.access_token = None
-            raise APIClientAuthenticationError(f"Token refresh failed: {e}") from e
+            # #776: a refresh failure never clears the stored token (assigning None
+            # here went through the saving setter and consumed the owner's session),
+            # and one raise site now tells the two causes apart: a refused credential
+            # keeps the mint ceremony, a transient one says the retry is pending —
+            # the credential is alive and no key touch is owed.
+            status = e.status_code
+            refused = isinstance(e, APIClientAuthenticationError) or (status is not None and 400 <= status < 500)
+            if refused:
+                raise APIClientAuthenticationError(
+                    f"Token refresh failed: {e} — the stored token was left in place; "
+                    "run `venya login <user-id>` to mint a new one (security-key ceremony)"
+                ) from e
+            cause = f"HTTP {status}: {e}" if status is not None else str(e)
+            raise APIClientAuthenticationError(
+                f"Token refresh failed: {cause} — the stored token was left in place; "
+                "the retry is pending, the next call refreshes automatically"
+            ) from e
 
     def _post_raw(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         """Make a POST request without auto-refresh (for auth endpoints)."""
@@ -1157,12 +1181,19 @@ class APIClient:
                 error_msg = error_data.get("detail", str(e))
             except (json.JSONDecodeError, Exception):
                 error_msg = str(e)
-            if e.response.status_code == 401:
-                raise APIClientAuthenticationError(error_msg)
-            raise APIClientError(error_msg)
+            cls = APIClientAuthenticationError if e.response.status_code == 401 else APIClientError
+            error = cls(error_msg)
+            # #776 AC5: the status rides on the exception so the refresh caller can
+            # tell a refused credential (4xx) from a transient one (5xx) by fact.
+            error.status_code = e.response.status_code
+            raise error
         except httpx2.ConnectError as e:
             # #633: shared classifier — name-resolution only, wording otherwise unchanged.
             raise APIClientError(dial_failure_text(e, url=self.config.server_url, default=f"Connection failed: {e}"))
+        except httpx2.TimeoutException as e:
+            # #776 finding 2: a refresh timeout used to escape every APIClientError arm
+            # unwrapped; wrap it at this seam so the transient arm answers it.
+            raise APIClientError(f"Request timed out: {e}") from e
 
         if response.content:
             return response.json()
