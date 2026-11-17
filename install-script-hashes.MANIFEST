@@ -9,7 +9,7 @@ f9da9f56c0411554a15a18faec7935c5a21c852c6335a243a98d1c1bc7f6cdd0  install-venya-
 57e4e25e7a0eac148565d5fb6ec458c75f39c7cec68e53c8534efbb992bff448  install-venya-executor.sh  served installer, root-run
 2ad8c5372e31202ffbdd4d86f14e705979fa142a99617c06546fc2cee14c8dd6  scripts/deploy-record.sh  repo build helper, not served
 6af34d944411831186653b56058f10e36bf09befa04ff3f82ada6cb38d08263f  scripts/pin-requirements.sh  repo build helper, not served
-e8f9c6bfdb7e33277daac630ea582c2c278d23c695973907974f76fdc03385cb  uninstall-venya-cli.ps1  served Windows uninstaller, conditional by ref
+e629c62f2c0a4743b20a686a0f57224fed1be6e6aec678eed8277272404dc3bb  uninstall-venya-cli.ps1  served Windows uninstaller, conditional by ref
 7f9285620c14ae931ee3631c6a8b8162a42b21a949119d9fdd75a808a0e86165  uninstall-venya-cli.sh  served uninstaller, workstation
 3240548c33d1211925ba6de549ad2b9c58809734ea3b86527d0f3af869e04db8  uninstall-venya-core.sh  served uninstaller, root-run
 ccc5f0e92a88c163f4a6148a4a9e05c78a7d69bb567074250906eba4b6b01efd  uninstall-venya-executor.sh  served uninstaller, root-run
