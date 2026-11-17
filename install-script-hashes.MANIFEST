@@ -4,7 +4,7 @@
 # design: the build embeds the shared-library hash and rewrites the download base, and it emits the
 # served .sha256 sidecars AFTER those substitutions. Do not hand-edit this file.
 ea74048d7eab7bfcc17e131983c9ae6e0f31a9355aa04b18928b24058d88b6f1  install-venya-cli.ps1  served Windows installer, conditional by ref
-0a3273ecd9a1d31b90468d1a16111b44e6d94da719269e421f2687e7c9b22407  install-venya-cli.sh  served installer, workstation
+8ce6b0d599b5f7df2537b3c3303eda7330410b4963ecbe4fb6c79266517370bc  install-venya-cli.sh  served installer, workstation
 f9da9f56c0411554a15a18faec7935c5a21c852c6335a243a98d1c1bc7f6cdd0  install-venya-core.sh  served installer, root-run
 57e4e25e7a0eac148565d5fb6ec458c75f39c7cec68e53c8534efbb992bff448  install-venya-executor.sh  served installer, root-run
 2ad8c5372e31202ffbdd4d86f14e705979fa142a99617c06546fc2cee14c8dd6  scripts/deploy-record.sh  repo build helper, not served

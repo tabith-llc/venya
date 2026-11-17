@@ -217,10 +217,30 @@ if [ -n "$LOGIN_UNRESOLVED" ]; then
     venya_print_path_remedy "$LOGIN_UNRESOLVED"
 fi
 
-# --- FIDO2 access check (Linux: /dev/hidraw perms; macOS: IOKit HID, no setup) ---
+# --- FIDO2 access check (Linux: hidraw usage-page classifier; macOS: IOKit HID registry) ---
 if [ "$(uname -s)" = "Darwin" ]; then
-    info "FIDO2 on macOS uses IOKit HID — no udev rules or root required."
-    info "Plug in the security key before first venya login/enroll."
+    # The same classifier the Linux arm uses, read out of IOKit instead of sysfs.
+    # It used to assert "no udev rules or root required" without observing anything,
+    # so a Mac with no key printed the same two lines as a Mac with one, and a
+    # physical run could only score the banner. A FIDO device is identified by HID
+    # usage page 0xF1D0, which ioreg -l prints in decimal as 61904; 61440 is 0xF000
+    # and must not answer for a key, exactly as a keyboard must not on Linux.
+    # macOS has no per-device file permission to test, and none is invented here:
+    # the shipped design grants IOKit HID to an ordinary user process, so the only
+    # honest statement is that there is no gate to clear — made once, on the path
+    # where a key was actually seen.
+    # VENYA_IOREG_FILE names a saved "ioreg -r -c IOHIDDevice -l" dump so the cells
+    # can drive both branches without a Mac; the default is the live call.
+    if [ -n "${VENYA_IOREG_FILE:-}" ]; then
+        HID_IOREG_OUT="$(cat -- "$VENYA_IOREG_FILE" 2> /dev/null || true)"
+    else
+        HID_IOREG_OUT="$(ioreg -r -c IOHIDDevice -l 2> /dev/null || true)"
+    fi
+    HID_FIDO_COUNT="$(printf '%s\n' "$HID_IOREG_OUT" | grep -c '"PrimaryUsagePage" = 61904' || true)"
+    if [ "${HID_FIDO_COUNT:-0}" -gt 0 ]; then
+        info "FIDO2 key visible via IOKit HID — usage page 0xF1D0 matched $HID_FIDO_COUNT node(s)."
+        info "macOS has no per-device permission to check here — no udev rule and no root step is needed for IOKit HID."
+    fi
 else
     # A security key is identified by its HID usage page (0xF1D0), not by the mere
     # existence of a /dev/hidraw node: a keyboard or a joystick on that bus used to

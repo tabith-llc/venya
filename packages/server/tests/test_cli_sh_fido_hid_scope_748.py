@@ -32,6 +32,20 @@ in place on this host (which has no /sys/class/hidraw at all), all 10 cells in
 this file fail — `pytest tests/test_cli_sh_fido_hid_scope_748.py -q` → "10 failed
 in 0.91s". The script was restored in the same command; the tip is green at 10
 passed.
+
+The macOS arm is covered by the same fragment with a `uname` stub that answers
+Darwin, so the real dispatch runs on a Linux runner. It used to print a two-line
+assertion ("FIDO2 on macOS uses IOKit HID — no udev rules or root required")
+without reading anything, so a physical macOS run scored the banner and not the
+check. It now classifies the IOKit registry the way the Linux arm classifies
+sysfs: usage page 0xF1D0, printed by `ioreg -l` in decimal as 61904. The source
+is overridable with VENYA_IOREG_FILE (a saved ioreg dump) for exactly this
+purpose; the default is the live call.
+
+macOS truth table. Silent: an empty registry, a registry whose only pages are
+61440 (0xF000 — the wrong page, which reads 0 with or without a key), a missing
+fixture file, no ioreg on PATH at all. Loud: one or more 61904 nodes, counted.
+The banner sentence may not appear on any silent path.
 """
 
 import subprocess
@@ -194,3 +208,137 @@ def test_fido_scope_uses_the_usage_page_not_the_device_name() -> None:
     assert "report_descriptor" in block
     assert "$'\\x06\\xd0\\xf1'" in block
     assert "for d in /dev/hidraw*" not in src
+
+
+# --- macOS arm: the same classifier, read out of IOKit -----------------------
+
+# One line of real `ioreg -r -c IOHIDDevice -l` output per device. 61904 is
+# 0xF1D0 (FIDO); 61440 is 0xF000, a vendor-defined page that a keyboard answers
+# to and that reads 0 whether or not a key is plugged in.
+IOREG_FIDO = '  "PrimaryUsagePage" = 61904\n  "PrimaryUsage" = 1\n  "Product" = "Security Key C NFC"\n'
+IOREG_WRONG_PAGE = '  "PrimaryUsagePage" = 61440\n  "PrimaryUsage" = 6\n  "Product" = "Keyboard"\n'
+
+
+def _run_mac(root: Path, ioreg_file: Path | None = None) -> tuple[int, str]:
+    """Run the shipped fragment as if on macOS. ioreg_file=None leaves the seam unset,
+    so the branch falls back to the live `ioreg`, which does not exist on this runner."""
+    root.mkdir(parents=True, exist_ok=True)
+    stub = root / "bin"
+    stub.mkdir(parents=True, exist_ok=True)
+    uname = stub / "uname"
+    uname.write_text('#!/bin/sh\n[ "$1" = "-s" ] && echo Darwin\n', encoding="utf-8")
+    uname.chmod(0o755)
+    script = root / "fido_mac_cell.sh"
+    script.write_text(PRELUDE + _fragment(_src()), encoding="utf-8")
+    env = {"PATH": f"{stub}:/usr/bin:/bin"}
+    if ioreg_file is not None:
+        env["VENYA_IOREG_FILE"] = str(ioreg_file)
+    proc = subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _fixture(root: Path, body: str) -> Path:
+    f = root / "ioreg.txt"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(body, encoding="utf-8")
+    return f
+
+
+def test_macos_no_hid_devices_at_all_is_silent(tmp_path: Path) -> None:
+    """The defect this leg fixes: an empty registry must print NOTHING, not reassurance."""
+    root = tmp_path / "mac-empty"
+    rc, out = _run_mac(root, _fixture(root, ""))
+    assert rc == 0, out
+    assert out.strip() == "", out
+    assert "udev" not in out, out
+
+
+def test_macos_wrong_usage_page_is_not_reported_as_a_security_key(tmp_path: Path) -> None:
+    """The paired negative: 61440 (0xF000) is not 0xF1D0, so a keyboard stays silent."""
+    root = tmp_path / "mac-kbd"
+    rc, out = _run_mac(root, _fixture(root, IOREG_WRONG_PAGE))
+    assert rc == 0, out
+    assert out.strip() == "", out
+
+
+def test_macos_unreadable_ioreg_source_is_silent(tmp_path: Path) -> None:
+    """A fixture path that does not exist is the same silence, and does not abort the installer."""
+    root = tmp_path / "mac-missing"
+    rc, out = _run_mac(root, root / "no-such-dump.txt")
+    assert rc == 0, out
+    assert out.strip() == "", out
+
+
+def test_macos_no_ioreg_command_is_silent(tmp_path: Path) -> None:
+    """With the seam unset and no ioreg on PATH, the default call fails soft, not loud."""
+    rc, out = _run_mac(tmp_path / "mac-nocommand")
+    assert rc == 0, out
+    assert out.strip() == "", out
+
+
+def test_macos_fido_key_is_reported_with_its_count(tmp_path: Path) -> None:
+    """The good case states what it proved: a FIDO-class node, counted."""
+    root = tmp_path / "mac-one"
+    rc, out = _run_mac(root, _fixture(root, IOREG_FIDO))
+    assert rc == 0, out
+    assert "0xF1D0" in out, out
+    assert "matched 1 node(s)" in out, out
+    assert "[WARN]" not in out, out
+
+
+def test_macos_two_fido_nodes_are_both_counted(tmp_path: Path) -> None:
+    """Positive with a different cardinality, so the count is not a fixed string."""
+    root = tmp_path / "mac-two"
+    rc, out = _run_mac(root, _fixture(root, IOREG_FIDO + IOREG_WRONG_PAGE + IOREG_FIDO))
+    assert rc == 0, out
+    assert "matched 2 node(s)" in out, out
+    assert "Keyboard" not in out, out
+
+
+def test_macos_arm_ignores_the_linux_hidraw_seams(tmp_path: Path) -> None:
+    """Dispatch is real: on Linux the macOS fixture must not be consulted."""
+    root = tmp_path / "linux-not-mac"
+    root.mkdir(parents=True, exist_ok=True)
+    script = root / "fido_cell.sh"
+    script.write_text(PRELUDE + _fragment(_src()), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "VENYA_IOREG_FILE": str(_fixture(root, IOREG_FIDO)),
+            "VENYA_HIDRAW_CLASS_DIR": str(root / "no-such-class-dir"),
+            "VENYA_HIDRAW_DEV_DIR": str(root / "no-such-dev"),
+        },
+        timeout=60,
+        check=False,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert out.strip() == "", out
+
+
+def test_shipped_installer_reads_the_ioreg_registry() -> None:
+    """The state that made a physical macOS run meaningless was `grep -c ioreg` == 0."""
+    src = _src()
+    block = src[src.index(BEGIN) : src.index(END)]
+    assert src.count("ioreg") >= 1
+    assert "ioreg -r -c IOHIDDevice -l" in block
+    assert "61904" in block
+    assert "FIDO2 on macOS uses IOKit HID" not in src, "the unconditional banner is back"
+
+
+def test_linux_arm_keeps_its_own_seams(tmp_path: Path) -> None:
+    """Guard against a unifying refactor: the four booked Linux arms keep their roots."""
+    block = _fragment(_src())
+    assert "VENYA_HIDRAW_CLASS_DIR" in block
+    assert "VENYA_HIDRAW_DEV_DIR" in block
+    assert "$'\\x06\\xd0\\xf1'" in block
