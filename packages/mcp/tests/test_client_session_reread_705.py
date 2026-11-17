@@ -265,6 +265,56 @@ async def test_a_pickup_is_refused_when_the_file_names_another_core(tmp_path: Pa
 # --- negative (a): the same token on disk cannot loop -----------------------
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"access_token": DISK_TOKEN}, id="no-server_url-key"),
+        pytest.param(
+            {"server_url": ["https://venya-core-1"], "access_token": DISK_TOKEN},
+            id="server_url-not-a-string",
+        ),
+    ],
+)
+async def test_a_pickup_is_refused_when_the_file_names_no_core(
+    tmp_path: Path, payload: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The adoption guard asks what the file NAMES, not whether it answered (leg 1576, ruled DECLINE).
+
+    `disk_server_url` reports None for a file with no `server_url` and for one whose value is not a
+    string, and the shipped guard read `disk_core is not None and ...`, so both shapes fell through to
+    adoption — the sentence promised a comparison the code skipped. This process cannot attest that a
+    file naming no core still names the core it dials, so nothing is taken: it gets the same answer the
+    file naming ANOTHER core already gets. Driven through the real `_request` seam, nothing in hand.
+    """
+    path = tmp_path / "config.json"
+    client = _client(path, token=None)
+    config = client.config
+    path.write_text(json.dumps(payload))
+    # the mtime door needs the clock to move to read again; see `_login_landed` for why
+    stamp = (config._mtime or 0) + 1_000_000_000
+    os.utime(path, ns=(stamp, stamp))
+
+    http = _ok_http()
+    client._http = http
+
+    with caplog.at_level(logging.DEBUG, logger="venya.mcp"), pytest.raises(SessionExpiredError) as exc_info:
+        await client._request("GET", "/api/v1/test")
+
+    assert http.request.await_count == 0  # nothing was dialled with a bearer it cannot attest
+    assert client._access_token is None
+    assert config.disk_server_url is None  # the very shape the guard used to fall through on
+    message = str(exc_info.value)
+    assert DECLINED in message
+    assert NEVER_HELD in message  # #706 holds here too: nothing expired, nothing was refused
+    assert STEM not in message
+    assert str(path) in message
+    # and the declined value stays off the log face in this branch too
+    for leak in (DISK_TOKEN, DISK_TOKEN[:8]):
+        assert leak not in caplog.text
+    assert "Did not adopt the session token" in caplog.text
+    assert "Adopted the session token" not in caplog.text
+
+
 async def test_identical_disk_token_ends_the_attempt(tmp_path: Path) -> None:
     """401, refresh refused, file still holds the rejected token: no second dial."""
     path = tmp_path / "config.json"

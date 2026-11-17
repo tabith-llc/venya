@@ -311,7 +311,8 @@ class VenyaClient:
         )
 
     def _adopt(self, disk_token: str | None) -> bool:
-        """Take the token the session file holds only when this process has no session to displace.
+        """Take the token the session file holds only when this process has no session to displace
+        and the file names the core this process dials.
 
         The owner ruled #705 refuse-and-tell: the MCP must not use a session token a different
         principal wrote, and it must say so. What this process can attest is narrow, and it is worth
@@ -324,10 +325,13 @@ class VenyaClient:
         * equal to the token in hand — not an adoption, nothing to decide;
         * differs while a token is in hand — refused, and ``self._adoption_refused`` records that the
           file was seen to hold something else, which is the fact the sentence later tells;
-        * nothing in hand — take it. That establishes a session instead of replacing one, and it is
-          the same trust the startup read already carries; it is taken only while the file's own
-          ``server_url`` still names the core this process dials, so a token minted for another core
-          is never carried here (#705, and the https://-only dial of #540 stays where it is).
+        * nothing in hand — take it, but only while the file names THIS core. That establishes a
+          session instead of replacing one, and it is the same trust the startup read already
+          carries; the file has to say which core it belongs to, so a token minted for another core
+          is never carried here (#705, and the https://-only dial of #540 stays where it is). A file
+          that names no core at all — no ``server_url``, or one that is not a string — is declined on
+          the same grounds as one naming a different core: this process cannot attest that silence
+          still names its own dial.
         """
         if not disk_token or disk_token == self._access_token:
             return False
@@ -340,12 +344,14 @@ class VenyaClient:
             )
             return False
         disk_core = self.config.disk_server_url
-        if disk_core is not None and disk_core.rstrip("/") != self.config.server_url:
+        # A file that names no core cannot be shown to name this one, so "unattested" answers the
+        # same way as "attested elsewhere" (#705 as ruled; the guard used to fall through on None).
+        if disk_core is None or disk_core.rstrip("/") != self.config.server_url:
             self._adoption_refused = True
             logger.info(
                 "Did not adopt the session token on disk at %s: that file names %s and this process " "dials %s",
                 self.config.path,
-                disk_core,
+                disk_core if disk_core is not None else "no server_url",
                 self.config.server_url,
             )
             return False
