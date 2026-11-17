@@ -2921,6 +2921,13 @@ def cmd_login(client: APIClient, args: Any) -> int:
         _hint = _win_ceremony_hint("assertion")
         if _hint:
             print(_hint)
+        # #810: when this login dialled a core via --server-url or VENYA_SERVER_URL,
+        # name that core in the same save the token write performs, so the session
+        # file describes the host it came from. Login-only: every other transient
+        # consumer (exec, store, audit, a mid-refresh save) keeps the one-shot value
+        # in memory exactly as #398/#423 rule, and a ceremony that never completes
+        # writes nothing — this call does not save.
+        client.config.merge_transient_core_for_login()
         result = client.authenticate(user_id=args.user_id)
         print(f"Authenticated as {result['user_id']}.")
         return 0

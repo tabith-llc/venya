@@ -601,6 +601,26 @@ class Config:
         """
         self._transient_server_url = value.rstrip("/")
 
+    def merge_transient_core_for_login(self) -> bool:
+        """Fold the core a login actually dialled into the data the token write saves (#810).
+
+        Scope is the login verb and nothing else: ``cmd_login`` calls this immediately
+        before the ceremony, and the shipped token save then writes core and token as
+        one document — so the session file describes the host it came from, which is
+        what a later fresh start (the MCP among them) needs to dial the named core
+        instead of its own default. Every other one-shot use keeps its #398/#423
+        behavior exactly: the transient slot lives outside ``_data`` for all other
+        callers, the explicit setter is untouched, and this method performs no save of
+        its own, so a login that never completes writes nothing. The shipped https
+        guard is mirrored at the persistence step — a plaintext core is never made
+        durable by a login.
+        """
+        transient = self._transient_server_url
+        if transient is None or not transient.startswith("https://"):
+            return False
+        self._data["server_url"] = transient
+        return True
+
     @property
     def access_token(self) -> str | None:
         return self._data.get("access_token")
