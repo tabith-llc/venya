@@ -1,5 +1,7 @@
 # Venya
 
+**Current release: 0.1.0beta3, released 2026-11-17**
+
 > **AI agents:** start at **[docs/agents.md](docs/agents.md)** — how to install, configure, and operate
 >
 > **Wiring an agent?** paste the operating contract from **[docs/agent-prompts.md](docs/agent-prompts.md)** into its instruction file (AGENTS.md / CLAUDE.md / Cursor rules)
