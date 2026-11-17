@@ -134,12 +134,35 @@ class _Harness:
         return self.log.read_text(encoding="utf-8")
 
     def tarball_fetches(self) -> int:
-        return len(re.findall(r"curl \S+ -fsSL -o \S+ \S+", self.calls()))
+        # Regex corrected at leg 1596: it read `curl \S+ -fsSL -o \S+ \S+`, which matches no
+        # argv the shipped code produces (venya-common.sh:449/:476 are `curl -fsSL <url> -o
+        # <file>`), so this counter was inert — it returned 0 even on a path that fetched.
+        # Nothing asserted on it before leg 1596, which is why the inertness survived.
+        return len(re.findall(r"curl -fsSL \S+ -o \S+", self.calls()))
 
 
 def _sha256_file(path: str) -> str:
     out = subprocess.run(["/usr/bin/sha256sum", path], capture_output=True, text=True, check=True)
     return out.stdout.split()[0]
+
+
+def assert_no_installer_fetch(h) -> None:
+    """Zero-state on an abort: the installer itself issued no fetch.
+
+    Reworded from `assert "curl" not in h.calls()` at leg 1596: the #375 abort now
+    NAMES the out-of-band command the operator should run themselves
+    (`curl -fsSL '<url>.sha256'`), so the bare substring `curl` is present in the
+    guard's own guidance lines and no longer means "a fetch happened". The claim is
+    about fetches, so it is checked as fetches: a logged curl line starts the line
+    (the stub writes `curl <argv>`), and the guard's text never does. Can-fire
+    control: test_abort_guidance_control_fetch_does_fire below, which asserts this
+    same predicate is nonzero on the http+correct-pin path. The `tarball_fetches()`
+    counter beside it was inert until this leg (see its comment) — the line-anchored
+    regex is the load-bearing half, and the control fires on both.
+    """
+    calls = h.calls()
+    assert not re.search(r"(?m)^curl ", calls), f"installer fetched on the abort path: {calls}"
+    assert h.tarball_fetches() == 0, calls
 
 
 # --- negative half: non-https + no pin = abort before any fetch/write ---
@@ -154,7 +177,7 @@ def test_file_origin_no_pin_aborts_zero_state() -> None:
         assert r.returncode == 1, r.stdout + r.stderr
         assert "not https" in h.calls() and "#375" in h.calls(), h.calls()
         assert "Downloading tarball" not in h.calls()
-        assert "curl" not in h.calls()
+        assert_no_installer_fetch(h)
 
 
 def test_http_origin_no_pin_aborts_zero_state() -> None:
@@ -167,9 +190,9 @@ def test_http_origin_no_pin_aborts_zero_state() -> None:
         assert r.returncode == 1, f"http+no-pin proceeded (sidecar self-attested): {h.calls()}"
         assert "not https" in h.calls(), h.calls()
         assert "Downloading tarball" not in h.calls()
-        # zero state: the stub log holds only the guard's error lines — no curl,
-        # no mktemp'd tarball, no fetch
-        assert "curl" not in h.calls(), h.calls()
+        # zero state: the stub log holds only the guard's error lines — no fetch,
+        # no mktemp'd tarball, no state under /tmp
+        assert_no_installer_fetch(h)
         assert set(Path("/tmp").glob("venya-install-*")) == before, "abort path wrote state"
 
 
@@ -181,7 +204,7 @@ def test_https_default_overridden_to_http_is_caught() -> None:
         r = h.run(pin=None, tarball_env=f"http://203.0.113.10:8080/{h.tarball.name}")
         assert r.returncode == 1, f"override-to-http not caught: {h.calls()}"
         assert "not https" in h.calls()
-        assert "curl" not in h.calls()
+        assert_no_installer_fetch(h)
 
 
 def test_wrong_pin_aborts_on_every_scheme() -> None:
@@ -231,6 +254,50 @@ def test_https_origin_no_pin_proceeds_via_sidecar() -> None:
         assert r.returncode == 0, r.stdout + r.stderr + h.calls()
         assert "not set — fetching checksum sidecar" in h.calls()
         assert "SHA-256 verified" in h.calls()
+
+
+# --- guidance half: the refusal must still refuse, and must be actionable (#375 leg 1596) ---
+
+
+def test_abort_guidance_names_a_source_the_operator_can_reach() -> None:
+    """The guard's remedy used to say "the serve script prints it" — a stdout on the
+    build host, which an operator driving the door from a guest is not standing in
+    front of. The refusal must be UNCHANGED in posture (rc 1, zero fetch, zero state)
+    and must now name a value the operator can obtain where they stand, labelled for
+    what it is on an unauthenticated scheme."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _Harness(tmp, "http", sidecar=True)
+        r = h.run(pin=None)
+        assert r.returncode == 1, r.stdout + r.stderr
+        calls = h.calls()
+        assert f"curl -fsSL '{h.url}.sha256'" in calls, calls
+        assert "CORRUPTION check only" in calls, calls
+        assert "build host" in calls.lower(), calls
+        assert_no_installer_fetch(h)
+
+
+def test_abort_guidance_control_fetch_does_fire() -> None:
+    """Can-fire control for assert_no_installer_fetch — the same predicate is nonzero
+    on the http + correct-pin path, so its absence on the abort paths is a measured
+    zero-state and not a check that cannot fail."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _Harness(tmp, "http", sidecar=True)
+        r = h.run(pin=h.sha)
+        assert r.returncode == 0, r.stdout + r.stderr + h.calls()
+        assert re.search(r"(?m)^curl ", h.calls()), h.calls()
+        assert h.tarball_fetches() >= 1, h.calls()
+
+
+def test_ps1_abort_text_carries_the_same_out_of_band_source() -> None:
+    """ps1 static review (execution on the guest is a separate face): the Windows
+    installer's refusal carries the same actionable pointer, so an operator reading
+    the [ERROR] block on either platform gets the same way out."""
+    src = (REPO_ROOT / "install-venya-cli.ps1").read_text(encoding="utf-8")
+    start = src.index("-notmatch '^https://'")
+    block = src[start : src.index('"@', start)]
+    assert 'curl -fsSL "$tarballUrl.sha256"' in block, block
+    assert "CORRUPTION check only" in block, block
+    assert "build host" in block.lower(), block
 
 
 # --- static pins: both platforms carry the rule ---

@@ -416,7 +416,14 @@ venya_download_tarball() {
     fi
     if [[ "$TARBALL_URL" != https://* && -z "${VENYA_TARBALL_SHA256:-}" ]]; then
         error "Tarball origin '$TARBALL_URL' is not https and VENYA_TARBALL_SHA256 is not set: the .sha256 sidecar would come from the SAME (unauthenticated or attacker-writable) origin — self-attesting, not integrity (#375, #327)."
-        error "Pass VENYA_TARBALL_SHA256=<sha256> — the serve script prints it — or use an https:// source. Aborting before any fetch or write."
+        error "Pass VENYA_TARBALL_SHA256=<sha256> — or use an https:// source."
+        # #375 guidance, leg 1596: the value is printed by create-tarball-and-serve.sh on the
+        # BUILD HOST's terminal, which the operator following the door is not standing in front
+        # of. Name a path to the value from where they actually stand, and say plainly that the
+        # sidecar fetched by hand is a corruption check on this scheme, not integrity — the
+        # installer still refuses to consult it itself.
+        error "To get the value from where you are: read the sidecar yourself — curl -fsSL '${TARBALL_URL}.sha256' — and treat it as a CORRUPTION check only: it crosses the same unauthenticated origin this guard refuses to self-attest, so corroborate it out-of-band (the serve run prints the same hash on the build host's terminal)."
+        error "Refusing to install unverified — nothing was fetched from '$TARBALL_URL' and no tarball content was written. Earlier local steps of this installer (the uv bootstrap on the CLI path) are not rolled back."
         exit 1
     fi
 

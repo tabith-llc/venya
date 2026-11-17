@@ -125,8 +125,17 @@ if (($tarballUrl -notmatch '^https://') -and (-not $env:VENYA_TARBALL_SHA256)) {
     Fail @"
 Tarball source '$tarballUrl' is not an https URL and VENYA_TARBALL_SHA256 is not set.
 The .sha256 sidecar would be fetched from the SAME origin (self-attesting, #375/#328).
-Set VENYA_TARBALL_SHA256 to the operator-pinned hash (the serve script prints it),
-or use an https:// source. Aborting.
+Set VENYA_TARBALL_SHA256 to the operator-pinned hash, or use an https:// source.
+
+To get the value from where you are: read the sidecar yourself -
+  curl -fsSL "$tarballUrl.sha256"
+and treat it as a CORRUPTION check only: it crosses the same unauthenticated origin
+this guard refuses to self-attest, so corroborate it out-of-band (the serve run prints
+the same hash on the build host's terminal, not on this machine).
+
+Refusing to install unverified - nothing was fetched from '$tarballUrl', no tarball
+content was written, and this abort runs before the prompt, the install directory and
+the uv download, so there is nothing to clean up.
 "@
 }
 
