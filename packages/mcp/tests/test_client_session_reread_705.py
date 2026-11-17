@@ -4,12 +4,18 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""The running MCP server picks up the session a later `venya login` wrote (#705, #776).
+"""The running MCP server reads the session file again — and refuses a swap it cannot attest.
 
 The client used to hold only the token it read at construction, so an operator who logged
-in after the server started had to restart it before any tool call worked. Now the file is
-statted per call and read only when its mtime moves, a refused refresh asks it once more,
-and the session sentence names which of three states it found.
+in before the server started and held nothing had no way in without a restart. Now the file is
+statted per call and read only when its mtime moves, a refused refresh asks it once more, and the
+session sentence names which of three states it found.
+
+What that read may do is the other half of #705, and the owner ruled it refuse-and-tell: the file
+carries `server_url` and `access_token` and names no principal, and the bearer is 256 random bits, so
+this process cannot show a differing token to be its own login's. It therefore establishes a session
+from the file when it holds nothing, and refuses one when it does — in words that say what was
+refused and what to do about it.
 
 Cells follow leg 1555's negatives, as amended by the lead at 17:29:
 
@@ -23,6 +29,9 @@ Cells follow leg 1555's negatives, as amended by the lead at 17:29:
 (g) leg 1558's review finding, fixed in source: the renewing clause is one constant composed
     at all three sites (both client refusals and the startup precondition), so no site can
     name a verb that clears the token (#776).
+(h) #705 as ruled: a differing token on disk is refused while a session is in hand, and the
+    refusal is told; a pickup that establishes a session (nothing in hand) still works, and only
+    for the core the file names.
 
 The remedy wording is asserted on its stable stem, not byte-for-byte: leg 1554 edits the
 verb inside that same sentence, and a cell pinning the whole string would fail on landing
@@ -46,6 +55,7 @@ DISK_TOKEN = "login-landed-after-startup-token"
 OTHER_CORE = "https://venya-core-2"
 STEM = "Venya session expired and could not be renewed"
 NEVER_HELD = "This process never held a token"
+DECLINED = "did not obtain"
 
 
 def _write(path: Path, token: str | None, server_url: str = "https://venya-core-1") -> None:
@@ -114,11 +124,12 @@ def _ok_http() -> MagicMock:
 # --- the capability: a login that lands after startup -----------------------
 
 
-async def test_mtime_door_picks_up_a_login_written_after_startup(tmp_path: Path) -> None:
-    """The file moves while the server runs: the very next call dials with that token.
+async def test_mtime_door_refuses_a_login_written_while_a_session_is_held(tmp_path: Path) -> None:
+    """The file moves while a token is in hand: the swap is refused, the call is not.
 
-    This is reports/361's repro without a key ceremony — no 401 round trip is needed to
-    learn the new session, so the operator's first dial is already the good one.
+    #705 as the owner ruled it — this process dials only the session it obtained. A refusal must
+    never cost the operator a working call, so the dial still goes out with the token in hand, and
+    the declined value is recorded because it is the fact the next sentence has to tell.
     """
     path = tmp_path / "config.json"
     client = _client(path)
@@ -129,7 +140,9 @@ async def test_mtime_door_picks_up_a_login_written_after_startup(tmp_path: Path)
 
     assert await client._request("GET", "/api/v1/test") == {"ok": True}
     assert http.request.await_count == 1
-    assert http.request.call_args[1]["headers"]["Authorization"] == f"Bearer {DISK_TOKEN}"
+    assert http.request.call_args[1]["headers"]["Authorization"] == f"Bearer {STARTUP_TOKEN}"
+    assert client._access_token == STARTUP_TOKEN
+    assert client._adoption_refused
 
 
 async def test_missing_token_adopts_the_session_on_disk(tmp_path: Path) -> None:
@@ -163,8 +176,13 @@ async def test_still_mtime_is_caught_by_the_missing_token_door(tmp_path: Path) -
     assert client._access_token == DISK_TOKEN
 
 
-async def test_refused_refresh_retries_with_the_token_that_landed_mid_call(tmp_path: Path) -> None:
-    """401, refresh refused, and the login arrives during the call: one retry, with it."""
+async def test_refused_refresh_refuses_the_token_that_landed_mid_call(tmp_path: Path) -> None:
+    """401, refresh refused, and a login arrives during the call: that token is not presented.
+
+    This is the shape the ruling is about. The core has refused the credential in hand and the file
+    holds a different one; retrying with it would act as a login this process cannot attest, so the
+    attempt ends at one dial, one refresh POST, and a refusal sentence that names the declined value.
+    """
     path = tmp_path / "config.json"
     client = _client(path)
 
@@ -182,23 +200,66 @@ async def test_refused_refresh_retries_with_the_token_that_landed_mid_call(tmp_p
     http.request = AsyncMock(side_effect=dial)
     client._http = http
 
-    assert await client._request("GET", "/api/v1/test") == {"ok": True}
-    assert sent == [f"Bearer {STARTUP_TOKEN}", f"Bearer {DISK_TOKEN}"]
+    with pytest.raises(SessionExpiredError) as exc_info:
+        await client._request("GET", "/api/v1/test")
+
+    message = str(exc_info.value)
+    assert sent == [f"Bearer {STARTUP_TOKEN}"]
     assert http.post.await_count == 1  # the refresh was refused, not skipped
+    assert STEM in message  # AC3: a credential the core did refuse is still called expired
+    assert "was refused by the core" in message
+    assert DECLINED in message  # and the file's other token is named as declined
+    assert "no restart is needed" not in message  # at this site the restart is the remedy again
+    assert client._access_token == STARTUP_TOKEN
 
 
-async def test_adoption_does_not_repoint_the_dial(tmp_path: Path) -> None:
-    """A re-read takes the token only: the bearer stays aimed at the core it started on."""
+async def test_a_refused_adoption_leaves_the_refresh_working(tmp_path: Path) -> None:
+    """Refusing the file is not refusing the session: the core's own renewal still renews.
+
+    The renewal needs no attestation from the file — the core minted it for the credential in hand —
+    so it is the half of #705's remedy that must survive the refusal. A foreign token sits on disk
+    for the whole call to prove the two do not interfere.
+    """
     path = tmp_path / "config.json"
     client = _client(path)
+    _login_landed(client)
+
+    http = MagicMock()
+    http.post = AsyncMock(return_value=_response(200, {"access_token": "refreshed-token"}))
+    http.request = AsyncMock(side_effect=[_response(401), _response(200, {"ok": True})])
+    client._http = http
+
+    assert await client._request("GET", "/api/v1/test") == {"ok": True}
+    assert client._access_token == "refreshed-token"
+    assert http.request.call_args_list[1][1]["headers"]["Authorization"] == "Bearer refreshed-token"
+    assert json.loads(path.read_text())["access_token"] == "refreshed-token"
+
+
+async def test_a_pickup_is_refused_when_the_file_names_another_core(tmp_path: Path) -> None:
+    """A read that establishes a session takes a token only for the core this process dials.
+
+    The file is repointed at another core and a token for that core lands in it. Nothing was held
+    here, so the read may still establish a session — but carrying that bearer to this process's own
+    dial is the crossing the ruling names, and it is refused before a request goes out (#540's dial
+    stays where it is; this is not a second https guard, it is the token's own home.
+    """
+    path = tmp_path / "config.json"
+    client = _client(path, token=None)
     _login_landed(client, server_url=OTHER_CORE)
 
     http = _ok_http()
     client._http = http
 
-    await client._request("GET", "/api/v1/test")
-    assert client._access_token == DISK_TOKEN
-    assert http.request.call_args[0][1] == "https://venya-core-1/api/v1/test"
+    with pytest.raises(SessionExpiredError) as exc_info:
+        await client._request("GET", "/api/v1/test")
+
+    assert http.request.await_count == 0  # nothing was dialled with a bearer it would not attest
+    assert client._access_token is None
+    message = str(exc_info.value)
+    assert DECLINED in message
+    assert NEVER_HELD in message  # #706 holds at this site too: nothing expired, nothing was refused
+    assert STEM not in message
+    assert str(path) in message
 
 
 # --- negative (a): the same token on disk cannot loop -----------------------
@@ -274,9 +335,13 @@ async def test_successful_refresh_never_asks_the_file(tmp_path: Path) -> None:
 
 
 async def test_adoption_logs_the_file_not_the_token(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """The operator learns a swap happened and where; no token value is ever printed."""
+    """A session established from the file is logged as a path and an act; no value is printed.
+
+    The pickup that survives the ruling is the one that finds nothing in hand, so this cell runs
+    through that shape — `token=None` at startup, the login landing after it.
+    """
     path = tmp_path / "config.json"
-    client = _client(path)
+    client = _client(path, token=None)
     _login_landed(client)
 
     client._http = _ok_http()
@@ -289,6 +354,27 @@ async def test_adoption_logs_the_file_not_the_token(tmp_path: Path, caplog: pyte
         assert leak not in caplog.text
     assert str(path) in caplog.text
     assert "Adopted the session token" in caplog.text
+
+
+async def test_a_refusal_logs_the_file_not_the_token(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The declined token is written down as declined, and its value stays off the log face.
+
+    This is the leak cell for the branch the ruling adds: a refusal that names the value it refused
+    would move a bearer credential into the log, which is the file #706's whole complaint reversed.
+    """
+    path = tmp_path / "config.json"
+    client = _client(path)
+    _login_landed(client)
+
+    client._http = _ok_http()
+    with caplog.at_level(logging.DEBUG, logger="venya.mcp"):
+        await client._request("GET", "/api/v1/test")
+
+    for leak in (DISK_TOKEN, DISK_TOKEN[:8]):
+        assert leak not in caplog.text
+    assert str(path) in caplog.text
+    assert "Did not adopt the session token" in caplog.text
+    assert "Adopted the session token" not in caplog.text
 
 
 # --- negatives (d) and (e): a broken file, and the state the sentence names --
@@ -442,6 +528,31 @@ async def test_a_refused_token_is_still_called_expired(tmp_path: Path) -> None:
     assert "<USER_ID>" in message
     for banned in ("venya list", "venya run"):
         assert banned not in message
+
+
+def test_the_declined_token_is_told_at_both_states_and_asserts_nothing_more() -> None:
+    """The refusal rides on the state that observed it, and never borrows a status (#705, #706).
+
+    Both sentences must say the same thing about the file — a token this process did not obtain, and
+    will not use — and must keep the two faults apart: the state that watched the core refuse a
+    bearer still says so, the state that never sent one still does not. And neither may print a
+    number it did not observe, because the refusal has no status of its own.
+    """
+    path = Path("/fixture/venya-config.json")
+    refused = session_error_text(path, refused=True, adoption_refused=True)
+    never_held = session_error_text(path, adoption_refused=True)
+
+    assert STEM in refused and STEM not in never_held
+    assert NEVER_HELD in never_held and NEVER_HELD not in refused
+    for text in (refused, never_held):
+        assert DECLINED in text
+        assert str(path) in text
+        assert RENEW_CLAUSE in text
+        assert "restart or reconnect the MCP server" in text
+        for observed in ("401", "403", "503", "no verdict"):
+            assert observed not in text
+        for banned in ("venya list", "venya run"):
+            assert banned not in text
 
 
 def test_the_remedy_is_one_clause_at_every_site() -> None:

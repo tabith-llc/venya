@@ -99,6 +99,8 @@ class MCPConfig:
         self.path = config_path or self._resolve_path()
         self._data: dict[str, Any] = {}
         self._mtime: int | None = None
+        #: What the file's own ``server_url`` said at the last read that saw one. See the property.
+        self._disk_server_url: str | None = None
         self._load()
         self._mtime = self._stat_mtime()
 
@@ -121,6 +123,9 @@ class MCPConfig:
                 f"{RENEW_CLAUSE} to create it, then start the MCP server again."
             )
         self._data = json.loads(self.path.read_text())
+        if isinstance(self._data, dict):
+            seen = self._data.get("server_url")
+            self._disk_server_url = seen if isinstance(seen, str) else None
 
     def _stat_mtime(self) -> int | None:
         """The session file's mtime in nanoseconds, or None when it cannot be seen.
@@ -190,6 +195,17 @@ class MCPConfig:
     def access_token(self) -> str | None:
         return self._data.get("access_token")
 
+    @property
+    def disk_server_url(self) -> str | None:
+        """The ``server_url`` the session file held at the last read that saw one, else ``None``.
+
+        Not the guard — the https:// refusal of #540 stays on ``server_url``, at the point the URL is
+        dialled. This is only a report of what the disk says, so a caller can ask whether a token it is
+        about to take belongs to the core it dials (#705: refuse a session it cannot attest). It costs
+        nothing to answer, because ``reload`` already parsed the whole file to read the token.
+        """
+        return self._disk_server_url
+
     def reload(self) -> str | None:
         """Re-read the session file and return the ``access_token`` it holds now.
 
@@ -198,7 +214,9 @@ class MCPConfig:
         behind that door, and it is deliberately narrow: it takes ``access_token`` only
         and never re-points ``server_url``, so a re-read cannot move a bearer token to a
         different core mid-session (the https://-only guard of #540 keeps reading the
-        startup value).
+        startup value). What it does with the file's own ``server_url`` is report it, once,
+        through ``disk_server_url``: the caller decides whether the token it is offered
+        belongs to the core it dials, and refuses it when it does not (#705).
 
         Returns ``None`` when the file is gone, unreadable, not a JSON object, or holds no
         token, leaving ``_data`` untouched — a caller with nothing usable on disk gets its
@@ -216,6 +234,8 @@ class MCPConfig:
             if isinstance(found, str) and found:
                 token = found
                 self._data["access_token"] = found
+            seen_core = data.get("server_url")
+            self._disk_server_url = seen_core if isinstance(seen_core, str) else None
         self._mtime = self._stat_mtime()
         return token
 
