@@ -4989,7 +4989,7 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
     """Approved refusal text for a passphrase under the length floor (#573).
 
-    The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
+    The wording is the approved block (the design record §6, ruled as R5(a) of that
     ruling set) with only the two authorized corrections applied: the supported maximum
     stated plainly instead of "there is no maximum below 64 characters", and the floor
     number interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the door
@@ -5215,7 +5215,7 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
         return 1
 
 
-# #353 ruling R2 (owner batch-yes 2026-10-02): forgery-charset gate on the
+# #353 ruling R2 (batch approved 2026-10-02): forgery-charset gate on the
 # admin identity before CA signing. CN/SAN interpolate the identity verbatim;
 # structural characters — comma, double quote, backslash, equals, and control
 # characters incl. CR/LF — would forge X.509 RDN/SAN structure in a cert this

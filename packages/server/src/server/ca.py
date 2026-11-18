@@ -165,7 +165,7 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 def _short_passphrase_refusal(passphrase_env: str, *, read_path: bool = False) -> str:
     """Approved refusal text for a passphrase under the length floor (ticket #573).
 
-    The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
+    The wording is the approved block (the design record §6, ruled as R5(a) of that
     ruling set) with only the two authorized corrections applied: the supported maximum
     stated plainly instead of "no maximum below 64 characters", and the floor number
     interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the check uses,
@@ -818,7 +818,7 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # then refused to parse the leaf rather than silently drift past the plane
 # statement (measured at the CRITICAL tip: stock ``openssl verify`` rejects
 # such a leaf with error 34, and -ignore_critical is what lets the rest of
-# the chain still verify). Ruled back to NON-CRITICAL at s98 (#588, owner
+# the chain still verify). Ruled back to NON-CRITICAL in the #588 round,
 # option A): our own front door — nginx verifying with stock OpenSSL — is a
 # verifier we must not fail, and the edge returned 400 on the marker-carrying
 # admin leaf. The external-refusal property is given up DELIBERATELY: an

@@ -14,7 +14,7 @@ the 503 stale class whenever the snapshot it would answer from is missing or has
 crossed the ceiling — a poll must never read "nothing revoked" out of data nobody can
 vouch for, because an empty population IS "nothing revoked".
 
-THE NUMBERS, and they are constants on purpose (ticket #603 AC2; owner's spec ok and
+THE NUMBERS, and they are constants on purpose (ticket #603 AC2; the spec approval and
 boundary ruling, both 2026-10-15): a ceiling of 45 s, a refresh interval of 10 s, and
 the boundary operator ``>=`` — refuse at exactly the ceiling. Putting the ceiling on
 the env-var surface would re-open the drift this ticket exists to kill, so there is no
@@ -80,7 +80,7 @@ logger = logging.getLogger("venya.server")
 # --- the ruled window -------------------------------------------------------------
 
 #: Freshness ceiling: how long a published population may be answered from. 45 s
-#: covers the observed 15-40 s lock-stall band with margin (review item 4, owner's
+#: covers the observed 15-40 s lock-stall band with margin (review item 4, settled as the
 #: pick, 2026-10-15). Past it the poll REFUSES in the 503 stale class — it does not
 #: answer live, and it does not answer "nothing revoked".
 REVOCATION_SNAPSHOT_MAX_AGE_SECONDS = 45

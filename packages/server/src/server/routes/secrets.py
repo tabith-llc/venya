@@ -35,7 +35,7 @@ from ..audit_lifecycle import (
 router = APIRouter()
 logger = logging.getLogger("venya.server")
 
-# #354 (owner batch-yes 2026-10-02, charset per RULING-INPUTS): the secret key
+# #354 (batch approved 2026-10-02, charset per RULING-INPUTS): the secret key
 # is an authorization input (RBAC scoping namespace) and rides URL path params;
 # '/' can never reach a handler under this pattern, so the whole '..'/encode
 # path-rewrite family is refused at every secrets route. '..' and '.' remain

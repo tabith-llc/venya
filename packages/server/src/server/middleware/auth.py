@@ -755,7 +755,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         # Audit-forwarder ingest: executor mTLS (ticket
         # audit-forwarder-server-sink #307). Runs with reject_revoked=False
-        # per D2 ruling (owner 2026-10-01): a REVOKED registered executor's
+        # per D2 ruling (2026-10-01): a REVOKED registered executor's
         # forwarded evidence still LANDS, route-side flagged
         # fields.sender_revoked=true — pre-revocation rejections may be the
         # evidence motivating the revocation. NOTE the purpose differs from

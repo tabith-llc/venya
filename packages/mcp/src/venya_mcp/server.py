@@ -42,7 +42,7 @@ _client: VenyaClient | None = None
 _PROGRESS_TICK_SECONDS = 5.0
 
 # The whole payload is this constant plus a tick counter. Stage and liveness only: no command
-# text, no argv, no output fragment, no secret key, no path, no executor id (#710 AC, owner
+# text, no argv, no output fragment, no secret key, no path, no executor id (#710 AC, the
 # ruling R-2632). A shape that is identical for every call cannot disclose anything about a call.
 _PROGRESS_STAGE = "running"
 

@@ -303,7 +303,7 @@ def _metachar_classes(elem: str) -> str:
 
 def _sshpass_owns_the_stdin(command: list[str]) -> bool:
     """Whether a near-side `<` redirect in this argv is taken by `sshpass` instead of
-    reaching the remote `sudo -S` it was written for (#695, owner reversal `R-2633`).
+    reaching the remote `sudo -S` it was written for (#695, the `R-2633` reversal).
 
     The THREE-PART conjunction and nothing looser: `sshpass` as the first element, a
     session-bound `<` pair at the call site, and a remote `sudo` carrying `-S`/`--stdin`
@@ -402,7 +402,7 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
             if elem != "<":
                 # Its own sentence, naming the SHAPE this arm actually tested — `<` fused into a
                 # larger element — and no class word: this raise happens before the membership
-                # test, whose set excludes `<` (#713 AC6, owner form-B ruling part 2).
+                # test, whose set excludes `<` (#713 AC6, form-B ruling part 2).
                 raise ValueError(
                     f"Argument {i} carries a fused '<': this character is accepted only as its "
                     "own standalone element, and only immediately followed by a session-bound "
@@ -425,7 +425,7 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
                     "name). Any other redirect target is rejected."
                 )
             # The ruled session-bound pair is the ONLY shape that reaches here, so this is the
-            # same `<` arm with one more sentence (#695, owner reversal `R-2633`: "ship the
+            # same `<` arm with one more sentence (#695, the `R-2633` reversal: "ship the
             # validator refusal for sshpass + < + remote sudo -S, naming which process the
             # redirect bound to") — no new arm, no re-ordering, and still the shipped
             # ValueError -> CommandRejected -> relay 422 lane. Names the PROCESS the redirect
@@ -621,7 +621,7 @@ class Executor:
                 )
             raise CommandRejected(f"Command rejected: {exc}") from None
 
-        # EXECUTION POSTURE (ticket #322 ruling Q3=C3, owner 2026-10-02; fleet
+        # EXECUTION POSTURE (ticket #322 ruling Q3=C3, 2026-10-02; the fleet
         # C5 probe grounded): the common case runs the VALIDATED ARGV LIST
         # DIRECT in the sandbox (no shell — boundaries are the list's, nothing
         # re-parses them, mirroring the direct path's shell=False posture). The
