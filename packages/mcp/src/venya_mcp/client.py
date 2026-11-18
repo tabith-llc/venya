@@ -106,7 +106,7 @@ ANCHORED_ONLY_REFUSAL = (
 )
 
 
-#: R9 (owner ruling 2026-10-10, booked in decisions.md at 135337e): the refusal names NO
+#: R9 (ruled 2026-10-10): the refusal names NO
 #: mechanism. "a trust store that is not the Venya CA" is true for both refused shapes at this seam —
 #: ``verify=True`` lands on the machine's own store, an omitted ``verify`` lands on the transport's
 #: built-in default bundle — and a reader cannot reproduce a mechanism they were never shown, so the
@@ -551,7 +551,7 @@ class VenyaClient:
         # session row that then waits on TTL reap. The shlex split needs no
         # session — it leads.
         # M1 boundary split (ticket execution-command-wire-unstructured-string
-        # #322, owner ruling): the MCP TOOL surface stays a shell string, but
+        # #322, ruled): the MCP TOOL surface stays a shell string, but
         # ExecuteRequest.command is a list[str] since #322 — argv is split
         # HERE so the wire carries structured tokens. An unparseable string
         # (unbalanced quote) becomes a ValueError, which rides the EXISTING

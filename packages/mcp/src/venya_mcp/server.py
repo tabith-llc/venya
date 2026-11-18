@@ -329,7 +329,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 usage = meta.get("usage")
                 if isinstance(usage, str) and usage:
                     if secret_id is not None:
-                        # Owner ruling a2 (ticket mcp-list-secrets-id-usage-not-rendered):
+                        # Ruled a2 (ticket mcp-list-secrets-id-usage-not-rendered):
                         # resolve the id-derived placeholders HERE so agents receive a
                         # ready-to-run template instead of performing string surgery.
                         # {host}/{user} are task-context placeholders and stay as
