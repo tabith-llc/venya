@@ -4,9 +4,9 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Generator for the `file:line` pins on docs/beta-known-limitations.md (#Leg 3, owner ruling 2026-10-18).
+"""Generator for the `file:line` pins on docs/beta-known-limitations.md (ruled 2026-10-18).
 
-**Owner's ruling, verbatim:** *"claim-truth now, numbers re-pinned at the cut commit with a checked
+**The rule, verbatim:** *"claim-truth now, numbers re-pinned at the cut commit with a checked
 assertion."* So this tool is BUILT now and RUN at the cut commit. It is deliberately NOT run today:
 `origin/dev` moved twice while the terms page was being corrected, and a number pinned at a tip that
 has already moved is how the wrong cites got published in the first place — a hand-applied offset

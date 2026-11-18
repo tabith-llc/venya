@@ -106,7 +106,7 @@ ANCHORED_ONLY_REFUSAL = (
 )
 
 
-#: R9 (owner ruling 2026-10-10, booked in decisions.md at 135337e): the refusal names NO
+#: R9 (ruled 2026-10-10): the refusal names NO
 #: mechanism. "a trust store that is not the Venya CA" is true for both refused shapes at this seam —
 #: ``verify=True`` lands on the machine's own store, an omitted ``verify`` lands on the transport's
 #: built-in default bundle — and a reader cannot reproduce a mechanism they were never shown, so the
@@ -165,7 +165,7 @@ def session_error_text(path: Path, *, refused: bool = False, adoption_refused: b
     refused anything — no request went out. Only the third state observed a refusal.
 
     A fourth fact can ride on any of them: the file was read and held a token this process would
-    not take (``adoption_refused``, #705 as the owner ruled it). It changes the middle of the
+    not take (``adoption_refused``, #705 as ruled). It changes the middle of the
     sentence and it changes the tail, because under that ruling the restart is the remedy again —
     saying "no restart is needed" beside a token the process declined to use would be a lie.
 
@@ -314,7 +314,7 @@ class VenyaClient:
         """Take the token the session file holds only when this process has no session to displace
         and the file names the core this process dials.
 
-        The owner ruled #705 refuse-and-tell: the MCP must not use a session token a different
+        #705 is refuse-and-tell: the MCP must not use a session token a different
         principal wrote, and it must say so. What this process can attest is narrow, and it is worth
         naming — the file carries ``server_url`` and ``access_token`` and no principal (the CLI writes
         those two keys), the bearer is 256 random bits with no subject to read, and there is no
@@ -551,7 +551,7 @@ class VenyaClient:
         # session row that then waits on TTL reap. The shlex split needs no
         # session — it leads.
         # M1 boundary split (ticket execution-command-wire-unstructured-string
-        # #322, owner ruling): the MCP TOOL surface stays a shell string, but
+        # #322, ruled): the MCP TOOL surface stays a shell string, but
         # ExecuteRequest.command is a list[str] since #322 — argv is split
         # HERE so the wire carries structured tokens. An unparseable string
         # (unbalanced quote) becomes a ValueError, which rides the EXISTING

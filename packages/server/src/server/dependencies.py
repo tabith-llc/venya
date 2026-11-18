@@ -240,7 +240,7 @@ def require_role(permission: str):
         #
         # Its pass-through of a REVOKED-but-verified executor is DELIBERATE and is NOT this
         # gate's doing — the middleware runs that path with ``reject_revoked=False`` under
-        # owner ruling B1 (2026-09-20), so the 200 ``{revoked: true}`` RESPONSE is the fast
+        # ruled B1 (2026-09-20), so the 200 ``{revoked: true}`` RESPONSE is the fast
         # cooperative-stop channel. Do not "harden" it to ``reject_revoked=True`` or to
         # 401/403: that kills the ruled channel (guard:
         # ``test_heartbeat_revoked_still_200_cooperative_channel_b1``).

@@ -35,7 +35,7 @@ from ..audit_lifecycle import (
 router = APIRouter()
 logger = logging.getLogger("venya.server")
 
-# #354 (owner batch-yes 2026-10-02, charset per RULING-INPUTS): the secret key
+# #354 (batch approved 2026-10-02, charset per RULING-INPUTS): the secret key
 # is an authorization input (RBAC scoping namespace) and rides URL path params;
 # '/' can never reach a handler under this pattern, so the whole '..'/encode
 # path-rewrite family is refused at every secrets route. '..' and '.' remain
@@ -519,7 +519,7 @@ async def secrets_get(
                     detail="insufficient role: auditor cannot read secret values",
                 ) from None
         if auditor_only_permissions(permissions):
-            # Denials are audit-logged (owner ruling 2026-09-30 reverses the
+            # Denials are audit-logged (ruled 2026-09-30 reverses the
             # earlier "logging is left as is"). COMMIT BEFORE the raise:
             # get_db rolls back any exception escaping the route, so an
             # add-then-raise without commit would evaporate the compliance

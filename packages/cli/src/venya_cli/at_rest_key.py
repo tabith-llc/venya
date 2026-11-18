@@ -16,7 +16,7 @@ comment that still claimed a twin) — so these are library-level ALIGNED
 COPIES of that codec, pinned by tests/test_cli_ca_key_at_rest.py against the
 same cryptography calls the server makes.
 
-Auto-detect order (owner ruling Q1b): try plaintext PEM parse FIRST (legacy
+Auto-detect order (ruled Q1b): try plaintext PEM parse FIRST (legacy
 pre-at-rest files pass through untouched), else decrypt PKCS#8 with the server
 passphrase, else fail LOUD. There is no third form — bytes that are neither
 parse plaintext nor passphrase-openable PKCS#8 abort every custody path with

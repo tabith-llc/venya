@@ -275,7 +275,7 @@ async def elevate_assert(
     from ..dependencies import auditor_only_permissions
 
     if auditor_only_permissions(RoleManager(db).get_user_permissions(user_info["user_id"])):
-        # Denials are audit-logged (owner ruling 2026-09-30). COMMIT BEFORE
+        # Denials are audit-logged (ruled 2026-09-30). COMMIT BEFORE
         # the raise — get_db rolls back escaped exceptions. Value-free:
         # no token material exists yet at this gate. Fail-closed: audit-write
         # failure never upgrades the denial (logged loudly, still 403).

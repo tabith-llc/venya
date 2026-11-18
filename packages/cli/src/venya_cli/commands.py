@@ -1814,7 +1814,7 @@ def _require_https_server_url(server_url: str, *, site: str, ticket: str, detail
     """One shared https:// scheme guard for every place the CLI dials a core URL.
 
     Plaintext http is REJECTED — never downgraded, never warned-and-continued. That
-    is the owner ruling on ``sec-sweep-low-informational`` #17 (2026-09-21), which
+    is the ruling on ``sec-sweep-low-informational`` #17 (2026-09-21), which
     the executor heartbeat has carried since; the renew / register / setup /
     config-write sites are being brought onto the same rule rather than inventing
     one (#497 #506 #508 #509).
@@ -1907,7 +1907,7 @@ def _parse_admin_cert(cert_path: str) -> dict[str, Any] | None:
 
     Reads ONLY the certificate. The private key is never opened: `status` must work
     with the cert file alone, and a lifetime readout has no business touching key
-    material (owner-ruled zero-mutation half of RF-8a).
+    material (ruled zero-mutation half of RF-8a).
     """
 
     from cryptography.x509 import load_pem_x509_certificate
@@ -1977,7 +1977,7 @@ def admin_cert_expiry_refusal(cert_path: str, *, site: str) -> str | None:
 def cmd_admin_cert_status(args: Any) -> int:
     """`venya admin cert status` — the readable lifetime of the local admin certificate.
 
-    Dossier §4.5 (owner-ruled addition to ruling 4b): a headless job must be able to
+    Dossier §4.5 (ruled addition to ruling 4b): a headless job must be able to
     pre-flight its own credential without hiding a ceremony inside the check. So this
     command reads ONE file — the admin CERTIFICATE named by ``--cert-path`` or
     ``VENYA_ADMIN_CERT`` — prints its remaining lifetime in MINUTES (the ruled unit: at
@@ -2100,8 +2100,8 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
 
     Output discipline is RF-8a's: the readout on stdout ending `STATUS: OK`, every
     refusal on stderr with a non-zero code, and no private key material in either. The
-    key is written ENCRYPTED with `VENYA_ADMIN_CA_KEY_PASSPHRASE` (#547a — the owner
-    ruled the passphrase requirement extends to the admin's private key), and both the
+    key is written ENCRYPTED with `VENYA_ADMIN_CA_KEY_PASSPHRASE` (#547a — ruled that
+    the passphrase requirement extends to the admin's private key), and both the
     refusal and the success readout say so plainly. The dial that presents the pair opens
     that encrypted key with the same variable (#565 Part B), so a renewed pair is usable
     for admin mTLS wherever the variable is set.
@@ -3455,7 +3455,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     # would choose what this host trusts from now on.
     #
     # The VENYA_TLS_VERIFY knob is not consulted here: it means "distrust this
-    # certificate over https", never "no TLS" (#506 ruling, owner ruling on
+    # certificate over https", never "no TLS" (#506 ruling, ruled on
     # sec-sweep-low-informational #17). isinstance guard: MagicMock args in the
     # sibling suites answer every attribute with a Mock, and a Mock is not a URL.
     if isinstance(server_url, str) and "://" not in server_url:
@@ -4926,8 +4926,8 @@ def _admin_ca_passphrase_or_none() -> str | None:
 
     Unset, empty and whitespace-only all count as "no passphrase": a value made only of
     spaces carries no material, so encrypting a CA key with it is decoration, and the
-    #547 refusal it used to slip past is exactly the check it defeats. The owner ruled
-    this batch as *deny whitespace* ("whitespace-only passphrase should not be
+    #547 refusal it used to slip past is exactly the check it defeats. The ruling is
+    *deny whitespace* ("whitespace-only passphrase should not be
     acceptable"), the same shape the server's ``ca.py`` ``_load_passphrase()`` now uses.
 
     DENY, never TRIM: an acceptable value is returned byte-for-byte, so a passphrase
@@ -4951,7 +4951,7 @@ def _passphrase_has_material(passphrase: str) -> bool:
 
 # --- #573: the passphrase LENGTH floor on the CA plane (carrier n15) ---
 #
-# Owner ruling (s85 batch, verbatim): "Deny whitespace-only passphrases and enforce a
+# Ruled wording (verbatim): "Deny whitespace-only passphrases and enforce a
 # proper length passcode." The whitespace half shipped in #554; this is the length half,
 # ruled from `wave14-specs-20261009/passphrase-length-flash3-s84.md` and counted in
 # Unicode CODE POINTS on the decoded string BEFORE any encode (NIST SP 800-63B-4 counts
@@ -4987,9 +4987,9 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 
 
 def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
-    """Owner-blessed refusal text for a passphrase under the length floor (#573).
+    """Approved refusal text for a passphrase under the length floor (#573).
 
-    The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
+    The wording is the approved block (the design record §6, ruled as R5(a) of that
     ruling set) with only the two authorized corrections applied: the supported maximum
     stated plainly instead of "there is no maximum below 64 characters", and the floor
     number interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the door
@@ -5215,7 +5215,7 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
         return 1
 
 
-# #353 ruling R2 (owner batch-yes 2026-10-02): forgery-charset gate on the
+# #353 ruling R2 (batch approved 2026-10-02): forgery-charset gate on the
 # admin identity before CA signing. CN/SAN interpolate the identity verbatim;
 # structural characters — comma, double quote, backslash, equals, and control
 # characters incl. CR/LF — would forge X.509 RDN/SAN structure in a cert this
@@ -5243,7 +5243,7 @@ def _identity_forgery_error(identity: str) -> str | None:
 
 # --- #547a: the admin LEAF key gets the same passphrase requirement as the admin CA ---
 #
-# Owner ruling (2026-10-09 14:54): "passphrase shall extend to the admin's private key".
+# Ruled 2026-10-09: the passphrase requirement extends to the admin's private key.
 # Both writers of an admin private key — `admin generate-admin-cert` (the local CA mint)
 # and `admin cert renew` (the RF-8b core mint) — therefore refuse before writing when
 # `VENYA_ADMIN_CA_KEY_PASSPHRASE` is unset, empty, or whitespace-only, and write the key
@@ -5371,7 +5371,7 @@ def _admin_ca_plaintext_key_refusal() -> str:
     return "\n".join([lines[0], references[0]])
 
 
-#: #572 — the owner-approved refusal for a wrong passphrase on the admin CA key, recorded verbatim
+#: #572 — the approved refusal for a wrong passphrase on the admin CA key, recorded verbatim
 #: in the ruling (room dispatch 37 / the dispatch's §2, single-quoted there for exactness). This is the
 #: ONE hand-written home of those bytes in the product tree — the refusal below and the test cells
 #: read this constant, so a future edit changes the voice in a single place instead of chasing
@@ -5453,7 +5453,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
 
     Generates a new ECDSA P-256 keypair, signs it with the admin CA, and writes the
     cert and the key to the output directory. The key is written encrypted with
-    ``VENYA_ADMIN_CA_KEY_PASSPHRASE`` (#547a — the owner ruled that the passphrase
+    ``VENYA_ADMIN_CA_KEY_PASSPHRASE`` (#547a — ruled that the passphrase
     requirement extends to the admin's own private key); with that variable unset,
     empty, or whitespace-only — or set but shorter than the #573 floor — the command
     refuses before touching the filesystem.
@@ -5634,7 +5634,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         # Write the key ENCRYPTED (#547a). This replaced the shipped line
         # `# Write key (unencrypted — operator manages security)`, which stated the old
         # posture: the key went to disk in the clear and the operator was trusted to
-        # guard it. The owner ruled that the passphrase requirement extends to the
+        # guard it. The passphrase requirement extends to the
         # admin's private key, so the CLI applies it rather than deferring to operator
         # habit — and it says plainly, below, that the resulting pair is not yet
         # mTLS-loadable by this CLI.

@@ -14,7 +14,7 @@ the 503 stale class whenever the snapshot it would answer from is missing or has
 crossed the ceiling — a poll must never read "nothing revoked" out of data nobody can
 vouch for, because an empty population IS "nothing revoked".
 
-THE NUMBERS, and they are constants on purpose (ticket #603 AC2; owner's spec ok and
+THE NUMBERS, and they are constants on purpose (ticket #603 AC2; the spec approval and
 boundary ruling, both 2026-10-15): a ceiling of 45 s, a refresh interval of 10 s, and
 the boundary operator ``>=`` — refuse at exactly the ceiling. Putting the ceiling on
 the env-var surface would re-open the drift this ticket exists to kill, so there is no
@@ -80,7 +80,7 @@ logger = logging.getLogger("venya.server")
 # --- the ruled window -------------------------------------------------------------
 
 #: Freshness ceiling: how long a published population may be answered from. 45 s
-#: covers the observed 15-40 s lock-stall band with margin (review item 4, owner's
+#: covers the observed 15-40 s lock-stall band with margin (review item 4, settled as the
 #: pick, 2026-10-15). Past it the poll REFUSES in the 503 stale class — it does not
 #: answer live, and it does not answer "nothing revoked".
 REVOCATION_SNAPSHOT_MAX_AGE_SECONDS = 45
@@ -216,7 +216,7 @@ def note_stale_refusal(site: str = POLL_REFUSAL_SITE) -> None:
 def snapshot_is_stale(snapshot: RevocationSnapshot | None, *, now_mono: float) -> bool:
     """THE single staleness decision: ``age >= ceiling`` refuses.
 
-    ``>=`` is the owner's ruled boundary (2026-10-15, verbatim: ">= — refuse at exactly
+    ``>=`` is the ruled boundary (2026-10-15, verbatim: ">= — refuse at exactly
     the ceiling"), conservative at the boundary tick for the same reason every other
     rule on this plane is: one extra honest 503 costs a request, while one answer
     served past its warrant costs a stale all-clear on the revocation plane. A missing
@@ -365,7 +365,7 @@ def read_relay_populations(db: Session) -> list[str]:
 
     NOTE for #586: this is the population a relay listener can match its PEER against.
     It is keyed on registry MEMBERSHIP, and nothing here makes list age a stop condition
-    at that door — the availability trade stays #586's and the owner's.
+    at that door — the availability trade stays #586's, still open.
     """
     if not _publisher_running:
         with bounded_read(db, site="poll/fallback-read"):

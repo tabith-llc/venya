@@ -765,7 +765,7 @@ class CoreRelayCredential(Base):
     disk, so the invariant "exists on disk => exists here" is held by the process that
     uses the credential, not by the installer step that created it. The mint step can
     pre-date the product's own database being reachable, and the installer script is
-    owner-gated per change; boot-ingest covers a credential minted by an OLDER
+    approved per change; boot-ingest covers a credential minted by an OLDER
     installer too, which an installer-only write never would.
     """
 

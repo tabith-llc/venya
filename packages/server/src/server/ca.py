@@ -86,7 +86,7 @@ def csr_curve_hint() -> str:
 
 # --- #573: the passphrase LENGTH floor, CA plane (carrier features/passphrase-length-floor-n15.md) ---
 #
-# Owner ruling (s85 batch, verbatim): "Deny whitespace-only passphrases and enforce a
+# Ruled wording, verbatim: "Deny whitespace-only passphrases and enforce a
 # proper length passcode." The whitespace half shipped in #554; this is the length half,
 # ruled from the research in wave14-specs-20261009/passphrase-length-flash3-s84.md and
 # counted in Unicode CODE POINTS on the decoded string before any encode (NIST SP
@@ -94,7 +94,7 @@ def csr_curve_hint() -> str:
 # measured by its UTF-8 byte length).
 #
 # The FLOOR is enforced; the CEILING is only STATED. Research clause C2 requires verifiers
-# to PERMIT at least 64 characters, and the owner's correction to the blessed wording asks
+# to PERMIT at least 64 characters, and the approved wording of this clause asks
 # for a plain statement of the 64-character supported maximum — no code path here refuses
 # a longer passphrase, so MAX_PASSPHRASE_CODE_POINTS exists to interpolate that sentence
 # and for no other reason.
@@ -123,7 +123,7 @@ def _configured_passphrase(env_var: str) -> str | None:
 def _load_passphrase(env_var: str) -> bytes | None:
     """Load the configured CA passphrase from its environment variable.
 
-    #554 (owner ruling 2026-10-09, verbatim: "whitespace-only passphrase should not
+    #554 (ruled 2026-10-09, verbatim: "whitespace-only passphrase should not
     be acceptable"): a value that is empty or made only of whitespace is read as
     UNSET here, exactly like no value at all. A key must not be "protected" by a
     secret that carries no material — one space opened every set-passphrase test in
@@ -163,9 +163,9 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 
 
 def _short_passphrase_refusal(passphrase_env: str, *, read_path: bool = False) -> str:
-    """Owner-blessed refusal text for a passphrase under the length floor (ticket #573).
+    """Approved refusal text for a passphrase under the length floor (ticket #573).
 
-    The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
+    The wording is the approved block (the design record §6, ruled as R5(a) of that
     ruling set) with only the two authorized corrections applied: the supported maximum
     stated plainly instead of "no maximum below 64 characters", and the floor number
     interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the check uses,
@@ -208,7 +208,7 @@ def _refuse_if_below_floor(passphrase_env: str, *, read_path: bool = False) -> N
 
 
 def _unencrypted_key_refusal(passphrase_env: str) -> str:
-    """Owner-approved refusal text for the write path (ticket #537).
+    """Approved refusal text for the write path (ticket #537).
 
     The wording is final; only the env-var NAME interpolates, because the caller may read a
     different variable (admin CA vs root/executor CA) and the repair step must name the real one.
@@ -264,7 +264,7 @@ def _serialize_key_encrypted(
 def _ca_key_decrypt_refusal(key_path: str | Path | None) -> str:
     """#574 — the wrong-passphrase-on-a-CA-key refusal, in our words, at one home.
 
-    The shape is the owner's ruling (R8-ADDENDUM, decisions.md commit dd1de4c): our own words, no
+    The shape this refusal must take is fixed: our own words, no
     mechanism named, the key path substituted, plus a next-step pointer (#569). Exact bytes are the
     implementing lane's draft and the review's accept — "the rule is the shape, not this string".
 
@@ -549,7 +549,7 @@ class CAManager:
             # A passphrase is configured but the key on disk is plaintext: refuse loudly (#541).
             # Handing it to the loader anyway raises TypeError ("Password was given but private
             # key is not encrypted"), which escapes the manager, the boot path and the health
-            # check. The owner ruled this case REFUSE LOUDLY, NO REWRAP — nothing is loaded,
+            # check. This case refuses loudly and never re-wraps — nothing is loaded,
             # nothing is re-encrypted, nothing is migrated. The wording is #537's approved
             # refusal, shared, naming the variable this manager actually reads.
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
@@ -780,7 +780,7 @@ class CAManager:
         crl = builder.sign(ca_key, hashes.SHA256())
         return crl.public_bytes(serialization.Encoding.DER)
 
-    # NO purge_expired_revocations on this manager. #685 (owner ruling 2026-10-20):
+    # NO purge_expired_revocations on this manager. #685 (ruled 2026-10-20):
     # ExecutorCertRevocation is exempt from time-based purge — it is the membership
     # population for credential validity, and truth-about-state is not aged out on a
     # timer. The method and its maintenance-loop caller were REMOVED, not neutered, so
@@ -818,7 +818,7 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # then refused to parse the leaf rather than silently drift past the plane
 # statement (measured at the CRITICAL tip: stock ``openssl verify`` rejects
 # such a leaf with error 34, and -ignore_critical is what lets the rest of
-# the chain still verify). Ruled back to NON-CRITICAL at s98 (#588, owner
+# the chain still verify). Ruled back to NON-CRITICAL in the #588 round,
 # option A): our own front door — nginx verifying with stock OpenSSL — is a
 # verifier we must not fail, and the edge returned 400 on the marker-carrying
 # admin leaf. The external-refusal property is given up DELIBERATELY: an
@@ -848,12 +848,12 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # THE WINDOW THAT USED TO LIVE HERE (#601): parse_plane_marker once read that
 # legacy arc alongside the registered one so leaves minted before the move kept
 # resolving while the fleet was re-minted per plane. The window is now CLOSED
-# and its read branch removed, on the owner's ruling of 2026-10-16 that
+# and its read branch removed, because
 # nothing alpha-era is supported — no backwards compatibility with alpha, so
 # there is no old-arc credential left to protect, and a read branch for a
 # foreign arc is then only a foreign registration kept alive in our source plus
 # a path that resolves bytes we never mint. The earlier per-plane re-mint
-# precondition, the dual-arc HOW it gated, and the owner's sentence are on
+# precondition, the dual-arc HOW it gated, and the refusal's own sentence are on
 # #601; the ticket seat holds the pen. The paired negative that pins the closure
 # lives at tests/test_plane_marker_pen_arc_601.py, class
 # TestAnyOtherArcIsNoLongerRead, and that class name IS the claim: a marker on
@@ -914,7 +914,7 @@ def parse_plane_marker(cert: x509.Certificate) -> str:
     read a second, foreign arc as a bounded transition window for alpha-era
     leaves (#601); that window is closed and its branch removed, so plane-
     shaped bytes anywhere else are simply not ours and raise the missing-marker
-    refusal. The history, the retired number and the owner's ruling are on #601
+    refusal. The history, the retired number and the ruled decision are on #601
     — not repeated in this tree. The parser stays criticality-blind: it reads
     the value whether or not the extension sets the CRITICAL bit (#588
     option A).
@@ -1131,7 +1131,7 @@ class AdminCAManager:
         if not is_encrypted and passphrase:
             # Twin of CAManager.load_ca (#541): a configured passphrase against a plaintext key
             # on disk refuses loudly instead of logging and handing the passphrase to the loader,
-            # which raised TypeError. Owner ruling: REFUSE LOUDLY, NO REWRAP — nothing is loaded,
+            # which raised TypeError. Ruled: REFUSE LOUDLY, NO REWRAP — nothing is loaded,
             # re-encrypted or migrated. Shares #537's approved wording, naming the admin variable.
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 
@@ -1389,7 +1389,7 @@ class AdminCAManager:
             # Human plane, CA-written (RF-6 §3.2). NON-critical (s98, #588
             # option A): enforcement is app-side in parse_plane_marker, and
             # an external verifier that does not know the OID will NOT
-            # refuse the leaf — the accepted cost of the owner ruling,
+            # refuse the leaf — the accepted cost of that choice,
             # written into #588.
             .add_extension(
                 _plane_marker_extension(PLANE_HUMAN),

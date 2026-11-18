@@ -290,7 +290,7 @@ class AuditForwarderConfig(BaseModel):
 class ConcurrencyConfig(BaseModel):
     """Relay-command admission (RF-3).
 
-    One knob, two spellings, as pinned by the owner 2026-10-11: env
+    One knob, two spellings, pinned together 2026-10-11: env
     `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS` and TOML
     `[executor] max_concurrent_commands`. It lands here through the parent
     alias pair on `ExecutorConfig.executor` — measured on the shipped
@@ -473,7 +473,7 @@ class ExecutorConfig(BaseSettings):
     # is the TOML table it round-trips to: save_file dumps the FIELD name, so a
     # differently named field would write a table the loader then ignores
     # (measured: dumping it as `concurrency` and reloading leaves the knob at 1).
-    # The alias pair is what makes the owner's two spellings ONE truth: the env
+    # The alias pair is what makes the two spellings ONE truth: the env
     # source resolves the nested group as VENYA_EXECUTOR + "VENYA_EXECUTOR" +
     # "__" + key, which is exactly VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS, and
     # the dict source keys off "executor", which is [executor].
