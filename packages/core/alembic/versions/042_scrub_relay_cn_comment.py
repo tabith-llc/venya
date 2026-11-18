@@ -10,7 +10,7 @@ Revision ID: 042
 Revises: 041
 Create Date: 2026-10-21
 
-The owner ruled 2026-10-21 that the beta artifact must not carry private
+Ruled 2026-10-21 that the beta artifact must not carry private
 operator identifiers: "beta release cannot happen with this info present! we
 will scrub BEFORE tagging." ``CoreRelayCredential.common_name``
 (``models.py:782``) declared its example CN as a real development host, and a

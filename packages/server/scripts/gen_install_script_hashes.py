@@ -6,7 +6,7 @@
 
 """Generator for install-script-hashes.MANIFEST (finding: served scripts carry no fingerprint, #763).
 
-Owner words O970 (*"we need to fix the install scripts"* — the scripts are part of the release
+Ruled as O970 (*"we need to fix the install scripts"* — the scripts are part of the release
 process) and O971 (*"yes, we can put the sidecars in the git repo and on the website if needed"*).
 This is the REPO half of O971: a manifest whose hashes are of the COMMITTED bytes, so a script
 change and its fingerprint move in the same diff.
