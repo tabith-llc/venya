@@ -68,11 +68,11 @@ LEGACY_SAMPLE_LIMIT: Final[int] = 5
 # length half landed on the CA plane in b50bc9e; this is the same ruled number on the
 # Argon2id side, which is the "same number for BOTH KDFs" clause of the ruling
 # (decisions.md:282). One named constant per plane, and the refusal text below reads
-# the number from it — a literal 15 in the sentence is the defect the owner named.
+# the number from it — a literal 15 in the sentence is the defect the ruling named.
 #
 # 15 Unicode CODE POINTS, INCLUSIVE (14 refuses, 15 passes), counted on the decoded
 # value before any encode. The ceiling is STATED and never enforced: research clause
-# C2 requires verifiers to PERMIT at least 64, and the owner ruled OPTION 1, so a
+# C2 requires verifiers to PERMIT at least 64, and OPTION 1 was ruled, so a
 # longer passphrase is accepted and used and MAX_PASSPHRASE_CODE_POINTS exists only to
 # interpolate that sentence.
 MIN_PASSPHRASE_CODE_POINTS: Final[int] = 15
