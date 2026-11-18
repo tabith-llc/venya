@@ -371,7 +371,7 @@ def _dialect_name(db: Any) -> str | None:
     Three answers, not two: a name (``"sqlite"``, ``"postgresql"``, …) is a FACT the seam can act
     on, and ``None`` is the ABSENCE of one. The seam's own posture is unchanged by this leg — on
     ``None`` it still yields and lets the read run unbonded, and :func:`note_unbounded_dialect`
-    counts and journals that. Refusing instead is an availability decision the owner has not made.
+    counts and journals that. Refusing instead is an availability decision not yet made.
 
     NOT the same shape as ``middleware/rate_limit.py:326-327``, whatever an older docstring here
     claimed. That gate asks the same question and resolves the unknown the OTHER way: it guards
@@ -386,7 +386,7 @@ def _dialect_name(db: Any) -> str | None:
 
     The divergence is recorded, not repaired: aligning them would move an unknown bind from
     unbonded to bounded-and-potentially-refusing on the revocation path, which is the availability
-    call above, and #704's row carries it to the owner rather than a leg answering it here."""
+    call above, and #704's row carries it onward rather than answering it here."""
     try:
         bind = db.get_bind()
     except Exception:
@@ -604,7 +604,7 @@ def bounded_read(db: Any, *, site: str | None = None) -> Iterator[None]:
         # not say — the read is about to run with NO bound at all, which is #603's freeze shape at
         # a door nobody was watching, so it gets counted and journalled. The decision to yield is
         # UNCHANGED either way: making that a refusal is an availability call on a security
-        # surface, and it is the owner's, not this leg's.
+        # surface, and it is not this changeset's to make.
         if dialect is None:
             note_unbounded_dialect(label, dialect)
         yield

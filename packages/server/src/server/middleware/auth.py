@@ -976,7 +976,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         # the shipped ``get_session`` path byte-for-byte (test matrix 5: zero behavior
         # delta for every caller that has no reserved pool).
         #
-        # FAIL-CLOSED (the owner's hard condition): if the reserved engine cannot be
+        # FAIL-CLOSED (a hard condition of the design): if the reserved engine cannot be
         # built, or a reserved connection cannot be checked out within
         # ``Backend.LIVENESS_POOL_TIMEOUT``, the raise below is NOT caught here — it
         # propagates through this middleware (the ``try`` at :806 has no ``except``) to

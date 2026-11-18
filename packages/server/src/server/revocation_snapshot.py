@@ -216,7 +216,7 @@ def note_stale_refusal(site: str = POLL_REFUSAL_SITE) -> None:
 def snapshot_is_stale(snapshot: RevocationSnapshot | None, *, now_mono: float) -> bool:
     """THE single staleness decision: ``age >= ceiling`` refuses.
 
-    ``>=`` is the owner's ruled boundary (2026-10-15, verbatim: ">= — refuse at exactly
+    ``>=`` is the ruled boundary (2026-10-15, verbatim: ">= — refuse at exactly
     the ceiling"), conservative at the boundary tick for the same reason every other
     rule on this plane is: one extra honest 503 costs a request, while one answer
     served past its warrant costs a stale all-clear on the revocation plane. A missing
@@ -365,7 +365,7 @@ def read_relay_populations(db: Session) -> list[str]:
 
     NOTE for #586: this is the population a relay listener can match its PEER against.
     It is keyed on registry MEMBERSHIP, and nothing here makes list age a stop condition
-    at that door — the availability trade stays #586's and the owner's.
+    at that door — the availability trade stays #586's, still open.
     """
     if not _publisher_running:
         with bounded_read(db, site="poll/fallback-read"):

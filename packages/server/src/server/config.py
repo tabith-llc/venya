@@ -209,7 +209,7 @@ class CRLConfig(BaseModel):
         on a 5-minute schedule.
 
         Why the anchor is the MAXIMUM leaf lifetime across both revocation populations, not just
-        the wired one (lead ruling, leg 286 / F2, on the owner's own clause "even if the exemption
+        the wired one (a ruled clause, F2: "even if the exemption
         is ever reverted"): a path getting wired later IS that future change, and a guard that
         validates only today's wired call site is dead weight the moment ``AdminCAManager`` gains a
         caller — with nobody left to remember to add it. So:

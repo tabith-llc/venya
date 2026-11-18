@@ -23,7 +23,7 @@ three states the shipped seam names itself therefore still cost the loop real ti
   time while the executor that asked has already gone at 10 s (``NetworkConfig.request_timeout_seconds``);
 * the seam's own unbonded branches: a non-PostgreSQL dialect yields with no bound at all, and a bind
   that CANNOT report its dialect yields too — counted and journalled by ``note_unbounded_dialect``,
-  decided by the owner and not by this module (#704 carries that row).
+  decided outside this module, not by it (#704 carries that row).
 
 So the two layers are not alternatives and this one does not supersede the other: the seam makes a
 stall REFUSABLE, this module makes it NON-FREEZING. Moving the read to a worker thread is what keeps

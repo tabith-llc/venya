@@ -836,7 +836,7 @@ def _dial_crl_verdict_for(exc: ssl.SSLError) -> tuple[int, int, str] | None:
     The strings are the point of the function: 23 alone may say "revoked" — it is
     the only code that ASSERTS a revocation. 3 and 12 say the LIST is unavailable
     or expired and must not read as a revocation event, per the #603 lesson and
-    the owner's ruled refusal-everything posture.
+    the ruled refusal-everything posture.
     """
     code = getattr(exc, "verify_code", 0)
     if code == _X509_V_ERR_CERT_REVOKED:
@@ -1924,7 +1924,7 @@ async def execute_command_on_executor(
             detail=f"Executor '{id}' is revoked ({_rev.reason}) — refusing to route execution",
         )
 
-    # Dial gate #2b (#586 change C — the owner's ruled status split): a revoked
+    # Dial gate #2b (#586 change C — the ruled status split): a revoked
     # credential is a 403, answered by the shared state immediately above; a
     # credential that CANNOT be dialled because the core holds no registered
     # certificate for it, or holds one that has expired, is an operational fault =

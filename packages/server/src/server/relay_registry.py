@@ -17,7 +17,7 @@ THE INVARIANT THIS MODULE HOLDS: a relay credential that exists on disk exists i
 ``core_relay_credentials``. It is enforced here, at core startup, rather than by
 editing the mint step, for two reasons that are not stylistic:
 
-  1. ``install-venya-core.sh`` is owner-ok-gated per specific change (root AGENTS.md,
+  1. ``install-venya-core.sh`` is approval-gated per specific change (the product rule,
      "Installer scripts"), so the write cannot ship in this changeset. It is drafted
      as a proposal in the leg report instead.
   2. An installer-only write would cover only credentials minted by a NEW installer.
