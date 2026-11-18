@@ -386,7 +386,7 @@ and the #628 history follow.
   is the hash in the `<tarball>.sha256` sidecar lying beside that tarball, read the way it is
   read anywhere — `cut -d' ' -f1 venya-cli-install.tar.gz.sha256`. A served hash changes with
   every build, and an address written into a page goes stale the first time the server moves.
-  This is the same derivation [full-lifecycle-test.md](full-lifecycle-test.md) already uses
+  This is the same derivation the full-lifecycle run uses
   (`http://$BUILD_HOST_IP:8080/<tarball>` with `VENYA_TARBALL_SHA256=$CLI_SHA`), and it is not
   optional here either: on an `http` origin the installer **requires** that hash and aborts
   before any fetch or write without it (#375, #328).
@@ -480,7 +480,6 @@ these surfaces, each in its own voice, and this page is the pointer that gathers
 | [installation.md](installation.md) | the Windows workstation install/use split and the ceremony rule under it; the four-command workstation sequence |
 | [faq.md](faq.md) | "What platforms are supported?" and the expired-admin-credential answer |
 | [FIREWALL.md](FIREWALL.md) | the local/no-network row for enrollment and login ceremonies |
-| [full-lifecycle-test.md](full-lifecycle-test.md) | the Windows workstation variant inside the lifecycle run |
 | [beta-known-limitations.md](beta-known-limitations.md) | the theft-window framing, and the no-request-ceremony entry |
 | [cert-rotation-runbook.md](cert-rotation-runbook.md) | what a renewed pair can and cannot serve today |
 | [cli-reference.md](cli-reference.md) | the flag tables (generated — never hand-edited) |

@@ -4,11 +4,11 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""RF-8a CP-B — the §4.4 helpful expiry refusal, landed at the admin dial seam.
+"""RF-8a CP-B — the helpful expiry refusal, landed at the admin dial seam.
 
-Design record: docs/design/rf6-shortcert-dossier-20261007.md §4.4 (the six ruled
-properties), §4.6 (the no-automatic-ceremony boundary, stated as a testable rule)
-and §5.7 (the CLI-advises / core-decides asymmetry).
+Rule set: the six ruled properties of a short-lived admin certificate, the
+no-automatic-ceremony boundary stated as a testable rule, and the CLI-advises /
+core-decides asymmetry.
 
 The guard lives inside the lazy transport builder ``APIClient._http``, in the build
 branch — the SAME seam the landed #530 anchor refusal and #521 scheme refusal use.
@@ -17,7 +17,7 @@ EVERY command before it dispatches, so an eager raise would brick the very repai
 refusal names. ``TestSetupStillConstructs`` is the anti-regression pair — every cell
 in it FAILS if the guard moves to construction.
 
-Because the refusal lands before ``httpx2.Client`` is ever constructed, §4.6's
+Because the refusal lands before ``httpx2.Client`` is ever constructed, the
 one-attempt boundary is directly observable: a transport factory that explodes on
 construction proves nothing left the machine, and the guard is consulted exactly once
 per attempt — no ceremony, no retry loop.

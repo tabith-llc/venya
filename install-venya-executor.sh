@@ -777,7 +777,9 @@ info "Executor config written to /etc/venya/executor.toml"
 # secret in a root-owned file is what makes the mode the control.
 # MEASURED: the core installer's EnvironmentFile is 0640 root:venya, NOT 0600
 # venya-owned (install-venya-core.sh, the venya-core.env write). Copied deliberately,
-# per the correction booked in docs/design-fido2-keywrap.md section 6.
+# so both carriers keep one mode and one owner: root writes it, the service group
+# reads it, and systemd delivers the passphrase into the service environment before
+# the daemon starts. One shape on both planes is the point of copying it.
 # AC4 (#738): this carrier follows the same rule as executor.toml, so an operator
 # cannot be left with one file that preserves and one that silently does not. Only
 # the passphrase line is installer-owned; every other VENYA_ line in the incumbent

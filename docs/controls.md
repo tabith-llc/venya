@@ -124,8 +124,8 @@ here* and `docs/beta-known-limitations.md`.
 
 **Limits a reader should not infer past.** The protection is against the **application path**, not
 against a PostgreSQL superuser on the host, and there is no hash chain or per-record signature — so
-"tamper-evident" is stronger than what ships, and this page does not use it. `docs/auditor-role.md`
-carries the tier and review-surface detail.
+"tamper-evident" is stronger than what ships, and this page does not use it. The tier's
+review surface is what the row above states: scope is enforced server-side, not configured.
 
 ---
 
@@ -144,9 +144,9 @@ so the absence is legible rather than implied.
 - **Audit export, SIEM or alerting integration.** Nothing ships. The trail is queryable and forwarded
   to the core over CA-mandatory HTTPS; no notifier, webhook or collector format exists in the tree.
   *Missing (planned)*, and no row here implies otherwise.
-- **The pre-deploy gate as a product control.** `docs/deploy-gate.md` documents an operator procedure;
-  no enforcement symbol exists in `packages/`, so it is not a control this page can cite. Searching
-  for one at `564583eb` returned nothing to hang a command on.
+- **The pre-deploy gate as a product control.** This is an operator procedure, not a product
+  control: no enforcement symbol exists in `packages/`, so it is not a control this page can cite.
+  Searching for one at `564583eb` returned nothing to hang a command on.
 - **Backup-by-restore-drill.** `docs/BACKUPS.md` states the requirement and the drill. The mechanism
   that re-encrypts CA backup material exists (`packages/cli/src/venya_cli/commands.py::_derive_ca_backup_key`),
   but proving a restore works is a ceremony with hardware keys and a live core, not a one-command check.

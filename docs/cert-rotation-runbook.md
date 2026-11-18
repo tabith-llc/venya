@@ -339,9 +339,10 @@ written by an EARLIER release is plaintext on disk and still reads normally; the
 requirement applies to the next write, so set the passphrase once and rotate.
 
 This is disk protection by a file passphrase, **not** hardware-key custody: the
-passphrase lives on the host, delivered through the service environment. The interim
-exemption and its retirement trigger are written up in
-`docs/design-fido2-keywrap.md` §6.
+passphrase lives on the host, delivered through the service environment. The shape is
+interim: it retires when a production-capable fleet host has authenticator attachment
+(USB passthrough), or when a CSR-shaped lifecycle means private material never lands on
+the host.
 
 `renew` authenticates with the CURRENT cert — run it while the cert is still valid
 (the same 3-day window the daemon uses). If the cert already expired, re-register

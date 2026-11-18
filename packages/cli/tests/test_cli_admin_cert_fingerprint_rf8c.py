@@ -6,7 +6,7 @@
 
 """RF-8c — fingerprint-triggered TLS context rebuild at the `_http` choke point.
 
-Design authority: `docs/design/rf6-shortcert-dossier-20261007.md` §4.3. The mechanism
+Design authority: the RF-8c fingerprint rule. The mechanism
 it designs against is real and quiet: `load_cert_chain` copies the chain into the
 OpenSSL context AT BUILD TIME, and the built client is cached until `close()`. So
 rewriting the certificate file under a live process changes nothing that process will

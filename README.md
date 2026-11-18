@@ -51,10 +51,9 @@ the doc that governs it, and you can hold the code to it.
   are recorded for every step; an admin or an auditor-tier caller querying `get_audit`
   sees the whole log and everyone else sees only their own events, enforced server-side.
   Reading a secret value is a separate, elevation-gated act that writes its own audit
-  event — [docs/architecture.md](docs/architecture.md) "Secret lifecycle", and the tier
-  itself in [docs/auditor-role.md](docs/auditor-role.md).
-- **Change and recovery governance.** Deployed bytes trace to committed source
-  ([docs/deploy-gate.md](docs/deploy-gate.md)), and backup is validated by a restore drill
+  event — [docs/architecture.md](docs/architecture.md) "Secret lifecycle".
+- **Change and recovery governance.** Deployed bytes trace to committed source,
+  and backup is validated by a restore drill
   rather than by a file existing ([docs/BACKUPS.md](docs/BACKUPS.md)).
 - **Every control above, one row at a time, with the command that re-derives it:**
   [docs/controls.md](docs/controls.md) states each mechanism as `file:symbol`, names the commit it
@@ -255,8 +254,7 @@ denials are logged, auditors see the full trail including their own
 denials), and PCI DSS **10.2.1** (failed-access logging) — aligned with,
 not certified by; attestation requires an assessor. Auditor-tier holders
 see the full audit log (all users' events), like the `admin` role; other
-callers see only their own events. Details:
-[docs/auditor-role.md](docs/auditor-role.md).
+callers see only their own events.
 
 ---
 
@@ -412,11 +410,9 @@ the unit suites across all six packages (cli / core / server / executor / mcp /
 venya-contract, Python 3.14) are green — absolute counts deliberately live in
 the per-release records, not here (they rot with every merge).
 
-- **Run it yourself:** the [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md)
-  is fully self-contained — commands, gates, failure modes, verification
-  queries, results template — and ships with an
-  [interactive MCP driver](docs/mcp-manual-drive.py) so you can drive the
-  tools by hand and see the redaction proof yourself.
+- **Run it yourself:** an [interactive MCP driver](docs/mcp-manual-drive.py) speaks the
+  protocol over stdio exactly like an LLM client would, so you can call each tool by hand
+  and see the redaction proof yourself.
 - **Verified MCP clients:** [opencode](https://opencode.com) and local LLMs
   via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
 - **Hardware:** FIDO2 ceremonies verified with Yubico Security Keys.
@@ -485,13 +481,11 @@ Visit [venya.ai](https://venya.ai/) to learn more or apply for beta access.
 |----------|-------------|
 | [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo |
 | [Example Workflow](docs/example-workflow.md) | Narrated incident-response walkthrough — every MCP call and its exact output |
-| [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md) | A-Z validation from clean hypervisor to MCP use-a-secret proof |
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
 | [Beta Known Limitations](docs/beta-known-limitations.md) | What works in a beta release, what does not yet, and what an operator does about each |
 | [CLI Reference](docs/cli-reference.md) | Every `venya` command and argument — generated from the parser, test-enforced against drift |
 | [Architecture](docs/architecture.md) | Technical deep dive |
 | [Deployment Configuration](docs/deployment-config.md) | Required config fields, env-var mapping, validation timing |
-| [The Auditor Role](docs/auditor-role.md) | The auditor permission tier: full audit visibility, no secret values, audited denials |
 | [Making Venya Easier to Use](docs/ease-of-use.md) | Deliberate relaxations: the scp worked recipe, per-knob gain/loss catalog, the never-relax list |
 | [Deployment Sizing Guide](docs/deployment-sizing.md) | How many executors you need + measured CPU/RAM/disk/throughput figures |
 | [Cert & Key Rotation Runbook](docs/cert-rotation-runbook.md) | Rotation procedures for every certificate and key, source-cited |

@@ -146,9 +146,9 @@ class TestDocsTeachTheValidatingShape:
     DOC_GLOBS = ("README.md", "docs/**/*.md")
 
     #: Placeholders that name the DECIMAL primary key, as opposed to the secret's key
-    #: name. `<pk>`/`<SECRET_PK>` are legal here because the page that uses them defines
-    #: them in the same sentence (full-lifecycle-test.md: "`pk` = the integer DB primary
-    #: key, not the key name"); `<decimal-id>` is the corrected canon.
+    #: name. `<pk>`/`<SECRET_PK>` are legal here because the sentence that uses them
+    #: defines the term — "`pk` = the integer DB primary key, not the key name" — and
+    #: that definition is carried here now; `<decimal-id>` is the corrected canon.
     DECIMAL_PLACEHOLDERS = frozenset({"<decimal-id>", "<pk>", "<SECRET_PK>", "<SECRET_ID>"})
 
     def test_no_documentation_teaches_a_name_shaped_target(self):

@@ -13,11 +13,11 @@ every installed executor, while every consumer of that file was written
 passphrase-blind (the load half of the pair: a file nobody can unlock is as dead
 as one anybody can read).
 
-The posture is ruled, not re-decided here. R7-Q3 (`decisions.md` commit
-`1bf25ae`, quoted in `docs/design-fido2-keywrap.md` §6) makes a **file
+The posture is a requirement, not a choice made here. #565 AC3 makes a **file
 passphrase delivered through the service environment** the interim shape for
 these unattended sites — disk protection, explicitly **not** hardware custody —
-and forbids a partial ship: the read side lands in this same changeset or neither
+and AC4 forbids a partial ship and any silent fallback to plaintext: the read side
+lands in this same changeset or neither
 side does. Hence the reader classes below; they are the other half of the ruling,
 not scope creep.
 

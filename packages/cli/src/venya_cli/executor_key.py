@@ -16,11 +16,12 @@ aligned copy: the CLI carries no dependency on the executor or server package
 here and pinned from the other side by
 ``packages/cli/tests/test_executor_key_envelope_parity_565.py``.
 
-Posture, in one line, from R7-Q3 (`decisions.md` commit `1bf25ae`, quoted in
-``docs/design-fido2-keywrap.md`` §6): a file passphrase is DISK PROTECTION,
-not hardware custody — the retirement trigger is a fleet host with authenticator
-attachment or a CSR lifecycle in which private material never lands on the host.
-Nothing here may be described as a hardware key.
+Posture, in one line: a file passphrase is DISK PROTECTION, not hardware custody.
+The retirement trigger is a fleet host with authenticator attachment, or a CSR
+lifecycle in which private material never lands on the host. Nothing here may be
+described as a hardware key. When no passphrase is available the writer refuses
+before any filesystem work: no directory created, no staged temp, no half-written
+key, and never a silent fallback to plaintext (#565 AC3, AC4).
 """
 
 import os
