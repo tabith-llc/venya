@@ -10,14 +10,11 @@ The executor's own leaf key (`mtls.key`) used to be serialized with
 ``serialization.NoEncryption()`` at every writer — the daemon's
 ``CertificateManager.register``/``rotate`` and the workstation CLI's
 ``venya exec register``/``venya exec cert renew`` — so the private half of the
-identity sat in the clear on the executor host. The owner's option-B word
-(2026-10-09, "unencrypted key delivery is a defect that needs fixing") keeps
-those writers in the fix set, and R7-Q3 (`decisions.md`, booked at commit
-`1bf25ae`) rules the shape for these unattended sites: a **write-time ceremony
+identity sat in the clear on the executor host. Those writers stay in the fix set,
+and the shape for these unattended sites is a **write-time ceremony
 plus a file passphrase delivered by a root-only systemd `EnvironmentFile`**.
 
-Read this module's posture out of `docs/design-fido2-keywrap.md` §6 before
-editing it. Two of its clauses bind the code here:
+Two clauses bind the code here, and a third is the writer's own contract:
 
 * **"This is NOT hardware custody."** The passphrase lives on the host. The
   model is disk protection with an honest label, and the label discipline is
@@ -27,6 +24,9 @@ editing it. Two of its clauses bind the code here:
   production-capable fleet host has authenticator attachment (USB passthrough),
   or when a CSR-shaped lifecycle means private material never lands on the host.
   Do not "improve" this into a permanent design; open the ruling instead.
+* **No passphrase, no write.** A missing or sub-floor passphrase is a refusal that
+  lands BEFORE any filesystem work: no directory, no staged temp, no half-written
+  key, and never a silent fallback to plaintext (#565 AC3, AC4).
 
 The codec is an ALIGNED COPY of the server's CA-plane shape
 (``packages/server/src/server/ca.py``: ``_configured_passphrase`` /

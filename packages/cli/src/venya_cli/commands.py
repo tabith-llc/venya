@@ -1836,13 +1836,13 @@ def _require_https_server_url(server_url: str, *, site: str, ticket: str, detail
 
 # --- Admin certificate: read-local parse + the ONE expiry refusal wording (RF-8a) ---
 #
-# Design record: docs/design/rf6-shortcert-dossier-20261007.md §4.4 (the helpful
-# refusal) and §4.5 (the lifetime-readable check). Both halves read ONE file — the
-# admin CERTIFICATE — and never the private key, never the network. The wording
-# lives here, beside `_https_refusal`, because the dossier's own precedent is
-# "one wording, reused not copied": `venya admin cert status` and the pre-dial
-# guard in `APIClient._http` print the SAME sentence rather than hand-copying two
-# variants that would rot apart.
+# Rule (RF-8a): one helpful expiry refusal, and one read-local lifetime check. Both
+# halves read ONE file — the admin CERTIFICATE — and never the private key, never the
+# network. The wording lives here, beside `_https_refusal`, because one wording is
+# reused rather than copied: `venya admin cert status` and the pre-dial guard in
+# `APIClient._http` print the SAME sentence rather than hand-copying two variants
+# that would rot apart, and a copied pair is how the two halves would drift. The
+# refusal is advice; the decision stays on the core side of the dial.
 
 
 def _admin_cert_info(cert: x509.Certificate) -> dict[str, Any]:

@@ -1206,8 +1206,7 @@ the lists below.
   enrollment token is not consumed. Keys written by earlier releases are plaintext on
   disk and keep loading unchanged — the requirement lands on the next write. This is
   disk protection by a file passphrase, not hardware-key custody; the interim shape
-  and its retirement trigger are recorded in `docs/cert-rotation-runbook.md` §2 and
-  `docs/design-fido2-keywrap.md` §6.
+  and its retirement trigger are recorded in `docs/cert-rotation-runbook.md` §2.
 - **End-to-end mTLS: client identity is crypto-verified at the app.** Admin
   and executor mTLS now read identity from the client certificate the app
   verifies itself (forwarded by nginx over the new inner nginx→uvicorn mTLS
@@ -2097,7 +2096,7 @@ the lists below.
 
 ### Added
 
-- Full-lifecycle test plan (`docs/full-lifecycle-test.md`) and interactive MCP
+- Full-lifecycle test plan and interactive MCP
   driver (`testing/mcp_manual_drive.py`): reproducible A-Z validation from a
   clean hypervisor to the MCP use-a-secret redaction proof, operator-run.
   Verified with opencode and local-LLM (omlx.ai) clients; two live PASS runs

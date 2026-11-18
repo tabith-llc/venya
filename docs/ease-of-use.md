@@ -264,4 +264,4 @@ that limits what a misled or compromised sandboxed command can carry away.
 *How to read the rest of the docs from here: security behavior in depth is
 in [architecture.md](architecture.md) and the [FAQ](faq.md); the full
 configuration surface is in [deployment-config.md](deployment-config.md);
-the forced-default end of the spectrum is the [auditor role](auditor-role.md).*
+the forced-default end of the spectrum is the auditor tier, whose review scope is enforced server-side — [controls.md](controls.md).*

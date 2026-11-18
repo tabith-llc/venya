@@ -6,7 +6,7 @@
 ea74048d7eab7bfcc17e131983c9ae6e0f31a9355aa04b18928b24058d88b6f1  install-venya-cli.ps1  served Windows installer, conditional by ref
 8ce6b0d599b5f7df2537b3c3303eda7330410b4963ecbe4fb6c79266517370bc  install-venya-cli.sh  served installer, workstation
 0703ee63aa139103dd5040f479cc383c83c5ff45d00753d5d5eea5b86766076d  install-venya-core.sh  served installer, root-run
-57e4e25e7a0eac148565d5fb6ec458c75f39c7cec68e53c8534efbb992bff448  install-venya-executor.sh  served installer, root-run
+830cd235a69ce59f51f88fb160f508686e2c3915a36c8fc549ea329beece1f69  install-venya-executor.sh  served installer, root-run
 2ad8c5372e31202ffbdd4d86f14e705979fa142a99617c06546fc2cee14c8dd6  scripts/deploy-record.sh  repo build helper, not served
 6af34d944411831186653b56058f10e36bf09befa04ff3f82ada6cb38d08263f  scripts/pin-requirements.sh  repo build helper, not served
 42f94eadafac4ade3ba0db5b05b3f3bd1971c41904c637e17dc7d6acca6a8522  uninstall-venya-cli.ps1  served Windows uninstaller, conditional by ref

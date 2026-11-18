@@ -821,7 +821,7 @@ class APIClient:
             # The cert is public — no mode warning there.
             _warn_if_loose_admin_key(key_path)
         # Server-TLS verification precedence: SSL_CERT_FILE env wins (the
-        # full-lifecycle-test.md and cert-rotation-runbook flows drive the CLI
+        # full-lifecycle and cert-rotation runs drive the CLI
         # that way); then the CA installed by `venya setup` beside config.json.
         # Ticket cli-bearer-dial-falls-back-to-host-store (#530) removed the
         # third historical branch — "then system trust" — so a name with no

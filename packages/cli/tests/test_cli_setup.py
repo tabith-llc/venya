@@ -11,7 +11,7 @@ setup = save server URL + fetch/install the core CA cert. Every gate gets a
 paired negative: garbage body, 404 (not-a-venya-core), unreachable host, pin
 mismatch. The precedence cells pin the load-bearing negative both ways:
 SSL_CERT_FILE env set + ca.crt on disk -> env still wins (keeps the
-full-lifecycle-test.md and cert-rotation-runbook flows working); no env +
+full-lifecycle and cert-rotation runs working); no env +
 ca.crt present -> the setup-installed CA is used.
 """
 

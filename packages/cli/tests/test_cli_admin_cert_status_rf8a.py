@@ -4,9 +4,9 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""RF-8a CP-A — `venya admin cert status`: the read-local lifetime check (dossier §4.5).
+"""RF-8a CP-A — `venya admin cert status`: the read-local lifetime check.
 
-The owner's ruling on 4b is that a headless job must be able to pre-flight its own
+The rule on 4b is that a headless job must be able to pre-flight its own
 credential WITHOUT a ceremony hiding inside the check. So this command reads ONE file
 (the admin certificate), prints minutes remaining, and stops. The load-bearing
 property is not the printing — it is that nothing else happens: no request, no
@@ -17,7 +17,8 @@ here is paired with the case that must NOT be answered the same way — missing 
 unreadable file, expired file, future-dated file, no path configured, and the
 `--within` advisory that must never change the exit code.
 
-Design record: docs/design/rf6-shortcert-dossier-20261007.md §4.4-§4.6, §5.6.
+Rule of record: the lifetime check stays read-local, prints minutes remaining, and
+starts nothing (RF-8a CP-A).
 """
 
 import datetime

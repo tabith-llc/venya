@@ -54,7 +54,7 @@ WORKSTATION_SSH = _require_env("VENYA_TEST_WORKSTATION_SSH", "user@workstation")
 WORKSTATION_TARBALL_SCRIPT = _require_env("VENYA_TEST_TARBALL_SCRIPT", "/path/to/create-tarball-and-serve.sh")
 WORKSTATION_REMOVE_KNOWN_HOSTS = _require_env("VENYA_TEST_REMOVE_KNOWN_HOSTS_SCRIPT", "/path/to/remove_known_hosts.sh")
 
-# VM access (fleet naming convention per docs/full-lifecycle-test.md)
+# VM access (fleet naming convention: venya-core-<n>, venya-exec-<n>, venya-target-<n>)
 CORE = os.environ.get("VENYA_TEST_CORE_SSH", "bot@venya-core-1")
 EXEC = os.environ.get("VENYA_TEST_EXEC_SSH", "bot@venya-exec-1")
 TARGET = os.environ.get("VENYA_TEST_TARGET_SSH", "bot@venya-target-1")
