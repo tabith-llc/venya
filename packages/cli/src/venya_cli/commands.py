@@ -1814,7 +1814,7 @@ def _require_https_server_url(server_url: str, *, site: str, ticket: str, detail
     """One shared https:// scheme guard for every place the CLI dials a core URL.
 
     Plaintext http is REJECTED — never downgraded, never warned-and-continued. That
-    is the owner ruling on ``sec-sweep-low-informational`` #17 (2026-09-21), which
+    is the ruling on ``sec-sweep-low-informational`` #17 (2026-09-21), which
     the executor heartbeat has carried since; the renew / register / setup /
     config-write sites are being brought onto the same rule rather than inventing
     one (#497 #506 #508 #509).
@@ -2100,8 +2100,8 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
 
     Output discipline is RF-8a's: the readout on stdout ending `STATUS: OK`, every
     refusal on stderr with a non-zero code, and no private key material in either. The
-    key is written ENCRYPTED with `VENYA_ADMIN_CA_KEY_PASSPHRASE` (#547a — the owner
-    ruled the passphrase requirement extends to the admin's private key), and both the
+    key is written ENCRYPTED with `VENYA_ADMIN_CA_KEY_PASSPHRASE` (#547a — ruled that
+    the passphrase requirement extends to the admin's private key), and both the
     refusal and the success readout say so plainly. The dial that presents the pair opens
     that encrypted key with the same variable (#565 Part B), so a renewed pair is usable
     for admin mTLS wherever the variable is set.
@@ -4926,8 +4926,8 @@ def _admin_ca_passphrase_or_none() -> str | None:
 
     Unset, empty and whitespace-only all count as "no passphrase": a value made only of
     spaces carries no material, so encrypting a CA key with it is decoration, and the
-    #547 refusal it used to slip past is exactly the check it defeats. The owner ruled
-    this batch as *deny whitespace* ("whitespace-only passphrase should not be
+    #547 refusal it used to slip past is exactly the check it defeats. The ruling is
+    *deny whitespace* ("whitespace-only passphrase should not be
     acceptable"), the same shape the server's ``ca.py`` ``_load_passphrase()`` now uses.
 
     DENY, never TRIM: an acceptable value is returned byte-for-byte, so a passphrase
@@ -5371,7 +5371,7 @@ def _admin_ca_plaintext_key_refusal() -> str:
     return "\n".join([lines[0], references[0]])
 
 
-#: #572 — the owner-approved refusal for a wrong passphrase on the admin CA key, recorded verbatim
+#: #572 — the approved refusal for a wrong passphrase on the admin CA key, recorded verbatim
 #: in the ruling (room dispatch 37 / the dispatch's §2, single-quoted there for exactness). This is the
 #: ONE hand-written home of those bytes in the product tree — the refusal below and the test cells
 #: read this constant, so a future edit changes the voice in a single place instead of chasing
@@ -5453,7 +5453,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
 
     Generates a new ECDSA P-256 keypair, signs it with the admin CA, and writes the
     cert and the key to the output directory. The key is written encrypted with
-    ``VENYA_ADMIN_CA_KEY_PASSPHRASE`` (#547a — the owner ruled that the passphrase
+    ``VENYA_ADMIN_CA_KEY_PASSPHRASE`` (#547a — ruled that the passphrase
     requirement extends to the admin's own private key); with that variable unset,
     empty, or whitespace-only — or set but shorter than the #573 floor — the command
     refuses before touching the filesystem.
@@ -5634,7 +5634,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         # Write the key ENCRYPTED (#547a). This replaced the shipped line
         # `# Write key (unencrypted — operator manages security)`, which stated the old
         # posture: the key went to disk in the clear and the operator was trusted to
-        # guard it. The owner ruled that the passphrase requirement extends to the
+        # guard it. The passphrase requirement extends to the
         # admin's private key, so the CLI applies it rather than deferring to operator
         # habit — and it says plainly, below, that the resulting pair is not yet
         # mTLS-loadable by this CLI.
