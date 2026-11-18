@@ -270,7 +270,7 @@ SHELL_METACHARS = set("\x00|;&$`(){}<>!*?\n\r")
 #: The six coarse character classes of ticket metacharacter-refusal-names-no-index-or-character-class
 #: (#713), in the order that row enumerates them, each with the members of `SHELL_METACHARS` it
 #: covers. The refusal names the element index and EVERY class an element trips, comma-joined in
-#: THIS order (owner ruling on #713, form B) — so the list is a tuple, not a dict: iteration order
+#: THIS order (ruled on #713, form B) — so the list is a tuple, not a dict: iteration order
 #: is part of the ruled contract, and a dict's would silently depend on insertion.
 #: It is a partition of the set, disjoint and total (measured: union == SHELL_METACHARS, no pair
 #: overlaps), which is what lets the sentence name classes instead of characters without losing a
@@ -823,7 +823,7 @@ class Executor:
         # Validate command structure (rejects shell metacharacters).
         # REDUNDANT with execute() step 1a's gate — kept deliberately:
         # the refactor-5 guardrail that locked the two paths apart is OVERTURNED
-        # (owner ruling 2026-10-10 via dispatch 9-0b3405, #471: the dead
+        # (ruled 2026-10-10, #471: the dead
         # inject_via_* set was deleted under that grant), and this path is not
         # the product path — so the guard stays because divergence is still the
         # thing #374 ruled out, not because a lock is left standing. ALIGNED to the

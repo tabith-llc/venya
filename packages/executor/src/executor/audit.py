@@ -495,7 +495,7 @@ class AuditLogger:
         string ``verify=`` combined with ``cert=``, so the CA anchors and the
         executor mTLS client cert chain live in a single SSLContext.
 
-        Trust set (#531, owner ruling 2026-10-07): the configured
+        Trust set (#531, ruled 2026-10-07): the configured
         ``ca_cert_path`` is the ONLY anchor — this dial never loads the host
         trust store. The retired ``else: ctx.load_default_certs()`` meant an
         audit row could be posted to whatever a publicly-issued certificate

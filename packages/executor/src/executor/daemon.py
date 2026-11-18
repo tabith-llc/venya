@@ -566,12 +566,12 @@ class CertificateManager:
         local anchors a probe verifies only against the host store, which is the
         defect this closes.
 
-        RULED POSTURE (#531, owner ruling 2026-10-07): keeping the system store
+        RULED POSTURE (#531, ruled 2026-10-07): keeping the system store
         here is intentional and recorded, not an oversight — see the comment at
         the construction site below. The other two #531 dials (the audit
         forwarder and ``_create_mtls_client``) are tightened; this one stands.
         """
-        # RULED POSTURE (owner, 2026-10-07, refs #531): this context keeps the OS trust store loaded on
+        # RULED POSTURE (2026-10-07, refs #531): this context keeps the OS trust store loaded on
         # purpose — it serves customer bring-your-own-certificate leaves. Do not "tighten" it without a
         # written revision of that ruling. See features/bring-your-own-certificate.md.
         ssl_ctx = ssl.create_default_context()
@@ -1760,7 +1760,7 @@ class ExecutorDaemon:
         a raw traceback (ticket refactor-1-config-consolidation residual —
         same fail-loud pattern as the deaf-boot guard).
 
-        Trust set (#531, owner ruling 2026-10-07): the configured Venya CA
+        Trust set (#531, ruled 2026-10-07): the configured Venya CA
         (``mtls.ca_cert``) is the ONLY anchor. This used to start from
         ``ssl.create_default_context()``, which loads the HOST trust store and
         then only ADDS our anchor with ``load_verify_locations()`` — so the
@@ -2296,7 +2296,7 @@ class ExecutorDaemon:
     def _maybe_apply_server_policy(self, data: Any, source: str) -> None:
         """Apply a core-propagated command policy if present and changed.
 
-        Ticket command-policy-no-server-executor-propagation (owner ruling (a)
+        Ticket command-policy-no-server-executor-propagation (ruled (a)
         2026-09-26): the server's 'default' policy row rides the registration
         and heartbeat responses; this is the consumer that makes
         `set-command-policy`/`add-allowed-command` actually enforce.
