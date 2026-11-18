@@ -304,7 +304,7 @@ class ExecuteHandler(BaseHTTPRequestHandler):
 
 # --- #586 accept gate: the two refusal classes, named ------------------------------
 # A refused connection never receives an HTTP response (the refusal happens before
-# a single request byte is read), so the owner's ruled status split lives in these
+# a single request byte is read), so the status split lives in these
 # STRINGS: 403 = revoked, 503 = operational fault. A 3 a.m. reader must be able to
 # tell "this credential was killed" from "this daemon cannot tell either way".
 #
@@ -450,7 +450,7 @@ def peer_revocation_refusal(state: Any, peer_serial: str | None) -> str | None:
     arm here: the list this matches against is refreshed by the same ~30 s poll that
     answers the executor's own revocation question, and adding an age-based stop to a
     door whose revocation source is a 1-hour-stamped artifact is the fleet-wide outage
-    #586 measured and the owner has not agreed to. Refusing an unknown peer would be the
+    #586 measured and not yet accepted. Refusing an unknown peer would be the
     other failure: the CN allowlist, not this set, decides who may connect at all.
 
     ``peer_serial`` is the presented client certificate's serial in ANY spelling; both
@@ -581,7 +581,7 @@ class _RelayHTTPServer(ThreadingHTTPServer):
                 reason = peer_executor_revocation_refusal(self.revocation_state, peer_serial)
         if reason is None:
             return tls_conn, addr
-        # Post-handshake refusal — the owner's option 3, and its named window: the
+        # Post-handshake refusal — option 3, and its named window: the
         # credential was admitted by the handshake and is refused here, before any
         # request bytes. ConnectionRefusedError is an OSError, which is the shape
         # ``socketserver._handle_request_noblock`` already swallows from this hook.
@@ -615,7 +615,7 @@ class RelayListener:
 
     ``ThreadingHTTPServer`` + a ``threading.Semaphore(cap)`` admission permit,
     taken in the handler around the execution section (RF-3). ``cap`` comes from
-    the one knob, pinned by the owner 2026-10-11 as both
+    the one knob, pinned as both
     ``VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS`` (env) and
     ``[executor] max_concurrent_commands`` (TOML); the shipped default is **1**.
     The listener still runs in its own daemon thread so it never contends with
@@ -633,7 +633,7 @@ class RelayListener:
     holds a thread plus an fd while it waits. Pinned by
     ``tests/test_relay_threading_rf3.py``.
 
-    OPEN DECISION THAT GATES ANY DEFAULT ABOVE 1 (owner's call, recorded here so
+    OPEN DECISION THAT GATES ANY DEFAULT ABOVE 1 (deliberately unresolved, recorded here so
     the next reader does not re-derive it): WHERE the queue should live.
       (i)  backlog admission — a connection-level limit keeps refused-before-
            handshake at cap=1, but past ``request_queue_size`` it is a kernel
@@ -912,7 +912,7 @@ class RelayListener:
         NOT redesigned by this leg: what a *queued* (never-admitted) peer costs a
         shutdown — it is a daemon thread holding an open socket, released when
         the process exits. That analysis, and the order drain and admission
-        should take above cap=1, stay open with the owner's queue-location
+        should take above cap=1, stay open: the queue-location
         ruling.
         """
         self._draining.set()
