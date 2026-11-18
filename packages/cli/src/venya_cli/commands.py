@@ -1907,7 +1907,7 @@ def _parse_admin_cert(cert_path: str) -> dict[str, Any] | None:
 
     Reads ONLY the certificate. The private key is never opened: `status` must work
     with the cert file alone, and a lifetime readout has no business touching key
-    material (owner-ruled zero-mutation half of RF-8a).
+    material (ruled zero-mutation half of RF-8a).
     """
 
     from cryptography.x509 import load_pem_x509_certificate
@@ -1977,7 +1977,7 @@ def admin_cert_expiry_refusal(cert_path: str, *, site: str) -> str | None:
 def cmd_admin_cert_status(args: Any) -> int:
     """`venya admin cert status` — the readable lifetime of the local admin certificate.
 
-    Dossier §4.5 (owner-ruled addition to ruling 4b): a headless job must be able to
+    Dossier §4.5 (ruled addition to ruling 4b): a headless job must be able to
     pre-flight its own credential without hiding a ceremony inside the check. So this
     command reads ONE file — the admin CERTIFICATE named by ``--cert-path`` or
     ``VENYA_ADMIN_CERT`` — prints its remaining lifetime in MINUTES (the ruled unit: at
@@ -3455,7 +3455,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     # would choose what this host trusts from now on.
     #
     # The VENYA_TLS_VERIFY knob is not consulted here: it means "distrust this
-    # certificate over https", never "no TLS" (#506 ruling, owner ruling on
+    # certificate over https", never "no TLS" (#506 ruling, ruled on
     # sec-sweep-low-informational #17). isinstance guard: MagicMock args in the
     # sibling suites answer every attribute with a Mock, and a Mock is not a URL.
     if isinstance(server_url, str) and "://" not in server_url:
@@ -4951,7 +4951,7 @@ def _passphrase_has_material(passphrase: str) -> bool:
 
 # --- #573: the passphrase LENGTH floor on the CA plane (carrier n15) ---
 #
-# Owner ruling (s85 batch, verbatim): "Deny whitespace-only passphrases and enforce a
+# Ruled wording (verbatim): "Deny whitespace-only passphrases and enforce a
 # proper length passcode." The whitespace half shipped in #554; this is the length half,
 # ruled from `wave14-specs-20261009/passphrase-length-flash3-s84.md` and counted in
 # Unicode CODE POINTS on the decoded string BEFORE any encode (NIST SP 800-63B-4 counts
@@ -4987,7 +4987,7 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 
 
 def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
-    """Owner-blessed refusal text for a passphrase under the length floor (#573).
+    """Approved refusal text for a passphrase under the length floor (#573).
 
     The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
     ruling set) with only the two authorized corrections applied: the supported maximum
@@ -5243,7 +5243,7 @@ def _identity_forgery_error(identity: str) -> str | None:
 
 # --- #547a: the admin LEAF key gets the same passphrase requirement as the admin CA ---
 #
-# Owner ruling (2026-10-09 14:54): "passphrase shall extend to the admin's private key".
+# Ruled 2026-10-09: the passphrase requirement extends to the admin's private key.
 # Both writers of an admin private key — `admin generate-admin-cert` (the local CA mint)
 # and `admin cert renew` (the RF-8b core mint) — therefore refuse before writing when
 # `VENYA_ADMIN_CA_KEY_PASSPHRASE` is unset, empty, or whitespace-only, and write the key
