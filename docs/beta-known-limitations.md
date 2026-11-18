@@ -898,9 +898,8 @@ page claims the served-core recovery proof was run; that ask belongs to the trac
 ### Beta publishes no sizing table: the concurrency default is 1, and the load curve that would justify any higher number has not been run
 
 Status: known limitation in beta · Target: not scheduled — the bench needs a hand-driven run at a
-served guest's console ·
-Tracked as: the workspace carrier `features/RF-5-capacity-benchmark.md` (`class: REFACTOR — console
-bench`), whose publishable sizing table is out of beta scope (2026-10-14).
+served console · Tracked as: the workspace carrier `features/RF-5-capacity-benchmark.md`
+(`class: REFACTOR — console bench`), whose publishable sizing table is out of beta scope (2026-10-14).
 
 **What the limitation is:** the shipped default is `max_concurrent_commands = 1` — one relayed command
 at a time per executor, which is the sequential posture beta ships. **The mechanism above that value is
