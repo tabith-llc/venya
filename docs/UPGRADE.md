@@ -3,7 +3,7 @@
 **Provenance:** every command and expected-output line below was observed in a
 physical core-server upgrade drill (v0.1.0alpha15 → v0.1.0alpha16, 2026-09-29)
 unless the section is marked **not drill-exercised**. That drill ran on the pre-beta
-alpha line, which the owner withdrew on 2026-10-18 — the two names above are a dated
+alpha line, which is withdrawn — the two names above are a dated
 record of what was observed, not a release to install from. Pin the commands below to a
 published beta tag (`v0.1.0beta1` is the name the cut creates); never a pre-beta alpha
 tag. The drill evidence:
@@ -96,7 +96,7 @@ to the same release tag:
 ```bash
 TAG=v0.1.0beta1   # the tag you are upgrading to — published when the beta cut lands
 #   Do NOT pin a pre-beta alpha tag here (`v0.1.0alpha*`, `v0.1.0-alpha.*`): that line
-#   is withdrawn by owner order (2026-10-18). Read the release list for the tag that
+#   is withdrawn. Read the release list for the tag that
 #   exists today if the cut has not landed yet.
 curl -fsSL "https://github.com/tabith-llc/venya/releases/download/${TAG}/install-venya-core.sh" \
   | sudo VENYA_SKIP_PROMPT=yes \

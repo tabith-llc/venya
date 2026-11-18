@@ -32,7 +32,7 @@ cannot drift unremembered — `packages/server/tests/test_clock_skew_fraction_rf
 `assert ADMIN_SHORT_CERT_LIFETIME_SECONDS == 3600` in
 `TestToleranceFractionInterlock.test_lifetime_constant_is_the_ruled_60_minutes`.
 
-**What the hour is for.** The owner's reframe behind the design is recorded once, in
+**What the hour is for.** The design argument behind the hour is recorded once, in
 [beta-known-limitations.md](beta-known-limitations.md): because a revoked role is refused
 at the next request, **certificate lifetime is not the revocation mechanism — it is purely
 the theft window.** This page does not restate that argument; read it there.
@@ -242,21 +242,21 @@ paired rejection it must also prove, and, where it applies, the reason it is out
 
 | Cell | Status (the preflight reads under Cell 1 are dated `dev` `f0a2c3a` and are no longer a blocker) |
 |---|---|
-| 1 — installer ACL gate on a wildcard path (#493) | **POSITIVE HALF RUN/PASS at `664f267` · ZERO-ENUMERATION ARM RUN/PASS IN HARNESS · PROTECTED-DACL ARM RUN/PASS IN HARNESS (the second rejection line this guard has ever been seen to print) · INCOMPLETE ARM RUN IN HARNESS, NOT PRODUCIBLE FROM AN ELEVATED BODY (measured: the applied deny lands and the walk cannot see it) · COUNT-COVERAGE ANSWERED, NOT A COVERAGE GAP · PAIRED venyastd READABILITY HALF NOT RUN (owner console)** |
+| 1 — installer ACL gate on a wildcard path (#493) | **POSITIVE HALF RUN/PASS at `664f267` · ZERO-ENUMERATION ARM RUN/PASS IN HARNESS · PROTECTED-DACL ARM RUN/PASS IN HARNESS (the second rejection line this guard has ever been seen to print) · INCOMPLETE ARM RUN IN HARNESS, NOT PRODUCIBLE FROM AN ELEVATED BODY (measured: the applied deny lands and the walk cannot see it) · COUNT-COVERAGE ANSWERED, NOT A COVERAGE GAP · PAIRED venyastd READABILITY HALF NOT RUN (operator console)** |
 | 2 — the ceremony from an interactive desktop | **RUN AND PASSING (s124, session 2)** — evidence `8c73fc0c`, report `wave27-specs-20261015/ultra-rf8-cells23-s124-report.md`, target **core-3**, identity **`venya-adm3`** |
 | 3 — the renewal round trip | **RUN AND PASSING (s124, session 2)** — same evidence, same target and identity |
 
-> **What the guest gives, and what it does not.** The `win11` guest is a domain on the owner's
-> workstation, and that box is frozen for lanes: no lane boots, halts, defines or queries it
-> (`virsh` reads included) —
-> that stays the owner's. Its booted state, its PowerShell version and its installed CLI were
+> **What the guest gives, and what it does not.** The `win11` guest is a domain on a desk
+> machine, not a fleet host, and that box is frozen for lanes: no lane boots, halts, defines or
+> queries it (`virsh` reads included) —
+> that custody stays outside the fleet. Its booted state, its PowerShell version and its installed CLI were
 > read over SSH as `win` (rc=0) from the agent box; that read is the preflight table under
 > Cell 1. **That preflight is no longer the live face of the guest.** A current CLI has since
-> been installed on it (installs are the owner's act on every box) — the deployed build on the
+> been installed on it (installs are an operator act on every box) — the deployed build on the
 > target core carries the same version line, lead-corroborated, so **no reinstall is required
 > to reach this page's renewal route**; and a ceremony still needs a security key attached to
 > that machine and a person at its console — nothing that arrives over the network can stand in
-> for one. Both of those owner acts were performed for the run that closed cells 2 and 3.
+> for one. Both of those operator acts were performed for the run that closed cells 2 and 3.
 
 ### Cell 1 — the installer's ACL gate on a path containing wildcards (#493)
 
@@ -327,7 +327,7 @@ is sound and its number is a moment.
 
 **PAIRED HALF — NOT RUN.** What still belongs to this cell is the standard-user readability check:
 one `Get-Content` of an installed file typed by `venyastd` at the guest's own unelevated console. It
-is an owner act at the desk and it is held there, not here. The `PROTECTED=0` reads above are
+is an operator act at the desk and it is held there, not here. The `PROTECTED=0` reads above are
 evidence about DACLs, and are named as corroboration — they are not that read. The guest preflight
 and the #628 history follow.
 
@@ -419,7 +419,7 @@ and the #628 history follow.
 `wave27-specs-20261015/ultra-rf8-cells23-s124-report.md`; target **core-3**, identity
 **`venya-adm3`**; verdict carried by the lead's scorecard row at `3aaeb169`.
 
-The two blockers this cell carried are **spent, and both were owner acts, not code work**:
+The two blockers this cell carried are **spent, and both were operator acts, not code work**:
 
 1. the installed CLI. The preflight under Cell 1 read `C:\Program Files\Venya\bin\venya.exe` at
    **`0.1.0alpha16`**, a build with **no `admin cert` group** — `venya admin cert status` failed
@@ -428,12 +428,12 @@ The two blockers this cell carried are **spent, and both were owner acts, not co
    `packages/cli/src/venya_cli/cli.py:481`, verified at `dev` `f0a2c3a`; re-derived at `dev`
    `59cf8ef`, where the `# admin cert — the readout …` group comment sits at `cli.py:483`, the
    pin having drifted by two lines). A current CLI has since
-   been installed on the guest, which is the owner's act on every box;
+   been installed on the guest, which is an operator act on every box;
 2. the key was not attached to the domain and no person was at its console. Both have been
    supplied for this run.
 
-**The owner acts this cell needed — attach the key, install a current CLI, be at that machine's
-console — have all been performed.** They stay owner acts: no lane can do any of them, and a
+**The operator acts this cell needed — attach the key, install a current CLI, be at that machine's
+console — have all been performed.** They stay operator acts: no lane can do any of them, and a
 re-image or a new core index puts them back on the list.
 
 - **Shape:** at the guest's own console, from a standard (non-elevated) terminal, in the

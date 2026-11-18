@@ -236,8 +236,8 @@ $env:VENYA_SKIP_PROMPT = "yes"
 built ref contains them, and omits them (with a `WARN`, removing any stale copy)
 for older refs. They are GitHub release assets from the 15-asset manifest on
 (`v0.1.0-alpha.10`; pre-Windows tags legitimately carry 13). That manifest sits on the
-pre-beta alpha line, which the owner withdrew on 2026-10-18 — the removal of the tags
-and their releases is a separate owner act, so an alpha asset may still resolve until
+pre-beta alpha line, which is withdrawn — the tags and their releases come down
+separately, so an alpha asset may still resolve until
 it runs. For a current install use the beta tag (`v0.1.0beta1`, created when the cut
 lands).
 
@@ -287,8 +287,8 @@ The piped install one-liners below work because the install scripts self-fetch `
 ### Deterministic rebuild from a published tag
 
 Release tarballs are `git archive` outputs — **byte-reproducible from any clone of
-the tag**. That property arrived with `v0.1.0-alpha.6`, on the pre-beta alpha line the
-owner withdrew on 2026-10-18, so treat the alpha names as the dated record of how the
+the tag**. That property arrived with `v0.1.0-alpha.6`, on the pre-beta alpha line
+since withdrawn, so treat the alpha names as the dated record of how the
 recipe was proven and pin the example below to a tag you know resolves. Anyone can
 verify a published asset:
 

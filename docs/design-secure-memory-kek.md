@@ -1,15 +1,14 @@
 # Design note: secure memory for the KEK (GitLab #472)
 
 Status: DESIGN NOTE ONLY -- no product code accompanies this file. The code leg and #538 are
-built from this document. Any point marked OPEN is not decided here; those points belong to the
-owner.
+built from this document. Any point marked OPEN is not decided here.
 
 Verified against: `venya-dev` `dev` tip `7b22d78` (branch base for this note). Line numbers in
 this file were re-grepped against that tip, not copied from a plan document. Where this note
 cites a measurement, the measurement block is section 11.
 
-Ruling this note implements: #472 note `3971383458` (owner, 2026-10-07) -- "IMPLEMENT, design
-note first, reviewed, then the leg". Bar carried here: scoped read-only view, one owner for the
+The rule this note implements: design note first, reviewed, then the leg. Bar carried here: scoped
+read-only view, one owner for the
 KEK cache, released buffer raises, objective zeroization attempt, startup log naming the ACTIVE
 protections, the capability-isolation test REWRITTEN (never deleted), pinning attempted-and-
 reported and never fatal, no pinning claim until physically proven on a served VM, and the
@@ -67,7 +66,7 @@ process exit only, never per request, never per session.
 
 - The cache exposes exactly one way to get key material: a context manager that yields
   `memoryview(buffer).toreadonly()`. It never returns `bytes` and never returns the
-  `SecureBuffer` (owner's bar: the buffer itself is never handed to readers).
+  `SecureBuffer` (the bar: the buffer itself is never handed to readers).
 - Consumers widen their parameter type to `bytes | memoryview` and otherwise do not change:
   `wrap_key` (`encryption.py:74`), `unwrap_key` (`:95`), `encrypt_secret` (`:116`),
   `decrypt_secret` (`:145`), `ensure_kek_sentinel` (`backend.py:84`), `verify_kek_sentinel`
@@ -340,7 +339,7 @@ place a released/empty state raises `SecureBufferReleasedError`; zeroization run
 defined release point in the object's own lifetime, and the attempt is logged as an outcome
 (`zeroized=yes|no`, `pin=active|inactive` with errno), never as an assumption; and pinning is
 attempted-and-reported, never fatal. The placement question is #538's own and is a design choice
-for that leg, not an owner question: the CLI is standalone and forbidden from importing `core.*`
+for that leg: the CLI is standalone and forbidden from importing `core.*`
 (`packages/cli/tests/test_capability_isolation.py:25-36`), so the contract reaches that process
 either as a second small module inside `venya_cli` or as a shared distribution -- either way the
 interface above is the one contract, and the CLI's isolation cells stay exactly as they are.
@@ -405,8 +404,8 @@ missing half is the CALLER. Reproduced here so the code leg does not design an i
   is not touched by this design.
 
 Consequences the code leg must honour:
-1. No installer or unit-file capability change is in scope. Any such change is owner-ok-gated and
-   would need its own ruling; the note does not propose one.
+1. No installer or unit-file capability change is in scope. Any such change needs a separate
+   decision, and this note does not propose one.
 2. The 8 MiB `RLIMIT_MEMLOCK` budget is the real sizing constraint on what gets pinned
    (section 5), and there is no `LimitMEMLOCK=` in either unit (grep across the tracked tree
    returns nothing).
@@ -440,15 +439,14 @@ binary was exec'd, no fleet VM touched.
 | [J] | `ulimit -l` = 8192 KiB in this venue -- matches the served `Max locked memory` value |
 | [K] | `pgrep -u <nonexistent-user> -x venya-core` exits 2 (`invalid user name`) -- the runtime capability cells cannot find the service and skip; observed here: 20 passed, 3 skipped in `test_capability_isolation.py`, all three skips being the dead capability cells |
 
-## 12. OPEN -- owner-owned, not decided here
+## 12. OPEN -- not decided here
 
-Per the owner law ("any questions surrounding any of it need to be answered by me") these are
-left as questions. Each is a CA-trust-material cluster question about product posture, and this
-note stops at the question.
+These are left as questions. Each is a CA-trust-material cluster question about product posture,
+and this note stops at the question.
 
 - **OPEN 1 (backup/export capability).** The protected-buffer contract says key material may be
-  read only through a scoped view and never copied out. Does the owner want a supported export of
-  KEK-protected material at all (operator-facing backup/export capability), or is export
+  read only through a scoped view and never copied out. Is a supported export of
+  KEK-protected material in the product at all (operator-facing backup/export capability), or is export
   permanently limited to the CA-key envelope path in #538? This note does not assume either.
 - **OPEN 2 (the restore story).** `docs/BACKUPS.md` pairs the database with `VENYA_DB__PASSPHRASE`
   and states, at `:39-43`, that "a mismatched passphrase does NOT fail at boot" and that failure
@@ -476,8 +474,8 @@ note stops at the question.
   extend the contract to them.
   **Pin refresh 1 (2026-10-09, AC4 of issue #547, re-derived at dev `262527d`).** Two changes since
   the original enumeration: the `cmd_admin_init_admin_ca` no-passphrase branch is NO LONGER one of
-  these sites (it now refuses before any filesystem work, per the owner's ruling "match server. no
-  passphrase? then no key", landed as `2a35c14`), and RF-8b's `23fc19b` ADDED one at
+  these sites (it now refuses before any filesystem work, matching the server: no
+  passphrase means no key, landed as `2a35c14`), and RF-8b's `23fc19b` ADDED one at
   `cmd_admin_cert_renew`. That refresh counted net-zero and restated the total as eight, which was
   correct at `262527d`.
   **Pin refresh 2 (2026-10-09, re-derived at dev `e3a82b8`) -- the count is now SIX, and here is
@@ -494,4 +492,4 @@ note stops at the question.
   **The live record for these six is issue #565**, which filed exactly this set with the two Part A
   paths marked already fixed; read the enumeration and any mechanism work there. This note neither
   duplicates that ticket nor answers it: whether any of the six should move onto the
-  protected-buffer path remains the open question above and is the owner's to answer.
+  protected-buffer path remains the open question above.

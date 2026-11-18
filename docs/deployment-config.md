@@ -55,7 +55,8 @@ Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart
 
 **Config key:** `dns_resolver` (top-level field on the EXECUTOR config; toml key `dns_resolver` in `/etc/venya/executor.toml`; env `VENYA_EXECUTOR_DNS_RESOLVER` — read only when the file does not carry the key. Precedence is `file > env > default`, see [Executor configuration precedence](#executor-configuration-precedence-file--env--default), #598)
 
-**Requirement:** MUST be set to a valid IPv4 address. With no value the executor daemon **refuses to start** — the check runs in `ExecutorDaemon.start()` before registration, so the one-shot enrollment token is never consumed on a doomed boot. This is a named, loud failure by design (owner ruling D1 option (a): "Venya never guesses your network"); there is no built-in default.
+**Requirement:** MUST be set to a valid IPv4 address. With no value the executor daemon **refuses to start** — the check runs in `ExecutorDaemon.start()` before registration, so the one-shot enrollment token is never consumed on a doomed boot. This is a named, loud failure by design — Venya never guesses your
+network; there is no built-in default.
 
 **Purpose:** The DNS resolver IP that is always allowed for sandbox egress. Hostname targets resolve only when the hostname itself is listed in the egress allowlist — the sandbox DNS proxy authorizes per domain. Without the resolver the egress policy cannot be built, so the executor refuses to start.
 
@@ -95,7 +96,7 @@ Sources, in precedence order, for the executor daemon:
 
 1. **The config file** `/etc/venya/executor.toml` — for every key it carries.
 2. **Process environment variables** — format `VENYA_EXECUTOR_<KEY>` for a top-level field, `VENYA_EXECUTOR_<SECTION>__<KEY>`
-   for a field inside a table. One exception is pinned by the owner's RF-3 ruling: the concurrency group is reached as
+   for a field inside a table. One exception is pinned: the concurrency group is reached as
    `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS`, because that section's field carries an alias pair; the
    `VENYA_EXECUTOR_EXECUTOR__…` and `VENYA_EXECUTOR_MAX_CONCURRENT_COMMANDS` shapes are **not** read.
 3. **A `.env` in the daemon's working directory** — read below the process environment (a relative `env_file`, so it
