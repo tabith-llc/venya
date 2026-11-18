@@ -261,7 +261,7 @@ class DaemonState:
         # certificate against this set, which is the thing it could not do before #597
         # (there was no list that named the peer). Keyed on registry MEMBERSHIP only:
         # nothing here makes the age of the list a stop condition at that door, because
-        # that availability trade is #586's and the owner's, not this row's.
+        # that availability trade is #586's, still open, and not this row's.
         # A frozenset of canonical serial strings; empty means "the registry names no
         # revoked relay credential", which admits — it does not refuse.
         self.revoked_relay_serials: frozenset[str] = frozenset()
