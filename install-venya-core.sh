@@ -1353,7 +1353,7 @@ rm -f /etc/ssl/certs/venya-*.pem
 # directory (reproduced in #641). Resolve the hash, assert it is a bare hex
 # name, and clean only that. A missing/failing openssl now warns and continues;
 # it no longer silently wipes and no longer dies under set -e.
-# THE RULE THIS SITE EXISTS TO TEACH (owner ruling 2026-10-16, #641): a silenced
+# THE RULE THIS SITE EXISTS TO TEACH (ruled 2026-10-16, #641): a silenced
 # command plus a destructive argument is severity HIGH — never let a value whose
 # producer was told not to complain reach an rm/chmod/mv operand unchecked; test
 # the value and name the reason when it is absent.
@@ -1394,7 +1394,7 @@ fi
 
 # Create CA bundle: Venya Root CA + Admin CA (when admin mTLS is on).
 # Nginx needs both to verify admin client certs (Admin CA) and executor certs (Root CA).
-# #314 F7 (owner ruling Q1(b)): fail loud, scoped per admin-mTLS state — the old
+# #314 F7 (ruled Q1(b)): fail loud, scoped per admin-mTLS state — the old
 # "|| true" silently produced an empty/truncated bundle when an input was missing.
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     if ! cat /var/lib/venya/ca/ca.crt /etc/nginx/ssl/client-ca.crt > /etc/nginx/ssl/client-ca-bundle.crt; then
@@ -1599,7 +1599,7 @@ fi
 # installer's own downgrade guard calls old code over a newer schema undefined
 # behavior. Stop first; venya_service_sync below starts it again on the new
 # bytes. The stop is announced because it is a deliberate, seconds-long outage
-# on a version-changing re-run (owner ruling: LAND — stop before migration).
+# on a version-changing re-run (ruled: LAND — stop before migration).
 # Guarded: on a first install there is no unit yet, and `stop` there is a
 # non-zero command under set -e — so a fresh install never stops and never
 # aborts here.

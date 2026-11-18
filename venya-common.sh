@@ -656,7 +656,7 @@ venya_apply_code_fixes() {
     fi
 
     # --- Fix 3: the seed-role flush sits between the role add and the audit id read ---
-    # #718 re-anchor, owner ruling R-2629 ("reanchor"): the guard is kept, not dropped,
+    # #718 re-anchor, ruled ("reanchor"): the guard is kept, not dropped,
     # and now watches the shape the behavior moved to. What this guard has ALWAYS
     # protected is one specific thing — a db.flush() between adding the role row and
     # reading role.id for the role_created audit field table, because an id is only
@@ -677,7 +677,7 @@ venya_apply_code_fixes() {
     # earlier flush. Reason named per cause (lead ruling s108) so the operator reads one
     # file, not two.
     #
-    # STATEMENTS, NOT TEXT (#718 follow-on, owner blessing O421 "blessit"). The three
+    # STATEMENTS, NOT TEXT (#718 follow-on, an approved wording). The three
     # literals used to be matched by substring, so a commented-out site flush carried the
     # same bytes as the live one and the guard reported `already clean` on a tree that
     # flushes nothing. The flush is therefore anchored at the start of its own statement
@@ -840,7 +840,7 @@ venya_write_egress_allowlist() {
         return 0
     fi
 
-    # Owner ruling 2026-09-23 (ticket installer-default-egress-allowlist-dev-subnet):
+    # Ruled 2026-09-23 (ticket installer-default-egress-allowlist-dev-subnet):
     # (a) teaching-empty default — Venya never guesses the operator's network.
     #     Empty file = fail-closed (all sandbox egress blocked except DNS), and
     #     the file itself teaches the mechanism.
@@ -903,7 +903,7 @@ venya_write_egress_allowlist() {
     fi
 }
 
-# --- 14c. Resolve the sandbox DNS resolver (no default — owner ruling D1 option (a)) ---
+# --- 14c. Resolve the sandbox DNS resolver (no default — ruled D1 option (a)) ---
 
 # Sets DNS_RESOLVER globally. Precedence: VENYA_DNS_RESOLVER env > existing
 # /etc/venya/executor.toml value (re-run reuse — the installer's toml write
@@ -930,7 +930,7 @@ venya_resolve_dns_resolver() {
         error "VENYA_DNS_RESOLVER='$DNS_RESOLVER' is not a valid IPv4 address (hostnames are not accepted — the resolver must be reachable by IP)."
         exit 1
     fi
-    # #428 (shape (c), owner ruling 2026-10-04): a carried-forward value is the
+    # #428 (shape (c), ruled 2026-10-04): a carried-forward value is the
     # only one the operator never re-asserted this run — probe it. HARD
     # placement pin: runs ONLY after _venya_valid_ipv4, so nothing but a
     # validated IPv4 ever reaches the bash -c interpolation. The explicit
