@@ -6,7 +6,7 @@
 
 """Interactive MCP driver — operate venya-mcp by hand and SEE the proof.
 
-Companion to docs/full-lifecycle-test.md Phase D. Spawns the real `venya-mcp`
+Companion to the full-lifecycle test plan, Phase D. Spawns the real `venya-mcp`
 stdio server as a subprocess (exactly like an LLM client would), speaks the MCP
 protocol over stdio, and lets the operator call each tool interactively and
 see the raw results — including the redaction proof from run_command.
