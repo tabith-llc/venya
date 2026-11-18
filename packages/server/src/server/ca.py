@@ -94,7 +94,7 @@ def csr_curve_hint() -> str:
 # measured by its UTF-8 byte length).
 #
 # The FLOOR is enforced; the CEILING is only STATED. Research clause C2 requires verifiers
-# to PERMIT at least 64 characters, and the owner's correction to the blessed wording asks
+# to PERMIT at least 64 characters, and the approved wording of this clause asks
 # for a plain statement of the 64-character supported maximum — no code path here refuses
 # a longer passphrase, so MAX_PASSPHRASE_CODE_POINTS exists to interpolate that sentence
 # and for no other reason.
@@ -264,7 +264,7 @@ def _serialize_key_encrypted(
 def _ca_key_decrypt_refusal(key_path: str | Path | None) -> str:
     """#574 — the wrong-passphrase-on-a-CA-key refusal, in our words, at one home.
 
-    The shape is the owner's ruling (R8-ADDENDUM, decisions.md commit dd1de4c): our own words, no
+    The shape this refusal must take is fixed: our own words, no
     mechanism named, the key path substituted, plus a next-step pointer (#569). Exact bytes are the
     implementing lane's draft and the review's accept — "the rule is the shape, not this string".
 
@@ -549,7 +549,7 @@ class CAManager:
             # A passphrase is configured but the key on disk is plaintext: refuse loudly (#541).
             # Handing it to the loader anyway raises TypeError ("Password was given but private
             # key is not encrypted"), which escapes the manager, the boot path and the health
-            # check. The owner ruled this case REFUSE LOUDLY, NO REWRAP — nothing is loaded,
+            # check. This case refuses loudly and never re-wraps — nothing is loaded,
             # nothing is re-encrypted, nothing is migrated. The wording is #537's approved
             # refusal, shared, naming the variable this manager actually reads.
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
@@ -848,12 +848,12 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # THE WINDOW THAT USED TO LIVE HERE (#601): parse_plane_marker once read that
 # legacy arc alongside the registered one so leaves minted before the move kept
 # resolving while the fleet was re-minted per plane. The window is now CLOSED
-# and its read branch removed, on the owner's ruling of 2026-10-16 that
+# and its read branch removed, because
 # nothing alpha-era is supported — no backwards compatibility with alpha, so
 # there is no old-arc credential left to protect, and a read branch for a
 # foreign arc is then only a foreign registration kept alive in our source plus
 # a path that resolves bytes we never mint. The earlier per-plane re-mint
-# precondition, the dual-arc HOW it gated, and the owner's sentence are on
+# precondition, the dual-arc HOW it gated, and the refusal's own sentence are on
 # #601; the ticket seat holds the pen. The paired negative that pins the closure
 # lives at tests/test_plane_marker_pen_arc_601.py, class
 # TestAnyOtherArcIsNoLongerRead, and that class name IS the claim: a marker on
@@ -914,7 +914,7 @@ def parse_plane_marker(cert: x509.Certificate) -> str:
     read a second, foreign arc as a bounded transition window for alpha-era
     leaves (#601); that window is closed and its branch removed, so plane-
     shaped bytes anywhere else are simply not ours and raise the missing-marker
-    refusal. The history, the retired number and the owner's ruling are on #601
+    refusal. The history, the retired number and the ruled decision are on #601
     — not repeated in this tree. The parser stays criticality-blind: it reads
     the value whether or not the extension sets the CRITICAL bit (#588
     option A).
@@ -1389,7 +1389,7 @@ class AdminCAManager:
             # Human plane, CA-written (RF-6 §3.2). NON-critical (s98, #588
             # option A): enforcement is app-side in parse_plane_marker, and
             # an external verifier that does not know the OID will NOT
-            # refuse the leaf — the accepted cost of the owner ruling,
+            # refuse the leaf — the accepted cost of that choice,
             # written into #588.
             .add_extension(
                 _plane_marker_extension(PLANE_HUMAN),
