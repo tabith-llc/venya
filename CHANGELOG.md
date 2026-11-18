@@ -6,74 +6,74 @@ Notable changes to Venya will be documented in this file.
 
 ### New features
 
-- The two service binaries answer when you ask them: `venya-server --version`, `venya-server --help`, `venya-mcp --version` and `venya-mcp --help` now print an answer and exit 0, where the flag was ignored before (#768)
+- The two service binaries answer when you ask them: `venya-server --version`, `venya-server --help`, `venya-mcp --version` and `venya-mcp --help` now print an answer and exit 0, where the flag was ignored before
 
 ### Breaking changes
 
-- If you call the role API yourself rather than through the CLI, the five writers now sit under `/api/v1/admin/`: `POST /api/v1/admin/roles`, `PUT /api/v1/admin/roles/{role_id}`, `DELETE /api/v1/admin/roles/{role_id}`, `POST /api/v1/admin/roles/{role_id}/members`, `DELETE /api/v1/admin/roles/{role_id}/members/{user_id}` — update the path in your caller or it reads 405 or 404 (#729)
+- If you call the role API yourself rather than through the CLI, the five writers now sit under `/api/v1/admin/`: `POST /api/v1/admin/roles`, `PUT /api/v1/admin/roles/{role_id}`, `DELETE /api/v1/admin/roles/{role_id}`, `POST /api/v1/admin/roles/{role_id}/members`, `DELETE /api/v1/admin/roles/{role_id}/members/{user_id}` — update the path in your caller or it reads 405 or 404
 - Ubuntu 26.04 LTS is now the tested target for the core and the executor, and Ubuntu 24.04 is no longer a supported server/executor platform, so check the host's release with `cat /etc/os-release` before you install: the installers carry no OS-version check, so a release outside the tested target is not refused, it is simply untested (your workstation is unaffected — the Workstation CLI still runs on Ubuntu 24.04, Debian 13 and macOS)
-- Redaction markers in command output are now per-response identifiers rather than short digests of the secret itself, so anything that recognised a masked value by its `[REDACTED:<id>]` text — a log parser, a correlation rule, a test that asserts on the marker — sees a different id per response: masked-ness, one marker per distinct secret and the mask counts are unchanged, but a marker that was a prefix of the secret's own digest let anyone holding a captured log line test a guessed password against it offline, and equal secrets printed equal markers wherever they appeared; key your rules on the field and the fact that a mask fired, not on the marker text (#793)
+- Redaction markers in command output are now per-response identifiers rather than short digests of the secret itself, so anything that recognised a masked value by its `[REDACTED:<id>]` text — a log parser, a correlation rule, a test that asserts on the marker — sees a different id per response: masked-ness, one marker per distinct secret and the mask counts are unchanged, but a marker that was a prefix of the secret's own digest let anyone holding a captured log line test a guessed password against it offline, and equal secrets printed equal markers wherever they appeared; key your rules on the field and the fact that a mask fired, not on the marker text
 
 ### Added
 
-- Every binary names the face it was built from, not just the server: `venya --version`, `venya-server --version`, `venya-mcp --version` and `venya-executor --version` all answer with the release name first and then a commit, a value the release stamped, or `unknown` — so two installs can be told apart without opening the tarball, and an unstamped one says so (#768)
-- `venya exec list` and the executor heartbeat report the executor's version exactly as before — a bare version string — so a caller that parses that field reads the same token it always read (#768)
-- `venya store` prints the secret's decimal id on a first store, the number a `/run/secrets/venya/<decimal-id>` redirect needs (#732 #733)
-- The CLI installer prints two answers separately: the shim exists, and whether a fresh login shell resolves `venya`, with the PATH line to add when it does not (#744)
-- `venya-mcp` gets the same login-shell check and a remedy line on the branch that printed nothing before (#744)
-- `venya audit`, its help line and `get_audit` say which column is the authoritative argument list and which is the display copy (#733)
-- The core installer compares the schema face before it changes anything: it reads the alembic head the incoming tarball ships and the stamp the live database stores, prints both, and refuses when the stored stamp is neither that head nor one of its ancestors — `VENYA_ALLOW_AHEAD_SCHEMA=yes` is the named override, a knob of its own and deliberately not `VENYA_ALLOW_DOWNGRADE` (#750)
-- A pre-upgrade restore point in `/var/backups/venya` is now taken whenever the schema moves, including on a same-version re-run, where it used to key on two version strings differing; the three newest are kept, and a failed dump stops the run before any migration (#750)
-- `VENYA_PURGE_CA=yes` on the core uninstaller is now the only way to remove the estate CA, and it is a separate choice from `VENYA_SKIP_PROMPT` — skipping the prompt does not authorise it (#749)
-- The full-lifecycle test plan carries the guard-crossing rule for middleware and auth-routing cells: such a cell mounts the shipped session middleware and the real router, or says which half it is not crossing (#730)
-- Signing in with a key the core does not recognise now leaves a clear record on the core saying which user id had no credentials to offer and why the challenge was still issued; previously the browser was handed an empty choice, volunteered some other key it happened to hold, and the next answer blamed that key — an accurate-sounding dead end with no trace behind it. The log line names the user id and nothing else: no challenge, no credential material, and the response a client sees is byte-for-byte what it was before (#789)
-- `venya exec audit`, `venya exec list` and `venya exec availability` take `--core-url` (or its alias `--server-url`) to say which core they should dial, and when nothing is named they now also read `/etc/venya/executor.toml` on that host, where the only way to point these three verbs at a chosen core was to edit a config file (#800)
+- Every binary names the face it was built from, not just the server: `venya --version`, `venya-server --version`, `venya-mcp --version` and `venya-executor --version` all answer with the release name first and then a commit, a value the release stamped, or `unknown` — so two installs can be told apart without opening the tarball, and an unstamped one says so
+- `venya exec list` and the executor heartbeat report the executor's version exactly as before — a bare version string — so a caller that parses that field reads the same token it always read
+- `venya store` prints the secret's decimal id on a first store, the number a `/run/secrets/venya/<decimal-id>` redirect needs
+- The CLI installer prints two answers separately: the shim exists, and whether a fresh login shell resolves `venya`, with the PATH line to add when it does not
+- `venya-mcp` gets the same login-shell check and a remedy line on the branch that printed nothing before
+- `venya audit`, its help line and `get_audit` say which column is the authoritative argument list and which is the display copy
+- The core installer compares the schema face before it changes anything: it reads the alembic head the incoming tarball ships and the stamp the live database stores, prints both, and refuses when the stored stamp is neither that head nor one of its ancestors — `VENYA_ALLOW_AHEAD_SCHEMA=yes` is the named override, a knob of its own and deliberately not `VENYA_ALLOW_DOWNGRADE`
+- A pre-upgrade restore point in `/var/backups/venya` is now taken whenever the schema moves, including on a same-version re-run, where it used to key on two version strings differing; the three newest are kept, and a failed dump stops the run before any migration
+- `VENYA_PURGE_CA=yes` on the core uninstaller is now the only way to remove the estate CA, and it is a separate choice from `VENYA_SKIP_PROMPT` — skipping the prompt does not authorise it
+- The full-lifecycle test plan carries the guard-crossing rule for middleware and auth-routing cells: such a cell mounts the shipped session middleware and the real router, or says which half it is not crossing
+- Signing in with a key the core does not recognise now leaves a clear record on the core saying which user id had no credentials to offer and why the challenge was still issued; previously the browser was handed an empty choice, volunteered some other key it happened to hold, and the next answer blamed that key — an accurate-sounding dead end with no trace behind it. The log line names the user id and nothing else: no challenge, no credential material, and the response a client sees is byte-for-byte what it was before
+- `venya exec audit`, `venya exec list` and `venya exec availability` take `--core-url` (or its alias `--server-url`) to say which core they should dial, and when nothing is named they now also read `/etc/venya/executor.toml` on that host, where the only way to point these three verbs at a chosen core was to edit a config file
 
 ### Changed
 
-- A flag neither binary recognised used to be dropped on the floor while the service started anyway; `venya-server --whatever` and `venya-mcp --whatever` now print usage on stderr and exit 2 (#768)
-- `install-venya-executor.sh` checks that the executor name resolves from every core before it installs or builds anything; that check used to sit after a full Rust release build and stopped at registration (#745)
-- `EXECUTOR_ID` defaults to the host's own name instead of the literal `venya-exec-1`, and an unattended run prints the name it chose (#745)
-- The startup disk-encryption check finds the PostgreSQL cluster the machine actually runs — the cluster manager first, then the running server, then a single installed cluster — instead of assuming `/var/lib/postgresql/16/main` (#740)
-- An unattended re-run of the executor installer that would change the installed `executor_id` refuses and writes nothing, naming both values: set `VENYA_EXECUTOR_ID=` to either one to consent by name, and an interactive run keeps its confirmation (#746)
-- Uninstalling a core leaves `/var/lib/venya/ca` standing while the rest of the service's state under `/var/lib/venya` still goes, and the run prints the path it left behind so you can finish deliberately (#749)
-- When the administrative client certificate is protected by a passphrase, the CLI now says so at the moment it needs it and names the variable that holds it; the message used to read as though a certificate were missing and needed minting, when the key was there all along and simply encrypted, and following it would have started a ceremony creating a second certificate authority your core then refuses — the refusal, its ordering and everything it declines to do are unchanged, only the guidance was wrong about which door you were standing at (#794)
-- The same guidance is now given once, in one sentence, wherever an administrative key passphrase is needed; where two sites once printed two different repairs, an operator who followed one could still be refused by the other, and the wording is now the same at both and states the value once — the distinct refusal reasons are preserved, so a reader can still tell what went wrong, but which of the two doors answered is no longer inferable from the text, which is deliberate: the administrative plane answers refusals in one indistinguishable form, and a more specific repair message would have quietly undone that (#794)
-- When an administrative command is refused with the core's one answer `Admin access requires valid client certificate`, the CLI now adds the two causes you can settle on your own machine — run `venya admin cert status`, because these certificates are short-lived by design, and check that `VENYA_ADMIN_CERT` / `VENYA_ADMIN_KEY` are set in this shell — then names `venya admin cert renew` as the one-ceremony repair, where that single string covers six different refusals on the core side and the old text told you none of this (#790)
-- `venya admin cert renew` now says what a first mint needs before you run it: its `--help` names the two output paths and the passphrase together (`--cert-path`, `--key-path`, `VENYA_ADMIN_CA_KEY_PASSPHRASE`) as three things that must all be set, and the refusal when one is missing states that both paths are needed together rather than only the one that was absent (#803)
-- When an installer refuses a non-https tarball origin with no pinned hash, the refusal now tells you how to get that hash from the machine you are actually standing in front of — read the sidecar yourself with `curl -fsSL <url>.sha256` and treat it as a corruption check, corroborated out-of-band — where it used to point at a value printed on the build host's terminal, and it still says plainly that nothing was fetched or written (#375)
-- The executor now checks that its sandbox really isolates a run before it accepts work, and if that check cannot get an answer it exits instead of starting: previously it came up and ran, so a host whose sandbox could not be created looked healthy until a command failed. The journal line names the vendor's own answer and the repair, and `docs/installation.md` says what to do when the executor will not start (#312)
+- A flag neither binary recognised used to be dropped on the floor while the service started anyway; `venya-server --whatever` and `venya-mcp --whatever` now print usage on stderr and exit 2
+- `install-venya-executor.sh` checks that the executor name resolves from every core before it installs or builds anything; that check used to sit after a full Rust release build and stopped at registration
+- `EXECUTOR_ID` defaults to the host's own name instead of the literal `venya-exec-1`, and an unattended run prints the name it chose
+- The startup disk-encryption check finds the PostgreSQL cluster the machine actually runs — the cluster manager first, then the running server, then a single installed cluster — instead of assuming `/var/lib/postgresql/16/main`
+- An unattended re-run of the executor installer that would change the installed `executor_id` refuses and writes nothing, naming both values: set `VENYA_EXECUTOR_ID=` to either one to consent by name, and an interactive run keeps its confirmation
+- Uninstalling a core leaves `/var/lib/venya/ca` standing while the rest of the service's state under `/var/lib/venya` still goes, and the run prints the path it left behind so you can finish deliberately
+- When the administrative client certificate is protected by a passphrase, the CLI now says so at the moment it needs it and names the variable that holds it; the message used to read as though a certificate were missing and needed minting, when the key was there all along and simply encrypted, and following it would have started a ceremony creating a second certificate authority your core then refuses — the refusal, its ordering and everything it declines to do are unchanged, only the guidance was wrong about which door you were standing at
+- The same guidance is now given once, in one sentence, wherever an administrative key passphrase is needed; where two sites once printed two different repairs, an operator who followed one could still be refused by the other, and the wording is now the same at both and states the value once — the distinct refusal reasons are preserved, so a reader can still tell what went wrong, but which of the two doors answered is no longer inferable from the text, which is deliberate: the administrative plane answers refusals in one indistinguishable form, and a more specific repair message would have quietly undone that
+- When an administrative command is refused with the core's one answer `Admin access requires valid client certificate`, the CLI now adds the two causes you can settle on your own machine — run `venya admin cert status`, because these certificates are short-lived by design, and check that `VENYA_ADMIN_CERT` / `VENYA_ADMIN_KEY` are set in this shell — then names `venya admin cert renew` as the one-ceremony repair, where that single string covers six different refusals on the core side and the old text told you none of this
+- `venya admin cert renew` now says what a first mint needs before you run it: its `--help` names the two output paths and the passphrase together (`--cert-path`, `--key-path`, `VENYA_ADMIN_CA_KEY_PASSPHRASE`) as three things that must all be set, and the refusal when one is missing states that both paths are needed together rather than only the one that was absent
+- When an installer refuses a non-https tarball origin with no pinned hash, the refusal now tells you how to get that hash from the machine you are actually standing in front of — read the sidecar yourself with `curl -fsSL <url>.sha256` and treat it as a corruption check, corroborated out-of-band — where it used to point at a value printed on the build host's terminal, and it still says plainly that nothing was fetched or written
+- The executor now checks that its sandbox really isolates a run before it accepts work, and if that check cannot get an answer it exits instead of starting: previously it came up and ran, so a host whose sandbox could not be created looked healthy until a command failed. The journal line names the vendor's own answer and the repair, and `docs/installation.md` says what to do when the executor will not start
 
 ### Fixed
 
-- A build face you cannot read no longer stops the tool that reads it: `--version` answers `unknown` when the stamp beside the install is not text, and `--help` and every subcommand answer too, because the version line is now built when you ask for it rather than every time the program starts (#768)
+- A build face you cannot read no longer stops the tool that reads it: `--version` answers `unknown` when the stamp beside the install is not text, and `--help` and every subcommand answer too, because the version line is now built when you ask for it rather than every time the program starts
 - The enrollment pages now tell you to decline a passkey your password manager offers, so the PIN prompt for your security key appears instead of a credential saved somewhere else
-- Every layer now prints the version its own plate declares: the executor reported `0.1.0b3` where the release record says `0.1.0beta3`, because its build backend normalized the spelling on the way into the installed metadata (#768)
-- A failed API call from the CLI names the HTTP status it received, so an older CLI against a newer core reads `HTTP 405: …` where it read `Method Not Allowed` or `Unknown error` (#729)
-- The memory pin on a key engages: the buffer address reached the kernel as a 32-bit integer, so any buffer above 2 GiB was refused (#739)
-- A refused memory pin names the kernel's reason — a capability, the locked-memory limit, or neither — instead of pointing at a permission the host already grants (#739)
-- The disk-encryption check recognises the local database behind the Unix socket the installer writes, so it reports on the volume of a machine the installer itself built (#740)
-- An executor refusal for a redirect target names the argument number at fault and how many session-bound paths that run allows, so you do not bisect the command line to find the element (#732)
-- The redirect-target documentation shows `<decimal-id>`, the shape the guard accepts, where it showed a key-name that could never validate (#732)
-- A run that bound no credential writes no `credential_injected` event (#731)
-- One run stores one command text on the executor row, the server row and a refused command (#733)
-- The CLI installer's FIDO2 check looks for a key on the FIDO usage page rather than any `/dev/hidraw` node, so a keyboard on that bus no longer answers for a security key, a host with no HID nodes stays silent, and a key your user cannot reach is named by device with a grant scoped to that device alone (#748)
-- `venya executor register` prints an install recipe that keeps the one-use enrollment token out of `/tmp` and off the command line: stage the bundle in the SSH account's own directory at mode 700, pass the token as an environment prefix on the child, and remove the staged bundle when the install finishes (#752)
-- An admin certificate that verifies against this core's CA but is named by no enrolled row is logged as admitted-but-unknown, with the revoke route to use if it is not a credential you issued, where the same admission read as routine (#751)
-- A core uninstall that meets a symlinked `/var/lib/venya` or `/var/lib/venya/ca` stops before it removes anything and names where the link points, instead of printing `Venya Core uninstalled.` over a tree it never touched; a removal is now reported only after the path is proved gone (#755)
-- `VENYA_PURGE_CONFIG=yes` in the CLI uninstaller refuses a config dir that is a symlink, naming the link and its target, and prints `Removed …` only after proving the directory is gone — a config dir that was never there now says there was nothing to remove (#758)
-- Re-running the executor installer keeps the settings you added to `/etc/venya/executor.toml` and `/etc/venya/venya-executor.env` instead of rebuilding them away, and names each one it carried; a key placed inside an installer-owned table such as `[mtls]` is the one case it cannot carry, and that run says so too (#738)
-- Uninstalling an executor keeps `/var/lib/venya` — the executor CA and its enrollment state — where it used to take the directory with the rest of the service, while the client certificate under `/etc/venya/executor/` and the sandbox sign-in under the service account's home still go, so a re-registration mints a fresh certificate and a re-run of the installer needs its Docker sign-in done again, and it now refuses a state path that is a symlink, naming the link and where it points; run it again with `VENYA_PURGE_STATE=yes` when you mean the state gone, and either way the run prints what happened only after it has proved the path's real state (#757)
-- The published install and recovery commands used to write an installer variable after `sudo`, which makes it one of sudo's arguments and keeps the value in that process's command line, readable to other local accounts, for the life of the install; secret-bearing variables now go to the installer's hidden prompt, to a root shell opened with `sudo -i`, or are reused from what a re-run already stored, control variables stay after `sudo` because Ubuntu 26.04's `sudo-rs` refuses `-E` outright, and `docs/cert-rotation-runbook.md` reads the one `VENYA_ADMIN_CA_KEY_PASSPHRASE` line it needs instead of printing the whole env file (#756)
-- Two sentences in `install-venya-core.sh` claimed more than the script does: the unreadable-incoming-version arm of the schema compare warns and continues, where its line said the version guard had refused, and a restore point is taken before migrations run, not before anything changes, so both lines now match the path you are on (#759)
-- An operator whose sandbox tools could not be found no longer receives installation instructions for a package their platform does not publish (#795)
-- When the server tells `venya` it's receiving requests too often, `venya` now waits and retries on its own instead of asking you to log in again. Your saved login is not touched either way (#808)
-- After you upgrade a core server, `venya --version` on that machine can still be printing the version of the server that was upgraded — it reports the command-line tool's own version, and the tool wasn't reinstalled. The installer now says so at the end of the upgrade: it names both versions it can see on that machine and tells you how to bring the tool onto the new version. Nothing about the install itself changes, and the message stays quiet when the two agree or when there's nothing to compare (#796)
-- A command whose outbound address the sandbox policy does not allow no longer reads as an ordinary finished run: the CLI and the agent answer now name the refused `host:port` and the runtime's own reason, and the audit trail keeps an `egress_denied` row beside the run's record, because that refusal arrives as a completed response and no exit code tells a denied request from a delivered one (#798)
-- The sandbox-shape record no longer reports a healthy vendor answer as broken JSON: newer `sbx` builds print their template and settings rows as a top-level array rather than under a key, both faces are read now, and an answer that really is the wrong shape gets its own sentence instead of sending you to look for a parse failure on a machine that answered cleanly (#799)
-- The executor installer no longer answers one soft warning for two opposite outcomes of the sandbox network policy: `sbx policy init deny-all` returns the same non-zero status whether the policy is already in place or missing entirely, so a re-run now says it was left as it is, and a host with no policy says sandbox creation will fail, prints the vendor's own answer, and gives the repair command (#801)
-- Signing in with `VENYA_SERVER_URL` now writes that core into the same saved session as the token, where the file kept the token and named no core: a `venya-mcp` started fresh from that file dialled its own built-in `https://localhost` default, and the CLI refused to use the file for admin calls, so the two answers disagreed about the same login (#810)
-- A session file the CLI could not read used to be replaced by whatever that command happened to hold, so a config that failed to parse quietly lost the core you had named and the next call dialled a built-in default. Those bytes are moved aside now instead of overwritten, kept beside the new file as a `<name>.corrupt` copy, the message names both paths and the verb that puts your core back, and it carries no value from the file (#811)
+- Every layer now prints the version its own plate declares: the executor reported `0.1.0b3` where the release record says `0.1.0beta3`, because its build backend normalized the spelling on the way into the installed metadata
+- A failed API call from the CLI names the HTTP status it received, so an older CLI against a newer core reads `HTTP 405: …` where it read `Method Not Allowed` or `Unknown error`
+- The memory pin on a key engages: the buffer address reached the kernel as a 32-bit integer, so any buffer above 2 GiB was refused
+- A refused memory pin names the kernel's reason — a capability, the locked-memory limit, or neither — instead of pointing at a permission the host already grants
+- The disk-encryption check recognises the local database behind the Unix socket the installer writes, so it reports on the volume of a machine the installer itself built
+- An executor refusal for a redirect target names the argument number at fault and how many session-bound paths that run allows, so you do not bisect the command line to find the element
+- The redirect-target documentation shows `<decimal-id>`, the shape the guard accepts, where it showed a key-name that could never validate
+- A run that bound no credential writes no `credential_injected` event
+- One run stores one command text on the executor row, the server row and a refused command
+- The CLI installer's FIDO2 check looks for a key on the FIDO usage page rather than any `/dev/hidraw` node, so a keyboard on that bus no longer answers for a security key, a host with no HID nodes stays silent, and a key your user cannot reach is named by device with a grant scoped to that device alone
+- `venya executor register` prints an install recipe that keeps the one-use enrollment token out of `/tmp` and off the command line: stage the bundle in the SSH account's own directory at mode 700, pass the token as an environment prefix on the child, and remove the staged bundle when the install finishes
+- An admin certificate that verifies against this core's CA but is named by no enrolled row is logged as admitted-but-unknown, with the revoke route to use if it is not a credential you issued, where the same admission read as routine
+- A core uninstall that meets a symlinked `/var/lib/venya` or `/var/lib/venya/ca` stops before it removes anything and names where the link points, instead of printing `Venya Core uninstalled.` over a tree it never touched; a removal is now reported only after the path is proved gone
+- `VENYA_PURGE_CONFIG=yes` in the CLI uninstaller refuses a config dir that is a symlink, naming the link and its target, and prints `Removed …` only after proving the directory is gone — a config dir that was never there now says there was nothing to remove
+- Re-running the executor installer keeps the settings you added to `/etc/venya/executor.toml` and `/etc/venya/venya-executor.env` instead of rebuilding them away, and names each one it carried; a key placed inside an installer-owned table such as `[mtls]` is the one case it cannot carry, and that run says so too
+- Uninstalling an executor keeps `/var/lib/venya` — the executor CA and its enrollment state — where it used to take the directory with the rest of the service, while the client certificate under `/etc/venya/executor/` and the sandbox sign-in under the service account's home still go, so a re-registration mints a fresh certificate and a re-run of the installer needs its Docker sign-in done again, and it now refuses a state path that is a symlink, naming the link and where it points; run it again with `VENYA_PURGE_STATE=yes` when you mean the state gone, and either way the run prints what happened only after it has proved the path's real state
+- The published install and recovery commands used to write an installer variable after `sudo`, which makes it one of sudo's arguments and keeps the value in that process's command line, readable to other local accounts, for the life of the install; secret-bearing variables now go to the installer's hidden prompt, to a root shell opened with `sudo -i`, or are reused from what a re-run already stored, control variables stay after `sudo` because Ubuntu 26.04's `sudo-rs` refuses `-E` outright, and `docs/cert-rotation-runbook.md` reads the one `VENYA_ADMIN_CA_KEY_PASSPHRASE` line it needs instead of printing the whole env file
+- Two sentences in `install-venya-core.sh` claimed more than the script does: the unreadable-incoming-version arm of the schema compare warns and continues, where its line said the version guard had refused, and a restore point is taken before migrations run, not before anything changes, so both lines now match the path you are on
+- An operator whose sandbox tools could not be found no longer receives installation instructions for a package their platform does not publish
+- When the server tells `venya` it's receiving requests too often, `venya` now waits and retries on its own instead of asking you to log in again. Your saved login is not touched either way
+- After you upgrade a core server, `venya --version` on that machine can still be printing the version of the server that was upgraded — it reports the command-line tool's own version, and the tool wasn't reinstalled. The installer now says so at the end of the upgrade: it names both versions it can see on that machine and tells you how to bring the tool onto the new version. Nothing about the install itself changes, and the message stays quiet when the two agree or when there's nothing to compare
+- A command whose outbound address the sandbox policy does not allow no longer reads as an ordinary finished run: the CLI and the agent answer now name the refused `host:port` and the runtime's own reason, and the audit trail keeps an `egress_denied` row beside the run's record, because that refusal arrives as a completed response and no exit code tells a denied request from a delivered one
+- The sandbox-shape record no longer reports a healthy vendor answer as broken JSON: newer `sbx` builds print their template and settings rows as a top-level array rather than under a key, both faces are read now, and an answer that really is the wrong shape gets its own sentence instead of sending you to look for a parse failure on a machine that answered cleanly
+- The executor installer no longer answers one soft warning for two opposite outcomes of the sandbox network policy: `sbx policy init deny-all` returns the same non-zero status whether the policy is already in place or missing entirely, so a re-run now says it was left as it is, and a host with no policy says sandbox creation will fail, prints the vendor's own answer, and gives the repair command
+- Signing in with `VENYA_SERVER_URL` now writes that core into the same saved session as the token, where the file kept the token and named no core: a `venya-mcp` started fresh from that file dialled its own built-in `https://localhost` default, and the CLI refused to use the file for admin calls, so the two answers disagreed about the same login
+- A session file the CLI could not read used to be replaced by whatever that command happened to hold, so a config that failed to parse quietly lost the core you had named and the next call dialled a built-in default. Those bytes are moved aside now instead of overwritten, kept beside the new file as a `<name>.corrupt` copy, the message names both paths and the verb that puts your core back, and it carries no value from the file
 
 ## [0.1.0beta2] - 2026-10-28
 
@@ -83,7 +83,7 @@ Notable changes to Venya will be documented in this file.
 > in a shipped document, which is the rule the `0.1.0beta1` heading above carries in its own note.
 
 - **An executor refusal now says which argument it means and what kind of character it
-  carries (`#713`).** The command gate has refused a metacharacter inside an argv element by
+  carries.** The command gate has refused a metacharacter inside an argv element by
   printing one sentence that named nothing: on a fifteen-element command the caller had to
   bisect to find the element. The refusal now reads `Argument 3 contains a disallowed shell
   metacharacter — classes: grouping-braces.` and names every class the element trips, in the
@@ -97,8 +97,8 @@ Notable changes to Venya will be documented in this file.
   added to the refused set: `%` is still accepted, and the shape that motivated the report
   (`%{http_code}`) is refused for its braces, which is what the new text now says out loud.
 
-- **`venya admin split-ca-key` no longer leaves the key material in its own buffer
-  (`#674` AC3).** The splitter builds a working copy of what it is handed — a checksum
+- **`venya admin split-ca-key` no longer leaves the key material in its own buffer.**
+  The splitter builds a working copy of what it is handed — a checksum
   plus the key — and until now that copy stayed as it was when the command finished. It is
   now cleared on every path out of the splitter, including the one where a failure lands
   part-way through the work. No format change, no encryption change, no migration: the
@@ -121,7 +121,7 @@ Notable changes to Venya will be documented in this file.
   every subprocess call in `packages/*/src` bounded, with one named exemption recorded with
   its reason.
 
-- **`run_command` answers now name the executor they ran on (`#712`).** The MCP tool used to
+- **`run_command` answers now name the executor they ran on.** The MCP tool used to
   reply with only the exit code, stdout, stderr and the masked-count note, so an answer
   read the same whether it came from a sandbox or from the host the caller meant. The
   reply line now carries the `executor_id` the caller supplied — echoed from the call,
@@ -130,7 +130,7 @@ Notable changes to Venya will be documented in this file.
   the same shape. No new field on any wire message, no change to what a caller has to
   send, and nothing about secrets moves: the id is already in the caller's own request.
 
-- **`get_audit` lines now name the command they ran, escaped (`#709`).** The tool
+- **`get_audit` lines now name the command they ran, escaped.** The tool
   asked to show what commands had been executed and printed only the timestamp, the
   event type, the user and the executor: the command text, its exit code, its duration
   and the row's own session id were all stored, all returned by the API, and dropped at
@@ -143,7 +143,7 @@ Notable changes to Venya will be documented in this file.
   before. No migration, no wire change, no new endpoint — every field already existed in
   the stored row.
 
-- **A `masked_count` now says what it does not say (`#715`, disclosed as a known limitation).**
+- **A `masked_count` now says what it does not say (disclosed as a known limitation).**
   Two passes can produce that number — the executor's own Stage-1 mask, and the server-side
   Stage-2 filter — and the answer carries no record of which one ran. The count itself is honest
   about which pass won; what is missing is the history. On the fallback arm, where the server did
@@ -155,8 +155,8 @@ Notable changes to Venya will be documented in this file.
   for a reader to discover. No behaviour changed and no field moved on any wire message: this row is
   a disclosure, and it leaves with the leg that adds the three-valued answer.
 
-- **The `run_command` example shows both supported authentication postures
-  (`#711`).** The shipped example paired `sshpass` with an unattended remote
+- **The `run_command` example shows both supported authentication postures.**
+  The shipped example paired `sshpass` with an unattended remote
   `sudo` — the one combination beta does not support, because `sshpass` reads the
   password from its own side and the remote `sudo -S` is answered by nothing — so
   the description pointed an agent at a command that could not finish the job it
@@ -172,7 +172,7 @@ Notable changes to Venya will be documented in this file.
   `docs/beta-known-limitations.md` stands exactly as written: the example moved,
   the disclosure did not.
 
-- **`venya run` names the executor it used, and refuses when none is set (`#712` half (a)).**
+- **`venya run` names the executor it used, and refuses when none is set.**
   The CLI run path invented an executor id when the operator gave none and sent that
   made-up token to the server, which answered with a failure naming neither the id nor
   where it came from — so a missing flag read on the terminal exactly like an executor
@@ -186,7 +186,7 @@ Notable changes to Venya will be documented in this file.
   surfaces a human and an agent drive during an incident in the same shape. No wire
   change, no new field, no migration; commands that already pass an id behave as before.
 
-- **`run_command` now ticks while a command is in flight (`#710`).** A host calls an MCP tool at its own
+- **`run_command` now ticks while a command is in flight.** A host calls an MCP tool at its own
   per-request deadline, and that deadline is shorter than the time `venya_mcp` is willing to wait for an
   executor, so a slow command was lost at the harness and the caller could not tell "still running" from
   "never ran". A conforming client re-arms its deadline when a `notifications/progress` arrives, so the
@@ -199,7 +199,7 @@ Notable changes to Venya will be documented in this file.
   every field. No timeout moves: the relay, the nginx and client-side bounds and the execute read
   timeout are all untouched, because a tick interval is a cadence, not a fuse.
 
-- **A session-bound `<` redirect that `sshpass` would take for itself is now refused (`#695`).** The
+- **A session-bound `<` redirect that `sshpass` would take for itself is now refused.** The
   one ruled exception to the metacharacter gate is a standalone `<` followed by a secret path bound to
   the same call, and it exists so a command can answer a `sudo -S` prompt. The guest shell binds that
   `<` to the first process it starts, so in `sshpass … ssh … sudo -S …` the file is read as
@@ -211,8 +211,8 @@ Notable changes to Venya will be documented in this file.
   remote command is read in both forms the wire carries — separate elements (`sudo -S id`) and one
   quoted element (`"sudo -S id"`). No character was added to the refused set and no timeout moved.
 
-- **A core whose `roles` table is missing its product roles now repairs itself on the next start
-  (`#718`).** The two roles the product ships with, `admin` and `user`, are re-applied at every core
+- **A core whose `roles` table is missing its product roles now repairs itself on the next start.**
+  The two roles the product ships with, `admin` and `user`, are re-applied at every core
   start when they are absent — a get-or-create in `server/role_seed.py`, so a normal boot writes
   nothing and only a missing row costs a write. An operator whose table was emptied, by a hand-cleared
   database or a restore that carried users but not roles, sees the rows come back on the next
