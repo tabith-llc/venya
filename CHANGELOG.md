@@ -233,17 +233,17 @@ Notable changes to Venya will be documented in this file.
 
 > Dated at the cut: this is the local date the `v0.1.0beta1` tag was cut. If the tag ever slips to another day, the heading is re-dated in the commit that cuts it — a stale ship date here would be a false statement in a shipped document.
 
-- **The pre-beta alpha line is withdrawn by owner order (2026-10-18).** The
+- **The pre-beta alpha line is withdrawn.** The
   `v0.1.0alpha*` and `v0.1.0-alpha.*` releases are retired: new installs and upgrade
   recipes pin a beta tag (`v0.1.0beta1` is the name the cut creates), never an alpha
-  tag. Removing the tag refs and their GitHub releases is a SEPARATE owner act (a
+  tag. Removing the tag refs and their GitHub releases is a separate act (a
   squash deletes commits, not tags; and a tag is not its release), so an alpha name may
   still resolve until that runs. The
   alpha sections below stay exactly as written either way — the product did ship those
   builds, and a record that names them is history, not an error.
 
-- **The executor's revocation poll is answered from a freshness-bounded snapshot
-  (#603, AC2 step 2).** A core republishes the revoked-serial and revoked-identity
+- **The executor's revocation poll is answered from a freshness-bounded snapshot.**
+  A core republishes the revoked-serial and revoked-identity
   population every 10 s and answers `GET /api/v1/executors/certs/revocation-list` from
   that snapshot, so the poll no longer queues behind ordinary command traffic for a
   database connection and no longer waits on a lock held over the revocation table.
@@ -255,25 +255,25 @@ Notable changes to Venya will be documented in this file.
   the operational-fault reason, not a revocation claim. Enforcement at the dial gates is
   unchanged and does not depend on the snapshot; the numbers 45 s and 10 s are shipped
   constants, not configuration.
-- **The stale-class refusal now says "request refused" instead of "dial refused"
-  (#603).** One sentence serves both the TLS dial and the poll, so the wording names
+- **The stale-class refusal now says "request refused" instead of "dial refused".**
+  One sentence serves both the TLS dial and the poll, so the wording names
   whichever request was refused rather than one transport. The clause operators read
   for meaning — `no revocation asserted` — is unchanged, and `docs/beta-known-limitations.md`
   cites that clause by name and line, so it needed no edit. Journal lines that begin
   `Relay dial refused` are dial-true log prefixes and were left alone; a composed line
   can now read `Relay dial refused, Revocation list stale or unavailable — request
   refused (no revocation asserted)`, which is redundant and correct.
-- **Executor: the `[session]` and `[output_capture]` tables are gone (#620).** Seven keys
+- **Executor: the `[session]` and `[output_capture]` tables are gone.** Seven keys
   an operator could set in `/etc/venya/executor.toml` — `session_timeout`,
   `access_token_ttl`, `max_session_duration`, `max_output_bytes`, `hash_window_size`,
   `min_match_length`, and `[audit] local_retention_days` — were read by no code. Session
   lifetimes are decided on the core from the server's own config, output limits come from
   the executor's `MAX_OUTPUT_BYTES` constant, and the audit spool is bounded by buffer
-  size and batch lines. The #598 start-up line had been telling whoever set them that
+  size and batch lines. The start-up line had been telling whoever set them that
   "the file value is in use", which was not true of any of the seven; the promise now
   stops where the capability does. A deployed `executor.toml` that still carries these
   tables loads unchanged — unrecognised keys are ignored — so no reinstall is needed.
-- **The revocation-snapshot publisher now survives a faulty teardown and says so (#626).** A core
+- **The revocation-snapshot publisher now survives a faulty teardown and says so.** A core
   republishes the revocation population every 10 s; if the session teardown at the end of one of
   those publishes raised, the publisher task ended, the snapshot plane went back to the lockable
   live DB read for the rest of the process's life, and the only journal evidence was a warning that
@@ -284,7 +284,7 @@ Notable changes to Venya will be documented in this file.
   unchanged: the 45 s freshness ceiling, the 10 s interval, and the stale-class `503` that says "no
   revocation asserted" all stand as shipped, and a core with no publisher still answers from the
   current live read.
-- **A CLI error that carried no message now names itself (#595).** The catch-all that prints the
+- **A CLI error that carried no message now names itself.** The catch-all that prints the
   one line an operator sees used to render a bare `Error:` when the raised exception had nothing
   to say — an empty prompt read, a queue that timed out, a bare `ValueError`. That line now
   carries the exception type (`queue.Empty`, not `Empty`), the command that was running, where the
@@ -292,14 +292,14 @@ Notable changes to Venya will be documented in this file.
   message prints exactly the line it printed before: command bodies keep their own wording, and
   the argument values a command was given are deliberately not included, so a secret passed as a
   positional cannot reach the terminal or the log through this path.
-- **`venya admin executor enroll --output-dir` makes the directory it documents (#616).** The
+- **`venya admin executor enroll --output-dir` makes the directory it documents.** The
   generated reference says this command creates the output directory, and the directory was in
   fact only made after a successful round trip. It is now created before the token is minted, at
   `0700` through the same secret-directory helper the rest of the CLI uses, so a path that cannot
   be made — an existing file of that name, a parent with no write permission — stops with a
   refusal that names the path and says nothing was minted, rather than printing an OS error string
   after a token had already been issued.
-- **The installer stops on a source patch it can no longer find (#618).** `venya_apply_code_fixes`
+- **The installer stops on a source patch it can no longer find.** `venya_apply_code_fixes`
   reports each patch as applied, already clean, or a dead anchor, and a dead anchor used to be a
   `[WARN]` the run sailed past. It is now an `[ERROR]` that ends the install nonzero before the
   virtualenv, the migrations and the service start, so the only thing touched is the extracted
@@ -309,12 +309,12 @@ Notable changes to Venya will be documented in this file.
   URL — so the guard could only ever report a miss, which is what it did on every healthy install.
   It now asserts that live shape and touches nothing, and the message names which half it could not
   satisfy: the expression in `dependencies.py`, or the call site in `app.py`.
-- **The admin-pair advice points at the ceremony, not at a copy (#619).** When
+- **The admin-pair advice points at the ceremony, not at a copy.** When
   `VENYA_ADMIN_CERT` or `VENYA_ADMIN_KEY` named a file that is not there, the CLI told the operator
   to copy the core's admin pair to the workstation. It now says not to, and gives the supported
   route instead: `venya setup <core>`, then `venya login <user-id>`, then
   `venya admin cert renew`. The pair on a core names that core, not a person.
-- **`venya admin configure-user` no longer accepts a setting nothing reads (#625).** The command
+- **`venya admin configure-user` no longer accepts a setting nothing reads.** The command
   had one knob, `--timeout`, and the value it wrote went into `users.session_timeout`, a column no
   expiry decision in the product reads — the live idle window comes from the core's own
   `session.session_timeout` / `VENYA_SESSION__SESSION_TIMEOUT`. The option, the request field, the
@@ -322,18 +322,18 @@ Notable changes to Venya will be documented in this file.
   setting that reaches a read field joins it, instead of reporting success on a change with no
   effect. An operator still sending the old key gets a `422` rather than a quiet no-op. The
   `users.session_timeout` column stays as it is; dropping it would cost a migration for no gain.
-- **Windows install paths with `[` or `]` in the name are seen (#628).** `Test-Path`'s positional
+- **Windows install paths with `[` or `]` in the name are seen.** `Test-Path`'s positional
   parameter resolves wildcards, so a directory named with brackets — a test root called
   `C:\temp[gate]`, say — matched nothing and files that existed read as missing: the installer
   could stop at the `uv` check or report a shim it had just installed as absent. Nine existence
   probes in `install-venya-cli.ps1` now bind `-LiteralPath`, which does not parse wildcards. The
-  #493 ACL gate keeps its own checks; this brings the probes upstream of it into the same form.
-- **The Windows uninstaller finds the same kind of path (#629).** The three install-root probes in
-  `uninstall-venya-cli.ps1` were positional for the same reason #628 fixed, so a root whose name
+  ACL gate keeps its own checks; this brings the probes upstream of it into the same form.
+- **The Windows uninstaller finds the same kind of path.** The three install-root probes in
+  `uninstall-venya-cli.ps1` were positional for the same reason, so a root whose name
   contains wildcard characters was read as absent: nothing was removed and the run still reported
   the directory gone. They now bind `-LiteralPath`, so that root is seen, removed, and verified
   gone. The verify-absent loop is untouched — it is the check that catches this class.
-- **A core name that does not resolve says so (#633).** A dial that never left the workstation and
+- **A core name that does not resolve says so.** A dial that never left the workstation and
   a dial that reached the network and got no answer used to render as the same connection or fetch
   sentence, which sent operators looking at routing for a missing hosts line. One classifier in
   `packages/cli/src/venya_cli/name_resolution.py` now reads the exception cause chain for
@@ -342,7 +342,7 @@ Notable changes to Venya will be documented in this file.
   through it. The new line names the host, says the name did not resolve on this workstation, and
   points at the hosts file or the server URL. A refused connection, a timeout and a handshake
   failure keep the sentence they had.
-- **A hung sandbox create and a vendor memory refusal now name themselves (#639).** Both used to
+- **A hung sandbox create and a vendor memory refusal now name themselves.** Both used to
   reach the operator through the shared command-timeout lane, which reported the wrong stage and
   the wrong number: a create bounded by `SBX_CREATE_TIMEOUT` (240 s) could be announced as
   "Command timed out after 3600 seconds", and a refusal that came from the vendor's memory check
@@ -351,23 +351,23 @@ Notable changes to Venya will be documented in this file.
   reads the timeout it used rather than the constant. The wire is unchanged: a refused create
   stays the flat `503` it was, and the vendor's own stderr still does not cross the relay
   boundary — the distinction is made in the executor's own lines.
-- **The core installer checks the value before it removes anything (#641).** The stale CA-link
+- **The core installer checks the value before it removes anything.** The stale CA-link
   cleanup in `/etc/ssl/certs` built its operand from an unsanitized, error-silenced
   `openssl x509 -subject_hash`: when that produced nothing, the operand degraded to a
   directory-wide dotfile pattern and the run removed files it never meant to name. The hash is now
   resolved once, asserted to be a bare hex name, and used only for that one prefix; an openssl that
   is missing or fails warns, names what it gave back, and continues the install without the
   cleanup.
-- **The plane marker reads one arc now (#601).** Venya's plane marker moved to the project's registered
+- **The plane marker reads one arc now.** Venya's plane marker moved to the project's registered
   enterprise number at 0.1.0alpha17, and the reader accepted the arc it used to sit on alongside it so
   credentials already minted kept resolving while each plane was re-minted. That window is now closed:
   `1.3.6.1.4.1.67159.1.1` is the only marker the reader consults, and a plane-shaped extension on any
   other arc is read as no marker at all — the certificate is refused the way an unmarked one is, through
-  the executor-mTLS path included. This follows the owner's ruling of 2026-10-16 that nothing alpha-era is
+  the executor-mTLS path included. Nothing alpha-era is
   supported, which removes the precondition the second read was kept for. `docs/cert-rotation-runbook.md`
   now says the same thing the code does, and the paired negative that pins the closure is
   `packages/server/tests/test_plane_marker_pen_arc_601.py`, class `TestAnyOtherArcIsNoLongerRead`.
-- **A locked revocation read now answers in the stale class instead of waiting (#603, AC1).** The
+- **A locked revocation read now answers in the stale class instead of waiting.** The
   revocation population is read on the executor request path — the per-request mTLS check, the heartbeat
   and register routes, the two dial gates, audit ingest, the admin lists, and the public CRL route. When a
   lock was held over that table the wait was unbounded; the read now runs inside a savepoint carrying a
@@ -382,8 +382,8 @@ Notable changes to Venya will be documented in this file.
   caller's own pending write — three savepoint properties, each pinned by a cell in
   `packages/server/tests/test_revocation_read_bound_603.py`.
 
-- **A revocation read that runs slowly is now refused, counted and visible (#654, #656).** The
-  bounded read shipped under #603 AC1 bounds the wait for a lock; it never said how long a statement
+- **A revocation read that runs slowly is now refused, counted and visible.** The
+  bounded read bounds the wait for a lock; it never said how long a statement
   could take once it had one, so the only ceiling on execution time was the `statement_timeout` both
   engines set at the session level — 300 s against a read whose caller waits 10 s. A slow read that
   answered late was invisible everywhere: no exception, no refusal, no counter, no log line, a parked
@@ -400,10 +400,10 @@ Notable changes to Venya will be documented in this file.
   these reads, because the shipped request histogram stops at 10 s. Two more reads of the same
   lockable population joined the seam: the CRL the dial mints on its own path, and the
   whole-population read the public poll falls back to when the snapshot publisher is not running
-  (#656) — both of them still answering, which is the half that keeps a freeze fix from becoming a
+  — both of them still answering, which is the half that keeps a freeze fix from becoming a
   refusal the fleet cannot recover from.
 
-- **A stale or missing revocation snapshot is now counted where operators read it (#657).** The
+- **A stale or missing revocation snapshot is now counted where operators read it.** The
   poll that answers `GET /api/v1/executors/certs/revocation-list` already refused with the
   `503` "no revocation asserted" answer when its snapshot was older than 45 s or not there yet;
   it did not increment anything, so the arm an operator was being refused by was absent from the
@@ -413,7 +413,7 @@ Notable changes to Venya will be documented in this file.
   of `site=…` can tell "the pool or the publisher is starving" from "a lock is held over the
   revocation table" without a second metric being introduced, and `docs/revocation-table-operations-runbook.md`
   names the arm it documents.
-- **The admin request path's revocation read carries the same bound (#658).** The admin-mTLS path
+- **The admin request path's revocation read carries the same bound.** The admin-mTLS path
   checks the revocation table on every admin request; that read waited on a lock over the table
   for as long as the holder kept it. It now runs inside the shipped bounded seam with its own site
   label, `admin-mtls`, reusing the existing `crl.revocation_read_lock_timeout_ms` knob. The
@@ -421,7 +421,7 @@ Notable changes to Venya will be documented in this file.
   other fault keeps the generic `403` it answers today. What is new is the lock-wait arm, which
   answers `503` in the "no revocation asserted" class and is counted, so a held lock on the
   revocation table is a visible refusal on the admin plane rather than a stalled request.
-- **The metrics scrape door is open by default on an installed core (#653).**
+- **The metrics scrape door is open by default on an installed core.**
   `systemd/venya-core.service` now ships `Environment=VENYA_METRICS_PORT=10011`, so a freshly
   installed core answers `curl -s http://127.0.0.1:10011/metrics` with no operator step and no
   extra unit to enable. The server binds that port on `127.0.0.1` only and the address is not
@@ -429,20 +429,20 @@ Notable changes to Venya will be documented in this file.
   never payload, and never the high-cardinality labels (`executor_id`, `user_id`, `ip`,
   `session_id`). Change it with `systemctl edit venya-core`; unset it there to close the door.
   `docs/FIREWALL.md`, `docs/installation.md` and the runbook name the port and the read path.
-- **A taken metrics port is a named line, not a stopped core (#653 follow-on).** If the OS refuses
+- **A taken metrics port is a named line, not a stopped core.** If the OS refuses
   the bind — the port is already in use, or this host will not grant it — the core now logs one
   `ERROR` line naming the port, the OS reason, and the fix, and serves on. Exactly those two
   reasons are caught; a value that is not a usable port number still refuses at the config door,
   so a typo is not quietly absorbed. Before this the `Environment=` line was the only place the
   port was mentioned, and a refused bind left the scrape surface dark with nothing saying why.
-- **The audit spool keeps its own count (#651).** A spool that reaches its capacity logged its
+- **The audit spool keeps its own count.** A spool that reaches its capacity logged its
   warning once per band entry and re-stated it per audit event while it sat there, and every drop
   emitted its own line on top — so a full spool moved the log flood onto the drop path. Both lines
   are now edge-triggered, the band line re-states on an interval rather than per event, and a new
   cumulative `dropped_total` counts every drop behind that single line. The count is monotonic for
   the life of the process. What an operator reads is one line per condition and one number that
   says how much was lost, instead of a journal whose size is the only hint.
-- **The executor's `--log-level` flag only wins when it is actually given (#647).** Passing no flag
+- **The executor's `--log-level` flag only wins when it is actually given.** Passing no flag
   now leaves the configured value in charge; previously the flag's built-in default was applied on
   every start and overwrote `/etc/venya/executor.toml` one moment after the file had been read, so
   `log_level` in the file — and `VENYA_EXECUTOR_LOG_LEVEL` below it — were set and ignored. The two
@@ -452,14 +452,14 @@ Notable changes to Venya will be documented in this file.
   because a typo in a verbosity knob must not park a whole executor in a restart loop. When a flag
   does override a value the precedence note had already claimed for the file, one further line
   names the flag as the actual winner.
-- **The revocation-failure threshold has a floor and a ceiling (#660).**
+- **The revocation-failure threshold has a floor and a ceiling.**
   `revocation.max_revocation_failures` is now bounded to 1–1000 at the config door and refuses by
   name outside that range; it is never clamped. A `0` previously stopped a healthy executor on its
   very first poll, before the core had had any chance to answer, and a very large value silently
   disabled the stop-on-no-answer posture the operators are told about — 1 000 consecutive
   unanswered checks at the 30 s beat is roughly 8.3 hours. `docs/deployment-config.md` states the
   range where an operator reads the knob.
-- **The core's own relay client credential now has a registry row and a revoke path (#597).** The
+- **The core's own relay client credential now has a registry row and a revoke path.** The
   certificate the core presents when it dials an executor's `:8443` listener was minted by the
   installer outside the product, so it appeared in no revocation table and the CRL drawn from those
   tables could never name it. It is recorded in a new `core_relay_credentials` table at core
@@ -471,7 +471,7 @@ Notable changes to Venya will be documented in this file.
   names as revoked is refused with `403 REVOKED` on the peer's credential. A registry with no rows
   admits at that door — refusing there would stop every healthy executor — so the refusal is at the
   verb, and the door's own behavior is described in `docs/beta-known-limitations.md`.
-- **The executor's relay door can now name a revoked PEER, not only itself (#586).** The accept
+- **The executor's relay door can now name a revoked PEER, not only itself.** The accept
   gate on `:8443` already refused a new connection while this daemon's own credential was revoked
   or unanswered. It now also consults the executor-serial population the core publishes about the
   credential arriving on the other side of the socket: a peer whose executor serial is on the
@@ -486,50 +486,49 @@ Notable changes to Venya will be documented in this file.
   `dev` between `v0.1.0alpha16` and this release and were not named individually in a release note;
   per-item detail is `git log --first-parent --merges 6701b06..1950e75`. What an operator sees:
   the generated nginx site config and the core's relay TLS context state the protocol floor
-  explicitly (TLS 1.2 / 1.3) instead of inheriting what the OS offers (#323); a tarball source that
+  explicitly (TLS 1.2 / 1.3) instead of inheriting what the OS offers; a tarball source that
   is not HTTPS requires the operator's pin before anything is fetched or written, in the shell and
-  PowerShell installers alike (#328, #375); the CLI uninstaller removes the `uv` tool environments
-  and shims at the sites that created them (#390); the executor's key file keeps the mode it was
-  written at, and the installer verifies the mode rather than assuming it (#457); `docker.list` is
-  left readable by the unprivileged sandbox reader after the repository is set up (#434); an
+  PowerShell installers alike; the CLI uninstaller removes the `uv` tool environments
+  and shims at the sites that created them; the executor's key file keeps the mode it was
+  written at, and the installer verifies the mode rather than assuming it; `docker.list` is
+  left readable by the unprivileged sandbox reader after the repository is set up; an
   install directory whose name contains shell metacharacters is passed through without being
-  re-interpreted (#489); a server URL given once on the command line stays out of the config file,
-  so a later save cannot persist it (#423); shape help lists every built-in shape, including the
-  `sudo-stdin` form (#484); a ruled `< ` redirect in a sudo-remote command works again, through one
-  shared renderer (#332); the core install creates the `venya_audit` database role and trust map the
-  append-only audit trail needs (#66); the interactive install banner is safe to run with no
+  re-interpreted; a server URL given once on the command line stays out of the config file,
+  so a later save cannot persist it; shape help lists every built-in shape, including the
+  `sudo-stdin` form; a ruled `< ` redirect in a sudo-remote command works again, through one
+  shared renderer; the core install creates the `venya_audit` database role and trust map the
+  append-only audit trail needs; the interactive install banner is safe to run with no
   terminal, the CLI's stderr tee honors isolation, an executor with a ghost identity refuses at boot
-  with the re-enroll path named, and the Docker gate runs after enrollment (#360, #361, #362, #363,
-  #365); and the secret-bearing files and directories the CLI creates are written at their final
+  with the re-enroll path named, and the Docker gate runs after enrollment;
+  and the secret-bearing files and directories the CLI creates are written at their final
   mode instead of tightened afterwards.
 
 - **Authorization, session, audit and timekeeping fixes from the same wave (recorded late; same
   range).** Secret writes are scoped to the caller's own groups, and the secret and session
   authorization checks read the caller rather than the request; the role member roster reads to
-  members and their oversight tiers (#448); the server-minted root CA carries the key identifiers
-  strict verifiers expect (#522); an account-status write can no longer strand the last usable
+  members and their oversight tiers; the server-minted root CA carries the key identifiers
+  strict verifiers expect; an account-status write can no longer strand the last usable
   admin, and the lockout guards count the roster under a row lock so a concurrent request cannot
-  slip past them (#486, #487); a reset needs admin authority once the core is initialized, and it
-  re-checks that precondition under the bootstrap lock (#450, #511); a break-glass recovery code is
+  slip past them; a reset needs admin authority once the core is initialized, and it
+  re-checks that precondition under the bootstrap lock; a break-glass recovery code is
   claimed atomically so one code cannot be spent twice, and an executed command session cannot be
-  replayed (#512, #513); a secret upsert takes a locking read on its own key, and the account rate
-  limiter keeps its counters consistent under concurrency (#515, #516); admin user delete completes
+  replayed; a secret upsert takes a locking read on its own key, and the account rate
+  limiter keeps its counters consistent under concurrency; admin user delete completes
   for a user who still holds credentials or roles, and deleting a non-empty role returns the
-  dependency message instead of failing (#425); rate-limit lockout answers `429` with `Retry-After`
-  and a failed secret retrieval arms the account limiter the way a failed login does (#385, #421);
-  a stored FIDO2 challenge expires with the ceremony lifetime instead of lingering (#408);
-  session-demanding admin routes verify the certificate and the session (#340); the command wire
-  carries argument lists, and a NUL byte in an argument is refused at the structural gate (#322);
-  the direct path's inner guard and the ruled gate now share one bound-path helper (#374); the
-  disk-encryption check reads the mount it was asked about and that mount's own device lineage
-  (#444, #488); the close-on-exec sweep steps over a descriptor that closed while it was being read
-  instead of reporting a failure (#535); the database key-encryption key has one protected owner in
-  the backend cache, which the filter and sentinel paths read (#472); the audit spool's FIFO writer
-  logs the path it gave up on (#420); rate-limit windows come from the shared database clock, age
+  dependency message instead of failing; rate-limit lockout answers `429` with `Retry-After`
+  and a failed secret retrieval arms the account limiter the way a failed login does;
+  a stored FIDO2 challenge expires with the ceremony lifetime instead of lingering;
+  session-demanding admin routes verify the certificate and the session; the command wire
+  carries argument lists, and a NUL byte in an argument is refused at the structural gate;
+  the direct path's inner guard and the ruled gate now share one bound-path helper; the
+  disk-encryption check reads the mount it was asked about and that mount's own device lineage;
+  the close-on-exec sweep steps over a descriptor that closed while it was being read
+  instead of reporting a failure; the database key-encryption key has one protected owner in
+  the backend cache, which the filter and sentinel paths read; the audit spool's FIFO writer
+  logs the path it gave up on; rate-limit windows come from the shared database clock, age
   gates that could go backwards are clamped, and the expiry-clock relabel applies only to a naive
-  input, so a clock step neither shortens nor lengthens a session (#460, #464, #465, #549); and a
-  paginated list carries a tiebreaker, so two reads in the same instant return the same page
-  (#463).
+  input, so a clock step neither shortens nor lengthens a session; and a
+  paginated list carries a tiebreaker, so two reads in the same instant return the same page.
 
 - **Executor concurrency, certificate issuance cadence, and the boot-cleanups (recorded late; same
   range).** Two new settings an operator can set: the executor now admits relay commands under one
@@ -542,148 +541,146 @@ Notable changes to Venya will be documented in this file.
   its admin TLS context when the certificate file's content changes rather than when its timestamp
   changes, so a restore that preserves `mtime`, a `cp`, or a re-download of an identical file all
   get the new material presented instead of the old (RF-8c). At boot the executor reaps the leftovers of
-  earlier runs: sandboxes no teardown claimed (#474), and shared-memory directories under either
-  prefix the sandbox strategy writes, older than the session lifetime (#469). The static askpass
+  earlier runs: sandboxes no teardown claimed, and shared-memory directories under either
+  prefix the sandbox strategy writes, older than the session lifetime. The static askpass
   helper is copied to a path that allows execution before the sandbox calls it, keeping mode 0555
-  and the no-secret-in-argv posture (#426); the core installer picks the active PostgreSQL cluster
-  head rather than an inactive one (#496); each installer code fix verifies its own post-condition
-  and says so, instead of reporting success on the `sed` exit status alone (#519); the core
-  installer confirms the nginx restart it asked for instead of assuming it (#454); a sandbox
-  teardown that fails is logged and no longer allowed to replace the command's own outcome (#417); a truncated
-  sandbox output carries the in-band marker the direct path already used (#409); and a policy
-  rejection returns `422` with the reason rather than a transport-shaped error (#410).
+  and the no-secret-in-argv posture; the core installer picks the active PostgreSQL cluster
+  head rather than an inactive one; each installer code fix verifies its own post-condition
+  and says so, instead of reporting success on the `sed` exit status alone; the core
+  installer confirms the nginx restart it asked for instead of assuming it; a sandbox
+  teardown that fails is logged and no longer allowed to replace the command's own outcome; a truncated
+  sandbox output carries the in-band marker the direct path already used; and a policy
+  rejection returns `422` with the reason rather than a transport-shaped error.
 
 
 - **CLI secret handling and dead code, from the same wave (recorded late; same range).** A security
   key or CA material the CLI holds in memory now lives in one protected buffer that is zeroed on
-  release, with the pinning outcome reported as it was measured rather than as a promise (#538);
+  release, with the pinning outcome reported as it was measured rather than as a promise;
   files and directories that carry secrets are created at their final mode — atomic
   write-then-rename at seven write sites including the enrollment token, `0700` at the ten secret
   directories — so no value is briefly readable under the process umask, and the redundant
-  after-the-fact `chmod`s are gone (#15-class wave, `fix(cli): create secret-bearing files and dirs
-  at their final mode`); two zero-caller methods found dead were removed (#15); the injector helpers
-  nothing called and the shared-memory prose that outlived them were removed (#471); the deploy
-  record refuses a dirty source tree (#16); and the browser-auth router's module docstring now
-  states what is mounted instead of what was disabled in August (#312, documentation).
+  after-the-fact `chmod`s are gone: create secret-bearing files and dirs
+  at their final mode`); two zero-caller methods found dead were removed; the injector helpers
+  nothing called and the shared-memory prose that outlived them were removed; the deploy
+  record refuses a dirty source tree; and the browser-auth router's module docstring now
+  states what is mounted instead of what was disabled in August.
 
 
-- **Backfilled from the release completeness audit.** Every row below is one merged change that had no entry in this file. The wording is the merge's own subject where the merge wrote one; where a merge landed with only a branch name, the row is the ticket's title, marked "Addressed:" so it cannot be read as shipped behaviour. Each row names the ticket ids it carries, the count of operative files, and the merge sha. One row per merge: several tickets rode a single merge, and those ids are listed together rather than repeated as separate changes.
-- **touch cue prints once per operation, re-shown on PIN retry** (`#10`; 2 operative files; merge `77827714b`).
-- **Stage-1 filter contract tightening** (`#20`; 5 operative files; merge `ec256cb64`).
-- **register retries back off, permanent rejections stop loud** (`#24`; 4 operative files; merge `8750d1103`).
-- **clean startup exit for missing-CA TLS refusal** (`#41`; 2 operative files; merge `c4e0d31e1`).
-- **dns_resolver wording made honest about egress-allow semantics across surfaces** (`#50`; 5 operative files; merge `488b02717`).
-- **auditor help copy — full-visibility + exclusive-tier wording; regen cli-reference; lifecycle-test SoD notes; +1 help-pin test; wording owner-approved; expected cli 1022** (`#290`; 4 operative files; merge `3a970484c`).
-- **middleware stashes the admission verdict + presented serial so the audit-ingest sender flag shares one derivation by construction** (`#311`; 4 operative files; merge `30cd22f93`).
-- **tree-wide baseline resync + core tripwire interlock — the UPGRADE.md prose finding baselined, one-time delta +1 entry; detect-secrets==1.5.0 pinned dev-side** (`#313`, `#321`; 4 operative files; merge `8d8e41252`).
-- **daemon umask 077 + atomic private-mode writes — world-writable key window closed on boot and rotation** (`#316`; 5 operative files; merge `655ae5f47`).
-- **per-end boundary anchoring + component-aware trusted-path compare — 2 vacuous default patterns and the custom-config surface now match as written** (`#318`; 2 operative files; merge `024ce9ce2`).
-- **stop the core install when the PostgreSQL config dir is missing, and purge the macOS config dir in the CLI uninstaller** (`#319`; 2 operative files; merge `d5d6491fa`, also `82c4d52a4`).
-- **boundary validation of server-issued secret_id before both path sinks, reject-before-write** (`#320`; 2 operative files; merge `c0ecc66a6`).
-- **Addressed: lone-surrogate argv executes then crashes the completion audit write — side effects kept** (`#334`; 7 operative files; merge `c31d8b76b`).
-- **retire the server-side CA export/restore pair in favor of the CLI custody format, and make the CRL conditional-GET ETag cover the served capped population with loud truncation signal** (`#336`, `#337`; 7 operative files; merge `dac262adc`).
-- **retire the unread require_in_production knob, elevation challenge lifecycle, rotation-model forbid with dead CLI flag retired, admin-plane enumerated constraints, and the PostgreSQL-dialect guard on the enrollment advisory lock** (`#338`, `#345`, `#355`, `#356`, `#366`; 16 operative files; merge `5c5bb13fe`).
-- **enrollment-cap advisory locking, browser cookie session-plane alignment, persisted bearer-token expiry with fail-closed validation, and direct 48-char recovery-code generation** (`#339`, `#341`, `#342`, `#344`; 16 operative files; merge `002bef62e`).
-- **Addressed: legacy /enrollment/tokens mint/revoke bypasses the lifecycle audit events its admin twins emit** (`#343`; 3 operative files; merge `3d2227f21`).
-- **Addressed: revoke-cert reason field unguarded against String(64) column — 65+ chars 500s the admin action** (`#346`, `#347`; 6 operative files; merge `f09939ba0`).
-- **Addressed: MCP get_audit hours accepts negatives — future cutoff returns silently empty audit** (`#348`, `#349`, `#350`; 4 operative files; merge `0d10e003b`).
-- **redact secret argv in the support-log header, stage renew writes to random-name temps, refuse structural characters in admin identities before minting, and encode secret keys and user IDs in URL paths with ruled charset validation** (`#351`, `#352`, `#353`, `#354`; 10 operative files; merge `ad28750cd`).
-- **repo-wide extra=forbid on request-body models with interlock pin and ruled exemptions** (`#357`; 13 operative files; merge `e84d62849`).
-- **recovery requests carry only declared wire fields, local flags stay client-side** (`#367`; 2 operative files; merge `c1cfe689b`).
-- **the serve-time hash embed lands only at the assignment default with the guard comparison made embed-invisible, and executor credentials are hardened right after registration so a Docker-gate abort leaves a bootable install** (`#368`, `#370`; 5 operative files; merge `0a6d8e847`).
-- **RecoveryRequest carries the same declared-fields-only rule as the rest of the request models now that its exemption condition is gone** (`#371`; 4 operative files; merge `44095df89`).
-- **exec-register certificate writes are atomic and mode-pinned, and the setup CA directory takes the standard secret-dir idiom** (`#376`; 3 operative files; merge `ea9060164`).
-- **the recovery --force/--confirm no-ops are retired with paired reject cells and the regenerated reference carrying the leaner surface** (`#377`; 6 operative files; merge `596657260`).
-- **executor state-dir mode pin now applies on both install paths** (`#380`; 2 operative files; merge `a6ff8ba22`).
-- **ignored-knob notice for VENYA_EGRESS_ALLOW on core installs** (`#382`; 2 operative files; merge `c3c801409`).
-- **kvm group re-assert now runs on every executor install** (`#384`; 2 operative files; merge `feee70352`).
-- **drop the inert --allow-host/--no-network daemon flags** (`#386`; 2 operative files; merge `cf044f7b4`).
-- **chokepoint honors --core-url alias** (`#387`; 2 operative files; merge `62cf7f54d`).
-- **renew public-material posture** (`#388`; 2 operative files; merge `35df0f91a`).
-- **admin executor row removal — DELETE /admin/executors/{id} + 'venya admin remove-executor** (`#391`; 8 operative files; merge `6ac1323d9`).
-- **drop seven inert server config fields** (`#392`; 1 operative file; merge `735fff40c`).
-- **remove /var/backups/venya in core uninstaller** (`#394`; 2 operative files; merge `a864e0da5`).
-- **core/executor uninstallers verify removals before claiming success** (`#396`; 3 operative files; merge `1955b1f79`).
-- **one-shot register URL stays in memory, CLI config no longer written** (`#398`; 2 operative files; merge `fb1af2831`).
-- **uninstallers fail loud, not silent, on non-interactive confirm** (`#399`; 4 operative files; merge `b0c928062`).
-- **ps1 ACL check reports coverage honestly** (`#400`; 2 operative files; merge `ed80dfe86`).
-- **ps1 mcp install claim gates on verification, temp sweep discloses** (`#401`; 2 operative files; merge `efca27833`).
-- **ps1 uninstaller verifies removal sites before claiming success** (`#402`; 2 operative files; merge `ce1be3356`).
-- **cli installer discloses a skipped venya-mcp import check instead of claiming install** (`#403`; 2 operative files; merge `68d5f9b38`).
-- **sandbox setup runs inside the remove guard — a setup raise no longer leaves an orphan VM** (`#406`; 2 operative files; merge `9a13f3416`).
-- **best-effort honest audit row written when the execution relay times out** (`#407`; 2 operative files; merge `749ed2719`).
-- **session-secret revoke deletes the session's rows so revoked means non-resolvable** (`#411`; 3 operative files; merge `fe06f7936`).
-- **enrollment complete validates token state like the completer, before side effects** (`#412`; 2 operative files; merge `a0c180880`).
-- **server-side user-verification knob wired; enforcement branch reachable** (`#413`; 5 operative files; merge `37c11380f`).
-- **get_audit tool text now matches the auditor-tier gate** (`#414`; 2 operative files; merge `1a91db8a0`).
-- **argv parsed before session creation — malformed commands issue no POST** (`#415`; 2 operative files; merge `2a15b5800`).
-- **credential id crosschecked against the attested id before any store/DB write** (`#416`; 7 operative files; merge `e0408d6ff`).
-- **relayed pre-sandbox rejections now land a command_rejected row on the core ledger** (`#424`; 2 operative files; merge `0a589ba36`).
-- **Addressed: installer-reuses-dead-dns-resolver-silently — executor.toml carry-forward skips reachability check** (`#428`; 1 operative file; merge `aff697fbd`).
-- **Addressed: sbx-exec-env-file-noop — deployed sbx 0.38.0 accepts 'exec --env-file' and injects nothing** (`#430`; 7 operative files; merge `093348ac0`).
-- **Addressed: audit-forwarder-httpx-cert-verify-conflict — forwarder TypeErrors every cycle on httpx2 2.12** (`#432`; 2 operative files; merge `ac8f36162`).
-- **Addressed: audit-spool-forwarder-session-lifetime — forwarder exists only during command sessions** (`#436`; 2 operative files; merge `efe544cba`).
-- **Addressed: cli-windows-posix-geteuid-crash — POSIX-only os.geteuid() calls crash the Windows CLI on setup/exec-register/cert-renew paths** (`#438`; 4 operative files; merge `4d531dc18`).
-- **Addressed: auth-me-ignores-bearer-token — a bearer-authenticated client is told it is unauthenticated** (`#445`; 2 operative files; merge `98017e7e7`).
-- **Addressed: shm-session-dir-leak-on-secret-write-failure — staged secret directory survives a mid-stage failure** (`#446`; 2 operative files; merge `596268cf8`).
-- **Addressed: require-role-blanket-executor-pass — an early return passes every role gate for an executor identity** (`#449`; 8 operative files; merge `bb15aa744`).
-- **Addressed: stage2-decode-swallow-empty-masked-count — an undecodable filter body answers 200 with zero knowledge and no log** (`#452`; 5 operative files; merge `42a6ec65f`).
-- **Addressed: health-probe-cannot-distinguish-uninitialized-from-broken — the readiness surface answers fine for a component it never checked** (`#455`; 3 operative files; merge `eff985b4b`).
-- **Addressed: secret-destroy-failure-warns-and-reports-success — a failed secret destroy leaves material resident and the run green** (`#456`; 2 operative files; merge `38f438782`, also `6c4afcc44`).
-- **Addressed: enrollment-token-used-at-backdated-by-tolerance — one bind value serves the expiry check and the record column** (`#462`; 2 operative files; merge `1c81cb65a`).
-- **Addressed: zstd-ingest-expands-before-size-brake — the decompression brake is paid for in RAM before it applies** (`#473`; 2 operative files; merge `597333bf8`).
-- **Addressed: installer-temps-survive-abort-outside-fetch-trap — CSRs and a large tarball outlive an aborted install** (`#475`; 4 operative files; merge `32c6cb987`).
-- **Addressed: cli-cert-save-cleanup-guard-too-narrow — the one staged-temp site guarded by OSError instead of BaseException** (`#476`; 2 operative files; merge `e98a7aaf7`).
-- **Addressed: core IP written to /etc/hosts unvalidated — executor installer permits host poisoning** (`#490`; 3 operative files; merge `bcb74b2d7`).
-- **Addressed: IPv4 validator word-splits unquoted input — wildcard octets expand against the working directory** (`#491`; 2 operative files; merge `748b883e2`).
-- **the relay dial trusts only the configured Venya anchor** (`#501`; 3 operative files; merge `e4fec29fe`).
-- **the revocation read and the FIDO2 ceremony transport now require an https core URL** (`#521`; 4 operative files; merge `6efd18fc1`).
-- **the workstation bearer dial now requires its own CA anchor instead of the host store** (`#530`; 4 operative files; merge `a486f1ac7`).
-- **the ceremony dial anchors to the Venya CA or refuses** (`#533`; 6 operative files; merge `5ff79d41d`).
-- **Addressed: cli-register-executor-dial-falls-back-to-host-store — the executor registration dial still accepts the workstation OS trust store** (`#536`; 10 operative files; merge `679a909b6`).
-- **Addressed: ca-key-load-plaintext-with-passphrase-typeerror — a legacy unencrypted CA key plus a configured passphrase raises TypeError instead of a helpful refusal** (`#541`; 5 operative files; merge `6ea8d75a7`).
-- **Addressed: detect-secrets-hook-rewrites-shared-baseline-mid-commit** (`#546`; 4 operative files; merge `5cc1a868a`).
-- **Addressed: cli init-admin-ca — no-passphrase branch writes plaintext CA key while the server path refuses** (`#547`; 6 operative files; merge `ce2729a01`, also `e9555ad41`).
-- **Addressed: baseline self-reference makes naive filename greps over-count the detect-secrets baseline** (`#550`; 4 operative files; merge `748acc209`).
-- **Addressed: revocation-list HTTP status error escapes both handlers and stops the executor daemon** (`#551`; 2 operative files; merge `7c086ca34`).
-- **Addressed: revocation-list-malformed-payload-stops-daemon — a 200 with an unparseable revocation body takes the executor daemon down** (`#552`; 2 operative files; merge `b64d2a265`).
-- **the sbx store-over-HTTP path is gone: it had no production caller, its two cells passed even with the transport removed so they asserted nothing, and the sentence describing third-party behaviour behind it had never been observed by anyone in this workspace; the generated bandit register moves 64 to 63 in the same commit and the interlock holds, verified by checker with all five veto questions answered by command and output, and independently audited pre-veto by a second seat that confirmed the deletion is complete and no coverage was lost** (`#556`, `#558`; 3 operative files; merge `972dc9514`).
-- **the engine comments now name the SET statements they actually guard instead of calling them PRAGMAs, which PostgreSQL has no such statement of; comment prose only, proven by a parse-tree check, and the baseline pointer it moved is a separate commit with its own reason** (`#636`; 2 operative files; merge `c7cdc163b`).
-- **the PostgreSQL test door now says what is wrong with it: a pre-flight at the door's own setup reads the socket or address the URL names, reads the free space on the volume that holds it, and when a leg asked for the door and this host cannot give it, the gated cells are aborted with the cause, the number, the consequence and the fix instead of dying as psycopg2 product reds. Four causes are kept apart on purpose — never started, died mid-run, refused, space low — because a lane told the disk is short when 4.8 GiB is free goes and frees a disk that was never the problem, and a healthy door plus every non-gated cell pass straight through. One shared rule in scripts/pg_door_preflight.py with two thin conftest wirings; the new core conftest is proved inert for the other 542 collected cells and server's hook shadows no fixture, and 29 cells cover the causes, the paired negatives, the redaction, and a contract that walks the tree to assert every gated class actually names the door in its skip reason** (`#650`; 4 operative files; merge `70e075520`).
-- **Addressed: cli-admin-cert-bootstrap-init-gate-self-blocks-first-mint — APIClient constructor requires the pair that admin cert renew exists to create** (`#667`; 3 operative files; merge `422f87e25`).
-- **Addressed: already-revoked-serial-echoes-the-path-executor-id — the duplicate branch answers before the pairing check** (`#687`; 2 operative files; merge `9e314f679`).
-- **Addressed: legal-command-redirect-starves-remote-sudo-when-sshpass-is-present — the blessed < allowance is legal by validation and un-executable by construction** (`#695`; 2 operative files; merge `51a73bd7e`, also `5d50545c3`).
-- **batch after the owner read** (`#698`; 2 operative files; merge `c2cd52495`).
+- **Backfilled from the release completeness audit.** Every row below is one merged change that had no entry in this file. The wording is the merge's own subject where the merge wrote one; where a merge landed with only a branch name, the row is the work item's title, marked "Addressed:" so it cannot be read as shipped behaviour. Each row names the count of operative files and the merge sha. One row per merge: several work items rode a single merge, and those are kept together rather than repeated as separate changes.
+- **touch cue prints once per operation, re-shown on PIN retry** (2 operative files; merge `77827714b`).
+- **Stage-1 filter contract tightening** (5 operative files; merge `ec256cb64`).
+- **register retries back off, permanent rejections stop loud** (4 operative files; merge `8750d1103`).
+- **clean startup exit for missing-CA TLS refusal** (2 operative files; merge `c4e0d31e1`).
+- **dns_resolver wording made honest about egress-allow semantics across surfaces** (5 operative files; merge `488b02717`).
+- **auditor help copy — full-visibility + exclusive-tier wording; regen cli-reference; lifecycle-test SoD notes; +1 help-pin test; expected cli 1022** (4 operative files; merge `3a970484c`).
+- **middleware stashes the admission verdict + presented serial so the audit-ingest sender flag shares one derivation by construction** (4 operative files; merge `30cd22f93`).
+- **tree-wide baseline resync + core tripwire interlock — the UPGRADE.md prose finding baselined, one-time delta +1 entry; detect-secrets==1.5.0 pinned dev-side** (4 operative files; merge `8d8e41252`).
+- **daemon umask 077 + atomic private-mode writes — world-writable key window closed on boot and rotation** (5 operative files; merge `655ae5f47`).
+- **per-end boundary anchoring + component-aware trusted-path compare — 2 vacuous default patterns and the custom-config surface now match as written** (2 operative files; merge `024ce9ce2`).
+- **stop the core install when the PostgreSQL config dir is missing, and purge the macOS config dir in the CLI uninstaller** (2 operative files; merge `d5d6491fa`, also `82c4d52a4`).
+- **boundary validation of server-issued secret_id before both path sinks, reject-before-write** (2 operative files; merge `c0ecc66a6`).
+- **Addressed: lone-surrogate argv executes then crashes the completion audit write — side effects kept** (7 operative files; merge `c31d8b76b`).
+- **retire the server-side CA export/restore pair in favor of the CLI custody format, and make the CRL conditional-GET ETag cover the served capped population with loud truncation signal** (7 operative files; merge `dac262adc`).
+- **retire the unread require_in_production knob, elevation challenge lifecycle, rotation-model forbid with dead CLI flag retired, admin-plane enumerated constraints, and the PostgreSQL-dialect guard on the enrollment advisory lock** (16 operative files; merge `5c5bb13fe`).
+- **enrollment-cap advisory locking, browser cookie session-plane alignment, persisted bearer-token expiry with fail-closed validation, and direct 48-char recovery-code generation** (16 operative files; merge `002bef62e`).
+- **Addressed: legacy /enrollment/tokens mint/revoke bypasses the lifecycle audit events its admin twins emit** (3 operative files; merge `3d2227f21`).
+- **Addressed: revoke-cert reason field unguarded against String(64) column — 65+ chars 500s the admin action** (6 operative files; merge `f09939ba0`).
+- **Addressed: MCP get_audit hours accepts negatives — future cutoff returns silently empty audit** (4 operative files; merge `0d10e003b`).
+- **redact secret argv in the support-log header, stage renew writes to random-name temps, refuse structural characters in admin identities before minting, and encode secret keys and user IDs in URL paths with ruled charset validation** (10 operative files; merge `ad28750cd`).
+- **repo-wide extra=forbid on request-body models with interlock pin and ruled exemptions** (13 operative files; merge `e84d62849`).
+- **recovery requests carry only declared wire fields, local flags stay client-side** (2 operative files; merge `c1cfe689b`).
+- **the serve-time hash embed lands only at the assignment default with the guard comparison made embed-invisible, and executor credentials are hardened right after registration so a Docker-gate abort leaves a bootable install** (5 operative files; merge `0a6d8e847`).
+- **RecoveryRequest carries the same declared-fields-only rule as the rest of the request models now that its exemption condition is gone** (4 operative files; merge `44095df89`).
+- **exec-register certificate writes are atomic and mode-pinned, and the setup CA directory takes the standard secret-dir idiom** (3 operative files; merge `ea9060164`).
+- **the recovery --force/--confirm no-ops are retired with paired reject cells and the regenerated reference carrying the leaner surface** (6 operative files; merge `596657260`).
+- **executor state-dir mode pin now applies on both install paths** (2 operative files; merge `a6ff8ba22`).
+- **ignored-knob notice for VENYA_EGRESS_ALLOW on core installs** (2 operative files; merge `c3c801409`).
+- **kvm group re-assert now runs on every executor install** (2 operative files; merge `feee70352`).
+- **drop the inert --allow-host/--no-network daemon flags** (2 operative files; merge `cf044f7b4`).
+- **chokepoint honors --core-url alias** (2 operative files; merge `62cf7f54d`).
+- **renew public-material posture** (2 operative files; merge `35df0f91a`).
+- **admin executor row removal — DELETE /admin/executors/{id} + 'venya admin remove-executor** (8 operative files; merge `6ac1323d9`).
+- **drop seven inert server config fields** (1 operative file; merge `735fff40c`).
+- **remove /var/backups/venya in core uninstaller** (2 operative files; merge `a864e0da5`).
+- **core/executor uninstallers verify removals before claiming success** (3 operative files; merge `1955b1f79`).
+- **one-shot register URL stays in memory, CLI config no longer written** (2 operative files; merge `fb1af2831`).
+- **uninstallers fail loud, not silent, on non-interactive confirm** (4 operative files; merge `b0c928062`).
+- **ps1 ACL check reports coverage honestly** (2 operative files; merge `ed80dfe86`).
+- **ps1 mcp install claim gates on verification, temp sweep discloses** (2 operative files; merge `efca27833`).
+- **ps1 uninstaller verifies removal sites before claiming success** (2 operative files; merge `ce1be3356`).
+- **cli installer discloses a skipped venya-mcp import check instead of claiming install** (2 operative files; merge `68d5f9b38`).
+- **sandbox setup runs inside the remove guard — a setup raise no longer leaves an orphan VM** (2 operative files; merge `9a13f3416`).
+- **best-effort honest audit row written when the execution relay times out** (2 operative files; merge `749ed2719`).
+- **session-secret revoke deletes the session's rows so revoked means non-resolvable** (3 operative files; merge `fe06f7936`).
+- **enrollment complete validates token state like the completer, before side effects** (2 operative files; merge `a0c180880`).
+- **server-side user-verification knob wired; enforcement branch reachable** (5 operative files; merge `37c11380f`).
+- **get_audit tool text now matches the auditor-tier gate** (2 operative files; merge `1a91db8a0`).
+- **argv parsed before session creation — malformed commands issue no POST** (2 operative files; merge `2a15b5800`).
+- **credential id crosschecked against the attested id before any store/DB write** (7 operative files; merge `e0408d6ff`).
+- **relayed pre-sandbox rejections now land a command_rejected row on the core ledger** (2 operative files; merge `0a589ba36`).
+- **Addressed: installer-reuses-dead-dns-resolver-silently — executor.toml carry-forward skips reachability check** (1 operative file; merge `aff697fbd`).
+- **Addressed: sbx-exec-env-file-noop — deployed sbx 0.38.0 accepts 'exec --env-file' and injects nothing** (7 operative files; merge `093348ac0`).
+- **Addressed: audit-forwarder-httpx-cert-verify-conflict — forwarder TypeErrors every cycle on httpx2 2.12** (2 operative files; merge `ac8f36162`).
+- **Addressed: audit-spool-forwarder-session-lifetime — forwarder exists only during command sessions** (2 operative files; merge `efe544cba`).
+- **Addressed: cli-windows-posix-geteuid-crash — POSIX-only os.geteuid calls crash the Windows CLI on setup/exec-register/cert-renew paths** (4 operative files; merge `4d531dc18`).
+- **Addressed: auth-me-ignores-bearer-token — a bearer-authenticated client is told it is unauthenticated** (2 operative files; merge `98017e7e7`).
+- **Addressed: shm-session-dir-leak-on-secret-write-failure — staged secret directory survives a mid-stage failure** (2 operative files; merge `596268cf8`).
+- **Addressed: require-role-blanket-executor-pass — an early return passes every role gate for an executor identity** (8 operative files; merge `bb15aa744`).
+- **Addressed: stage2-decode-swallow-empty-masked-count — an undecodable filter body answers 200 with zero knowledge and no log** (5 operative files; merge `42a6ec65f`).
+- **Addressed: health-probe-cannot-distinguish-uninitialized-from-broken — the readiness surface answers fine for a component it never checked** (3 operative files; merge `eff985b4b`).
+- **Addressed: secret-destroy-failure-warns-and-reports-success — a failed secret destroy leaves material resident and the run green** (2 operative files; merge `38f438782`, also `6c4afcc44`).
+- **Addressed: enrollment-token-used-at-backdated-by-tolerance — one bind value serves the expiry check and the record column** (2 operative files; merge `1c81cb65a`).
+- **Addressed: zstd-ingest-expands-before-size-brake — the decompression brake is paid for in RAM before it applies** (2 operative files; merge `597333bf8`).
+- **Addressed: installer-temps-survive-abort-outside-fetch-trap — CSRs and a large tarball outlive an aborted install** (4 operative files; merge `32c6cb987`).
+- **Addressed: cli-cert-save-cleanup-guard-too-narrow — the one staged-temp site guarded by OSError instead of BaseException** (2 operative files; merge `e98a7aaf7`).
+- **Addressed: core IP written to /etc/hosts unvalidated — executor installer permits host poisoning** (3 operative files; merge `bcb74b2d7`).
+- **Addressed: IPv4 validator word-splits unquoted input — wildcard octets expand against the working directory** (2 operative files; merge `748b883e2`).
+- **the relay dial trusts only the configured Venya anchor** (3 operative files; merge `e4fec29fe`).
+- **the revocation read and the FIDO2 ceremony transport now require an https core URL** (4 operative files; merge `6efd18fc1`).
+- **the workstation bearer dial now requires its own CA anchor instead of the host store** (4 operative files; merge `a486f1ac7`).
+- **the ceremony dial anchors to the Venya CA or refuses** (6 operative files; merge `5ff79d41d`).
+- **Addressed: cli-register-executor-dial-falls-back-to-host-store — the executor registration dial still accepts the workstation OS trust store** (10 operative files; merge `679a909b6`).
+- **Addressed: ca-key-load-plaintext-with-passphrase-typeerror — a legacy unencrypted CA key plus a configured passphrase raises TypeError instead of a helpful refusal** (5 operative files; merge `6ea8d75a7`).
+- **Addressed: detect-secrets-hook-rewrites-shared-baseline-mid-commit** (4 operative files; merge `5cc1a868a`).
+- **Addressed: cli init-admin-ca — no-passphrase branch writes plaintext CA key while the server path refuses** (6 operative files; merge `ce2729a01`, also `e9555ad41`).
+- **Addressed: baseline self-reference makes naive filename greps over-count the detect-secrets baseline** (4 operative files; merge `748acc209`).
+- **Addressed: revocation-list HTTP status error escapes both handlers and stops the executor daemon** (2 operative files; merge `7c086ca34`).
+- **Addressed: revocation-list-malformed-payload-stops-daemon — a 200 with an unparseable revocation body takes the executor daemon down** (2 operative files; merge `b64d2a265`).
+- **the sbx store-over-HTTP path is gone: it had no production caller, its two cells passed even with the transport removed so they asserted nothing, and the sentence describing third-party behaviour behind it had never been observed by anyone in this workspace; the generated bandit register moves 64 to 63 in the same commit and the interlock holds, verified by checker with all five veto questions answered by command and output, and independently audited pre-veto by a second seat that confirmed the deletion is complete and no coverage was lost** (3 operative files; merge `972dc9514`).
+- **the engine comments now name the SET statements they actually guard instead of calling them PRAGMAs, which PostgreSQL has no such statement of; comment prose only, proven by a parse-tree check, and the baseline pointer it moved is a separate commit with its own reason** (2 operative files; merge `c7cdc163b`).
+- **the PostgreSQL test door now says what is wrong with it: a pre-flight at the door's own setup reads the socket or address the URL names, reads the free space on the volume that holds it, and when a leg asked for the door and this host cannot give it, the gated cells are aborted with the cause, the number, the consequence and the fix instead of dying as psycopg2 product reds. Four causes are kept apart on purpose — never started, died mid-run, refused, space low — because a lane told the disk is short when 4.8 GiB is free goes and frees a disk that was never the problem, and a healthy door plus every non-gated cell pass straight through. One shared rule in scripts/pg_door_preflight.py with two thin conftest wirings; the new core conftest is proved inert for the other 542 collected cells and server's hook shadows no fixture, and 29 cells cover the causes, the paired negatives, the redaction, and a contract that walks the tree to assert every gated class actually names the door in its skip reason** (4 operative files; merge `70e075520`).
+- **Addressed: cli-admin-cert-bootstrap-init-gate-self-blocks-first-mint — APIClient constructor requires the pair that admin cert renew exists to create** (3 operative files; merge `422f87e25`).
+- **Addressed: already-revoked-serial-echoes-the-path-executor-id — the duplicate branch answers before the pairing check** (2 operative files; merge `9e314f679`).
+- **Addressed: legal-command-redirect-starves-remote-sudo-when-sshpass-is-present — the blessed < allowance is legal by validation and un-executable by construction** (2 operative files; merge `51a73bd7e`, also `5d50545c3`).
+- **batched as one change** (2 operative files; merge `c2cd52495`).
 
 - **Backfilled from the merge audit in tiered form:** each entry
   was reconstructed from merge deltas, names the merges it stands for, and minor families are combined.
 - **CA and admin key material is written encrypted and rotation is all-or-nothing.** An unencrypted CA key is refused when a passphrase is set, the root CA key is encrypted at rest, and a rotation
   that is interrupted cannot leave a mismatched pair or overwrite its own trust anchor; the core installer's own key-handling half
-  changed with it (`install-venya-core.sh`, +67/-22). Merges `a248767c2`, `1543099d9`, `d245e594f`, `86135d6e3`, `9107ab2be`. Tickets named by those merges: (`#316`)
-  (`#361`) (`#500`).
+  changed with it (`install-venya-core.sh`, +67/-22). Merges `a248767c2`, `1543099d9`, `d245e594f`, `86135d6e3`, `9107ab2be`.
 - **Admin certificates are short-lived, and status tells you which one you are holding.** A renewed admin certificate is issued short-lived, an expired one is refused rather than presented, and the
-  fingerprint context it was issued into is named. Merges `113e8e786`, `9dbdc1760`, `1a226dd73`, `24df07133`, `3f7ee9704`. Tickets named by those merges: (`#504`).
+  fingerprint context it was issued into is named. Merges `113e8e786`, `9dbdc1760`, `1a226dd73`, `24df07133`, `3f7ee9704`.
 - **A loose admin key is now reported instead of silently accepted.** The CLI checks the mode bits on the admin mTLS key file on POSIX and prints a `warning:` naming the path, the mode it found and the `0600` it wants when group or other can read it; the trigger is the group/other read bits, correct modes stay silent, and it **warns and never blocks** — the exit code, stdout and every request the CLI makes are unchanged. Merges `6244340e9`.
 - **Every trust decision goes to the configured CA anchor, and plaintext is refused.** Setup, config-set, register and the MCP dial refuse a non-TLS origin; the executor's dials trust only the CA
   installed on this host, not the host store added to it; admin mTLS is gated on both of its values being set; CSR signing accepts the curves the register route advertises. Merges `5a62a9552`,
-  `4b3125c4d`, `fe4ed16d7`, `15c5f9f86`, `64225a106`, `cb3e7ac36`, `019d178b8`, `6e546e523`. Tickets named by those merges: (`#17`) (`#506`) (`#508`).
+  `4b3125c4d`, `fe4ed16d7`, `15c5f9f86`, `64225a106`, `cb3e7ac36`, `019d178b8`, `6e546e523`.
 - **CLI setup and register follow the server's answer instead of asserting one.** Setup and exec-register resolve the identity, token and URL the server returned instead of the values the client
-  guessed. Merges `ab4b1d005`, `01cf4dc1b`, `4442ccca0`, `ecc6698ad`, `5a64c7211`. Tickets named by those merges: (`#3`) (`#4`) (`#5`) (`#366`).
+  guessed. Merges `ab4b1d005`, `01cf4dc1b`, `4442ccca0`, `ecc6698ad`, `5a64c7211`.
 - **Authorization is scoped to the caller, and unauthenticated paths that could claim an identity are closed.** Secret writes and session reads are checked against the calling principal, the
   registration route refuses an unauthenticated takeover, the reset wipe is no longer reachable as a race, and role removal or admin disable refuse the state that leaves no way back in. Merges
-  `bd70f8ec1`, `2024b8ee6`, `0624711ab`, `0527be134`, `a406a090b`, `2ef7a2287`, `b9cca6d65`. Tickets named by those merges: (`#3`) (`#15`) (`#16`) (`#450`).
+  `bd70f8ec1`, `2024b8ee6`, `0624711ab`, `0527be134`, `a406a090b`, `2ef7a2287`, `b9cca6d65`.
 - **Admin mTLS callers are checked against an allowlist, and a revoked certificate stops working.** The admin middleware reads the client certificate serial and tests it against the known admin set and the in-process revocation record; an empty allowlist fails closed, as does a missing serial or a lookup error, so no caller is admitted by an absent answer. Merges `c67bcf7d4`.
 
 - **Re-running init over a database that was wiped but still seeded converges instead of failing.** Role creation is now get-or-create on `roles.name`, so the stale-roles path no longer raises; the full detail, including any SQL, is logged server-side and the client receives a generic `Reset failed` rather than the internals. Merges `6ca24457a`.
 - **Elevation is bound to the session that asked for it.** An elevation token is bound to the session and challenge state it was minted with, and refresh refuses when no active user backs it, and two schema additions carry that
   binding — migration `035` adds the elevation token's session column and migration `036` adds the elevation-challenges
   table, so a fresh install gets both. Merges
-  `7696dcc37`, `20298c21b`, `56da85ea6`, `1cf21fdd9`, `e52e07ffb`. Tickets named by those merges: (`#341`) (`#345`).
+  `7696dcc37`, `20298c21b`, `56da85ea6`, `1cf21fdd9`, `e52e07ffb`.
 - **Runtime settings are obeyed where they were ignored, and failures no longer read as clean.** The concurrency ceiling is read from configuration, a capture honours its
   timeout, a relay stop runs its cleanup under systemd, credential load and removal stop swallowing failures, a file-descriptor scan with an empty set no longer reads clean, and debug logging stopped
-  carrying session cookies. Merges `67cfbf7e6`, `773d2b581`, `9744bcf37`, `39cfd1767`, `4288cd378`, `e2daf0353`, `bda91ba51`, `27612636d`. Tickets named by those
-  merges: (`#453`) (`#477`).
-- **One canonical certificate serial everywhere, so a revocation actually takes effect.** The same serial was written zero-padded and presented unpadded, and revocation lookups compared the two by exact string equality — a leading zero nibble (roughly one certificate in sixteen) left a revoked credential matching as live. Serial handling now lives in one shared module used by the CLI, the executor daemon, the server CA, its admin middleware and the revocation paths. Merges `dee410323` (`#481`).
+  carrying session cookies. Merges `67cfbf7e6`, `773d2b581`, `9744bcf37`, `39cfd1767`, `4288cd378`, `e2daf0353`, `bda91ba51`, `27612636d`.
+- **One canonical certificate serial everywhere, so a revocation actually takes effect.** The same serial was written zero-padded and presented unpadded, and revocation lookups compared the two by exact string equality — a leading zero nibble (roughly one certificate in sixteen) left a revoked credential matching as live. Serial handling now lives in one shared module used by the CLI, the executor daemon, the server CA, its admin middleware and the revocation paths. Merges `dee410323`.
 
 - **Error responses stopped carrying internals to the client.** Registration and authentication failures return a generic detail while the full text, including any SQL or library message, is logged server-side; the WebAuthn manager forwards only what an operator needs, and the core installer's nginx config now sets `server_tokens off`. Merges `548e7ba9e`.
 
@@ -708,7 +705,7 @@ Notable changes to Venya will be documented in this file.
 
 
 
-- **The shipped tree carries no development-site names (`#689`).** Test fixtures, two
+- **The shipped tree carries no development-site names.** Test fixtures, two
   docs and one database column comment named real development hosts, an operator
   identity and a workspace path. They now use the documentation forms the tree already
   uses (`admin@example.com`, RFC 5737 ranges, a `<core-host>`-shaped example). The
@@ -718,69 +715,69 @@ Notable changes to Venya will be documented in this file.
   identities and workspace paths too, and walks every top level the release bundle
   actually ships. No product behavior change — one column COMMENT changes, through a
   migration (`042`).
-- **A revoke command now accepts the whole serial it can be shown (`#682`, `#676`).**
+- **A revoke command now accepts the whole serial it can be shown.**
   Certificate serials on this product are wider than the sixteen characters the revoke
   inputs used to allow, so a serial copied from a listing or a journal line could be
   refused as malformed. The input bound now matches the width the store holds, at every
   gate that reads one, and the help text names the new length. Nothing about how a serial
   is stored or matched changed — the same value is accepted where part of it used to be
   cut off.
-- **`venya exec list` prints a certificate's full serial (`#682`, `#481`).** The listing
+- **`venya exec list` prints a certificate's full serial.** The listing
   showed a sixteen-character prefix, which is the value an operator then typed back into
   a revoke command. It now prints the whole canonical serial, and the cell that guards
   the row asserts it against the same helper the write path uses, so the listing and the
   store cannot drift apart again.
-- **An administrator certificate with a protected key now works for admin calls
-  (`#565` Part B).** The TLS layer supplies a passphrase callback, so a key written
+- **An administrator certificate with a protected key now works for admin calls.**
+  The TLS layer supplies a passphrase callback, so a key written
   encrypted at rest by `venya admin cert renew` or `venya admin generate-admin-cert` can
   authenticate an admin request. A key that is already plaintext is untouched; an
   encrypted key with no passphrase in the environment is refused by name before anything
   is sent, and a wrong passphrase gets its own sentence. The passphrase is read through
   the same rule the writers use, so the length and blank checks answer once on both sides.
-- **The install summary names the variable an admin command needs (`#673`).** Where the
+- **The install summary names the variable an admin command needs.** Where the
   banner formerly said that loading a protected admin key was still open work, it now
   names `VENYA_ADMIN_CA_KEY_PASSPHRASE`, says it must be in the environment of any admin
   command presenting a renewed pair, and states that the machine-plane pair needs no
   passphrase and stays the headless pattern. The banner no longer prints a command that
   reads a stored secret back; it points at the runbook section that describes where it
   lives and how it is recovered.
-- **The installer no longer advertises a way to turn admin mTLS off (`#673`).** The
+- **The installer no longer advertises a way to turn admin mTLS off.** The
   variable stays documented where documentation lives; it is left out of the text an
   operator reads at the moment a connection is refusing, where the pressure to disable a
   check is highest. The heartbeat route's role comment now describes what it does, and a
   new suite names that contract as a test — a revoked executor still receives the
   cooperative-stop answer that lets it wind down on its own.
-- **`venya admin revoke-token` reads the core's answer before it reports success (`#666`).**
+- **`venya admin revoke-token` reads the core's answer before it reports success.**
   The route returns a per-token result, so an identity it did not touch used to arrive
   with the request accepted. The command now requires the answer to say the token was
   revoked, names the user plane in its confirmation, and otherwise exits non-zero saying
   nothing was revoked.
-- **CA key custody keeps its unwrapped material under management (`#674`).** The split path
+- **CA key custody keeps its unwrapped material under management.** The split path
   and both restore arms now run the decrypted key through the same holder the file
   already uses elsewhere, so plaintext CA material is not held past the act that needed
   it. No format change, no encryption change, no migration; the share files an operator
   already holds restore exactly as before.
-- **`/ready` answers on capacity reserved for it (`#603` AC2).** The readiness probe reads
+- **`/ready` answers on capacity reserved for it.** The readiness probe reads
   on the liveness pool, so it keeps answering while ordinary traffic holds every shared
   slot, and it no longer reports itself healthy after winning a slot on a contended path.
   A capacity event stays a capacity event: the probe answers degraded rather than raising
   out of a health endpoint. The refusal counter, its threshold and its cadence are
   unchanged.
-- **A passphrase prompt says where its rule bites (`#675`).** The read door that unlocks an
+- **A passphrase prompt says where its rule bites.** The read door that unlocks an
   existing CA key states the length rule and names the gate that enforces it, rather than
   implying a check that is not there — the floor governs writing a new passphrase, and a
   read that refused one would lock an operator out of their own key.
-- **The beta terms page names only a variable that exists (`#678`, `#675`).** The entry for
+- **The beta terms page names only a variable that exists.** The entry for
   the administrator key passphrase carried a name the shipped installer never wrote; the
   page now names the one it does, so following the documented recovery step cannot point
   an operator at an unset variable.
-- **The revocation registry is described where an operator would look (`#597` AC5, `#597`).**
+- **The revocation registry is described where an operator would look.**
   `BACKUPS.md`, `cert-rotation-runbook.md` and `FIREWALL.md` now state that the core's own
   relay credential holds a registry row, how to list it, and that revoking it is a step
   with its own command. The firewall page's loopback rows name the certificate that hop
   actually presents, and its relay row says a revoked credential is refused when the
   connection is admitted — before any request is served, not at the handshake.
-- **The backup page states the one artifact it excluded (`#221`).** The machine-plane
+- **The backup page states the one artifact it excluded.** The machine-plane
   administrator pair under `/etc/venya/admin/` is named as deliberately not backed up,
   with the reason: the installer re-mints that pair on every run that turns admin mTLS on,
   so an off-site copy of it buys nothing. The delivered-mode table already carried the
@@ -793,12 +790,12 @@ Notable changes to Venya will be documented in this file.
   which is not the same claim as "shell builtins are rejected". A command that has a real
   binary behind it is accepted; the refusal reason is printed for the ones that do not.
 - **Three install-time writes are atomic, and the surface scan that checks them is
-  installed (`#447`, `#675`).** The beta-terms generator, the citation helper beside it and
+  installed.** The beta-terms generator, the citation helper beside it and
   the install-time fix application now write through a temporary file and a rename, so an
   interrupted run leaves the previous file in place rather than a half-written one. A
   pre-commit census keeps every bound on the HTTP client named in one place.
 
-- **`admin revoke-admin-cert` refuses a serial no admin credential ever held (`#684`).**
+- **`admin revoke-admin-cert` refuses a serial no admin credential ever held.**
   That verb used to check the shape of the string, find nothing in the revocation table,
   and write a revocation anyway: exit 0, while the live administrator credential kept
   transacting. The core now keeps a registry of the admin credentials it has seen — at
@@ -807,13 +804,13 @@ Notable changes to Venya will be documented in this file.
   A serial that registry does not name is refused before anything is written, and the
   refusal says so by name. A serial already revoked keeps its repeat answer. The registry
   is a new table, so an existing install picks it up on the normal migration step.
-- **The executor revoke verb binds a serial to the certificate holding it (`#685`).**
+- **The executor revoke verb binds a serial to the certificate holding it.**
   The same gap on the executor plane: a serial no certificate carries, or a serial that
   belongs to a different executor than the command names, is now refused instead of stored
   as a revocation attributed to nothing. A predecessor serial that a rotation already
   retired keeps its repeat answer, so revoking the same value twice does not become a
   refusal.
-- **A revoked executor is no longer aged out on a timer (`#685`).** The maintenance pass
+- **A revoked executor is no longer aged out on a timer.** The maintenance pass
   that deleted executor revocation rows older than the retention window is gone, together
   with the method it called, so no shipped path can drop a revocation while the credential
   it names may still be valid. A dropped row stopped answering the lookup and stopped being
@@ -824,19 +821,19 @@ Notable changes to Venya will be documented in this file.
   window shorter than the longest lifetime among the credentials these tables name is
   refused at startup rather than quietly honored, which is why that setting's usable range
   no longer reaches down to 1.
-- **A revoke command says whether this call did it (`#666` class).** Revoking a credential
+- **A revoke command says whether this call did it.** Revoking a credential
   that was already revoked reported the reason typed into this call, which is not the
   reason on record. The command now prints that nothing changed. The executor removal
   headline names the serial it revoked, or says there was no certificate record to revoke,
   and an already-revoked certificate or identity is reported as such. Exit status is
   unchanged: the report follows the core's answer rather than asserting the action.
-  Merges `33eec83fe`, `9be09d2bf`, `993ed7b11`. Tickets named by those merges: (`#481`) (`#666`).
-- **A revocation limit claims only the door it was measured at (`#676`).** The beta
+  Merges `33eec83fe`, `9be09d2bf`, `993ed7b11`.
+- **A revocation limit claims only the door it was measured at.** The beta
   limitation entry no longer states that both directions of a connection were seen
   refusing. It says what was seen: the listener door, in both of its populations, refused a
   revoked peer on a running deployment; the core's own dial-out has never been observed
   refusing one, and the entry names that half as unobserved instead of implying it.
-- **The executor enrollment-token revoked state is documented as unreachable (`#672`).**
+- **The executor enrollment-token revoked state is documented as unreachable.**
   No shipped command can put an executor enrollment token into that state on this plane, so
   those tokens expire on their time limit and nothing else. The code now says so where the
   branch sits, and a test fails if anyone later adds a writer for it, so the branch cannot
@@ -849,7 +846,7 @@ Notable changes to Venya will be documented in this file.
   states the rule the installer actually enforces — the length floor applies to the stored
   value too, so a short passphrase already on disk refuses at the pre-mutation gate, and
   the way forward is a deliberate reinstall or a deliberate rotation, never a silent one.
-- **Three documented guarantees became tests (`#597`, `#684`, `#634`).** The relay-credential
+- **Three documented guarantees became tests.** The relay-credential
   adoption case — an on-disk credential with no registry row, ingested at a real boot, with
   four paired negatives — the citation check against the beta terms page, and the executor
   token store each now have a cell that fails if the behavior drifts; the token store's cell
@@ -860,30 +857,30 @@ Notable changes to Venya will be documented in this file.
 
 ## 0.1.0alpha17 — BELAYED, never released (date below is when the name was withdrawn, not a ship date)
 
-> This version was **belayed as a release name** by the owner on 2026-10-15 ("alpha17 belayed as a release name"), and **no `v0.1.0alpha17` tag exists on any face** — the entry body below is kept as the dated record of work that shipped later under `v0.1.0beta1`. Deliberately not written as `## [0.1.0alpha17]`: the bracket form is what a release claim is matched on, and this is not one.
+> This version was **belayed as a release name**, and **no `v0.1.0alpha17` tag exists on any face** — the entry body below is kept as the dated record of work that shipped later under `v0.1.0beta1`. Deliberately not written as `## [0.1.0alpha17]`: the bracket form is what a release claim is matched on, and this is not one.
 
 There is no backwards compatibility during alpha. Three changes in this window are
 things an operator has to act on, so they are named at the top rather than buried in
 the lists below.
 
-- **The database encryption passphrase now has a length floor (#573, #615).** A
+- **The database encryption passphrase now has a length floor.** A
   `VENYA_DB_PASSPHRASE` shorter than 15 characters — counted the way you type them,
   as Unicode code points, so 15 passes and 14 refuses — is refused twice over: by the
   installer at the point where the value resolves, BEFORE it writes or changes
   anything on the host, and by the core at boot. The same floor carries the CA-key
-  passphrases, and blank or whitespace-only values are refused on those planes
-  (#554, #570). An install made earlier that holds a shorter passphrase is not
+  passphrases, and blank or whitespace-only values are refused on those planes.
+  An install made earlier that holds a shorter passphrase is not
   quietly rotated: its re-run refuses at that gate, and the path forward is a
   deliberate reinstall or a deliberate rotation, made by the operator.
-- **A freshly installed executor ships a per-sandbox memory cap (#589).** The shipped
+- **A freshly installed executor ships a per-sandbox memory cap.** The shipped
   number is 1024 MiB per sandbox, passed to `sbx create --memory`. Before this
   release the knob had no shipped value: a sandbox command either ran under the
-  vendor's own default (half of the guest) or, since #578, refused at create until an
+  vendor's own default (half of the guest) or refused at create until an
   operator named a number. An operator value in the config file or in the environment
   still wins, and the vendor band (512 MiB floor, 75% of this machine as the ceiling)
   is still checked at config load.
-- **A core re-run that meets a running service now stops it before migrating
-  (#587).** The
+- **A core re-run that meets a running service now stops it before migrating.**
+  The
   run announces it (`NOTICE: stopping venya-core.service BEFORE database migrations`)
   and guards it — a first install has no unit yet, so there it never stops and never
   aborts. The guard is the unit being up, not the version moving: a same-version
@@ -943,11 +940,11 @@ the lists below.
 - **Docs: added `docs/beta-known-limitations.md`** — the release-facing carrier for
   what beta does not yet enforce, one entry per tracked issue, read against the
   shipped source rather than summarized from intent.
-- **Handing out a value is now itself an audit event (#602).** The elevated unmask
+- **Handing out a value is now itself an audit event.** The elevated unmask
   path writes a disclosure row in the same transaction as the burn, naming the key,
   the caller and the time. No value, token or token hash is ever written there, and a
   disclosure that loses its row loses the burn with it.
-- **Attestation material is stored with a security key (#565, leg 1).** Migration 038
+- **Attestation material is stored with a security key.** Migration 038
   adds the columns that keep the raw attestation object beside the credential, so
   attestation policy can act retroactively later. Storage only — nothing is enforced
   on it yet.
@@ -955,26 +952,26 @@ the lists below.
 ### Changed
 
 - **Changed: `POST /api/v1/admin/command-policy` now rejects unknown body
-  keys with 422** (`extra="forbid"` on the request model, #289 Q4). Junk
+  keys with 422** (`extra="forbid"` on the request model). Junk
   keys on this control-plane route can no longer succeed silently; documented
   senders (which use the real fields) are unaffected.
-- **CLI: local `admin` commands no longer ask for a key ceremony (#590).** The
+- **CLI: local `admin` commands no longer ask for a key ceremony.** The
   subcommands whose bodies issue no request (the list is body-verified) skip the
   ceremony, which could neither authenticate them nor succeed against a core with an
   empty user table. The certificate checks are NOT skipped: a cert without its key, a
   key without its cert, and a nonexistent cert path still raise exactly as before.
 - **Executor configuration states its precedence, and says when two spellings
-  disagree (#598).** The ruled order is config file, then environment, then the field
+  disagree.** The ruled order is config file, then environment, then the field
   default. When one key is set in both carriers to different values, the start now
   names the key and the value in use instead of choosing silently.
-- **The pip-audit hook names the feed it queried (#566, #568).** A clean result is now
+- **The pip-audit hook names the feed it queried.** A clean result is now
   a statement about OSV, and a test pins the feed choice so that statement cannot
   rot.
 
 ### Removed
 
 - **Removed: `venya admin set-command-policy --custom`.** The flag was inert
-  surface (#289): it posted a `custom` key the API model does not define (and
+  surface: it posted a `custom` key the API model does not define (and
   never even opened the file it named), so the server silently dropped it.
   Replaced by explicit `--custom-allowed` / `--custom-dangerous` (comma-
   and/or space-separated), each mapping 1:1 to a real API field; each list
@@ -983,23 +980,23 @@ the lists below.
 
 ### Fixed
 
-- **CLI: `exec register` verification carries the register-path trust (#395).**
+- **CLI: `exec register` verification carries the register-path trust.**
   The post-register verify call now builds its TLS trust in the ruled order —
   config-dir CA if present, else the resolved `--ca-bundle`, else a loud
   error — so a config-less host that registered with `--ca-bundle` can verify
   instead of always hitting a certificate error. Verification failure now
   exits non-zero with the certificate kept and the wording
   `registered, auth NOT verified`; a verified registration still exits 0 with
-  `registered successfully` as before. refs #395
+  `registered successfully` as before.
 - **Installer: interactive secret prompts now confirm at entry.** The core
   install's server encryption passphrase, PostgreSQL password, and both CA
   key passphrases, and the executor install's Docker access token, are read
   twice (echo-off) and retried until the entries match — a mistyped single
   entry can no longer silently become the stored secret. Unattended/env-supplied
   paths, stored-reuse match-or-abort behavior, and non-TTY branches are
-  unchanged. (ticket 31-confirm-at-entry)
+  unchanged.
 - **Executor: audit-spool forwarding durability hardening.** Three related
-  improvements to the audit forwarder (refs #310). (1) When an event is
+  improvements to the audit forwarder. (1) When an event is
   appended while a batch is in flight and the spool crosses its capacity,
   the accepted batch is now removed BY CONTENT instead of by count, so lines
   that were never sent always survive the interleaving — a line leaves the
@@ -1059,7 +1056,7 @@ the lists below.
   handle instead of being told they logged out while the session stays live.
   Successful logout is unchanged (200, cookie cleared, `revoked: true`).
 - **Server: admin create-user can no longer bypass the auditor separation-of-duties
-  control (#302).** `POST /admin/users` minted role memberships by direct ORM,
+  control.** `POST /admin/users` minted role memberships by direct ORM,
   skipping the one enforcement point (core `RoleManager.add_member`), so a
   mixed {auditor + anything} grant succeeded through the admin path while the
   role-members endpoint refused the identical mixture — silently breaking the
@@ -1068,18 +1065,18 @@ the lists below.
   user and partial memberships (complete-or-nothing — no phantom user, no
   phantom lifecycle audit row), records the same `auditor_sod_denied` event as
   the sibling path, and answers 409 with the same message.
-- **Core: dropped the phantom FK on `executor_enrollment_tokens.created_by`
-  (#303).** The model still declared
+- **Core: dropped the phantom FK on `executor_enrollment_tokens.created_by`.**
+  The model still declared
   `ForeignKey("users.user_id", ondelete="CASCADE")` although migration 022
   deliberately dropped `fk_executor_enrollment_tokens_created_by` (the
   column stores the auth principal verbatim regardless of mechanism —
   mTLS CNs have no `users` row); any future autogenerate/migration diff
-  would hallucinate re-adding the dropped-by-ruling FK (sibling of #299).
+  would hallucinate re-adding the dropped-by-ruling FK.
   The declaration is removed (column stays `String(64)`, `nullable=False`);
   a pin test plus a sweep test that replays every FK drop in
   `alembic/versions` and asserts no dropped column re-declares an FK in a
   model close the whole drift class.
-- **Core: dropped the phantom FK on `audit_events.user_id` (#299).** The
+- **Core: dropped the phantom FK on `audit_events.user_id`.** The
   model still declared `ForeignKey("users.user_id")` on `AuditEvent.user_id`
   although migration 022 deliberately dropped `audit_events_user_id_fkey`
   (the column stores the auth principal verbatim regardless of mechanism —
@@ -1087,11 +1084,11 @@ the lists below.
   would hallucinate re-adding the dropped-by-ruling FK. The declaration is
   removed (column stays `String(64)`, `nullable=True`); a pin test inspects
   the model so the drift class cannot re-widen.
-- **CLI: CA-key custody round-trip works on encrypted-at-rest installs
-  (#297).** Since encrypt-at-rest (bc08030/3667c6e), `venya admin
+- **CLI: CA-key custody round-trip works on encrypted-at-rest installs.**
+  Since encrypt-at-rest (bc08030/3667c6e), `venya admin
   export-ca-key` / `split-ca-key` read `ca.key` as plaintext, exporting/
   splitting the at-rest ciphertext instead of the key, and `restore-ca-key`
-  could never re-install its own export (the #39 validator correctly aborted
+  could never re-install its own export (the validator correctly aborted
   — the documented custody escrow promise was unfulfillable; DR drill R6-b).
   Export/split now unwrap the server's PKCS#8 at-rest envelope (in memory,
   plaintext never persisted) before wrapping/sharding; restore re-encrypts
@@ -1154,7 +1151,7 @@ the lists below.
   key as bytes (the library's own CTAP convention); users with zero
   existing credentials were never affected, which is why first-time
   init/enroll worked.
-- **CLI: `set-command-policy` custom lists actually reach the server (#289).**
+- **CLI: `set-command-policy` custom lists actually reach the server.**
   The dead-key payload (a `custom` path string pydantic silently dropped) is
   gone; the command now posts only real `AdminSetCommandPolicyRequest`
   fields, and a drift-guard test pins every postable CLI key against the
@@ -1162,38 +1159,38 @@ the lists below.
   docstring's stale "server→executor propagation is not wired" claim was
   corrected — propagation is wired (861a682) and the row enforces fleet-wide
   via heartbeat.
-- **Installer: fresh executor installs fail fast without an enrollment token
-  (#28).** A missing or empty `VENYA_EXECUTOR_ENROLLMENT_TOKEN` on an install
+- **Installer: fresh executor installs fail fast without an enrollment token.**
+  A missing or empty `VENYA_EXECUTOR_ENROLLMENT_TOKEN` on an install
   with no incumbent `/etc/venya/executor/executor.crt` now exits 1 with
   minting guidance (`venya admin executor-enroll <id>`, single-use, ~30-min
   TTL) before any system write, mirroring the `VENYA_SERVER_URL` Require
   block; re-runs over an existing certificate proceed tokenless as before.
--- **Installer: confirm questions no longer print before the skip check
-   (#389).** `venya_prompt_gate` now runs before `Install to ...? [Y/n]` and
+-- **Installer: confirm questions no longer print before the skip check.**
+  `venya_prompt_gate` now runs before `Install to ...? [Y/n]` and
    `Reinstall? [y/N]` are emitted: with `VENYA_SKIP_PROMPT=yes` the documented
    default is taken silently with zero question lines; a non-TTY run without
    the flag exits loud with guidance instead of consuming EOF defaults; the
-   interactive TTY path is unchanged. The #203/EXEC co-location hard stop is
+   interactive TTY path is unchanged. The EXEC co-location hard stop is
    untouched and still refuses regardless of the skip flag.
-- **`GET /api/v1/audit` applies the `key=` filter it accepts (#607).** The clause was
+- **`GET /api/v1/audit` applies the `key=` filter it accepts.** The clause was
   collected and never applied, so a disclosure or a denied secret read could not be
   found by the key it names. It is cast against the same JSON operator idiom the
   `executor_id` filter already uses; the self-filter for non-privileged callers is
   unchanged and proven by its own cell.
-- **The relay listener presents rotated certificate material on new connections
-  (#579).** The mTLS context is published to the accept path and rebuilt from the
+- **The relay listener presents rotated certificate material on new connections.**
+  The mTLS context is published to the accept path and rebuilt from the
   on-disk material, so a rotation reaches the `:8443` side instead of leaving that
   door on its boot-time context.
-- **Migration 039 gives two declared CASCADEs a real `ON DELETE` (#591).**
+- **Migration 039 gives two declared CASCADEs a real `ON DELETE`.**
   `execution_sessions.user_id` and `role_members.role_id` carried cascade semantics
   the schema never had, so a path that trusted the declaration — an ops clear, an
   offboarding script, your own SQL — met an FK violation instead of a cascade.
-- **CLI: `venya store --help` renders its default the way argparse displays it
-  (#604)**, and the generated reference agrees with the shipped text.
-- **Windows installer: the DAcl enumeration no longer walks a wildcard path (#493).**
-- **Elevation repair strings name the real command (#583)** instead of a form the CLI
+- **CLI: `venya store --help` renders its default the way argparse displays it**
+  and the generated reference agrees with the shipped text.
+- **Windows installer: the DAcl enumeration no longer walks a wildcard path.**
+- **Elevation repair strings name the real command** instead of a form the CLI
   does not accept.
-- **The docs read the way the tip behaves (#563 follow, #600, #601, #605, #609, #615).**
+- **The docs read the way the tip behaves.**
   The disclosure and secret-lifecycle claims now state the mechanism the code
   implements; `BACKUPS.md` names the shipped authenticated envelope and says which
   blob an operator is holding; the CA-key comments describe the CLI-only codec, the
@@ -1203,7 +1200,7 @@ the lists below.
 
 ### Security
 
-- **Executor mTLS key is encrypted at rest on every write path (#565).** The
+- **Executor mTLS key is encrypted at rest on every write path.** The
   executor's own leaf key (`/etc/venya/executor/executor.key`) was serialized
   unencrypted by all four of its writers — the daemon's registration and rotation
   paths, and the workstation CLI's `venya exec register` / `venya exec cert renew`
@@ -1217,7 +1214,7 @@ the lists below.
   disk and keep loading unchanged — the requirement lands on the next write. This is
   disk protection by a file passphrase, not hardware-key custody; the interim shape
   and its retirement trigger are recorded in `docs/cert-rotation-runbook.md` §2 and
-  `docs/design-fido2-keywrap.md` §6. refs #565
+  `docs/design-fido2-keywrap.md` §6.
 - **End-to-end mTLS: client identity is crypto-verified at the app.** Admin
   and executor mTLS now read identity from the client certificate the app
   verifies itself (forwarded by nginx over the new inner nginx→uvicorn mTLS
@@ -1228,7 +1225,7 @@ the lists below.
   the handshake; per-plane CA binding (admin stage vs admin CA, executor
   stage vs Root CA) refuses cross-plane certificates at the chain check.
   Header-based identity reads no longer exist in the server package
-  (interlock test pins the posture). refs #314
+  (interlock test pins the posture).
 - **IAM: `auditor` permission tier.** Roles can now be created with
   `permissions="auditor"` (API, CLI `role create --permissions auditor`).
   Auditors keep the read-tier listings (secrets/roles/executors metadata)
@@ -1266,7 +1263,7 @@ the lists below.
   holders see the FULL log — other users' events included — the same
   visibility the `admin` role holds; every other non-admin caller keeps
   the self-filter to their own events.
-- **The relay asks the revocation question at both ends it can answer (#586).** The
+- **The relay asks the revocation question at both ends it can answer.** The
   core's dial to an executor now consults the certificate revocation list at the TLS
   handshake: a revoked leaf is refused and the refusal says revoked, while a stale or
   unreadable list is refused with a 503 whose text says "no revocation asserted" and
@@ -1278,18 +1275,18 @@ the lists below.
   the two answers stay distinct status strings. What a peer's credential can still do
   at that door is written up in `docs/beta-known-limitations.md`.
 - **Plane markers on Venya certificates are carried non-critical and enforced by the
-  app (#588), and now mint on Tabith LLC's registered enterprise number (#601).** The
+  app, and now mint on Tabith LLC's registered enterprise number.** The
   marker OID moved to the project's own PEN; the reader accepts the earlier arc for a
   bounded window so credentials already in the field keep resolving.
-- **The CA and certificate directories are tighter at creation and across re-runs
-  (#606, #610).** `/var/lib/venya/ca` and the admin CA directory are created 0700 and
+- **The CA and certificate directories are tighter at creation and across re-runs.**
+  `/var/lib/venya/ca` and the admin CA directory are created 0700 and
   pinned back to 0700 on every run, so an interrupted install never leaves them
   group-readable.
 - **A passphrase that will not open a stored key says so in Venya's words, at one
-  home, naming the real file (#569, #572, #574, #576).** A damaged key file is no
+  home, naming the real file.** A damaged key file is no
   longer blamed on the passphrase: which refusal you get is chosen by whether the
-  BYTES PARSE, not by whether an input was supplied (#577).
-- **The MCP client transport requires an explicit verify anchor (#571).** The
+  BYTES PARSE, not by whether an input was supplied.
+- **The MCP client transport requires an explicit verify anchor.** The
   constructor seam refuses an unanchored configuration before any transport exists,
   rather than falling back to a system store.
 
