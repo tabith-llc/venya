@@ -158,7 +158,7 @@ def run_maintenance(db: Session, config) -> None:
             the same defaults the inline loop used (900 / 14400 / 60).
 
     There is NO revocation-purge pass here any more, and no ``ca_manager`` parameter to
-    carry one (#685, owner ruling 2026-10-20): ``ExecutorCertRevocation`` is exempt from
+    carry one (#685, ruled 2026-10-20): ``ExecutorCertRevocation`` is exempt from
     time-based purge, so a row that names a revoked executor credential stays in the
     membership population for as long as the credential itself would have been valid —
     and longer. The pass and the parameter were removed TOGETHER rather than left in
@@ -206,7 +206,7 @@ def run_maintenance(db: Session, config) -> None:
         db.rollback()
         logger.exception("Rate limit cleanup failed")
 
-    # #685 (owner ruling 2026-10-20) — the pass that used to sit here is gone.
+    # #685 (ruled 2026-10-20) — the pass that used to sit here is gone.
     # It called CAManager.purge_expired_revocations, which DELETEd
     # ExecutorCertRevocation rows older than `crl.crl_retention_days` (default 90),
     # relocated off the two public CRL GETs by ticket sec-sweep-low-informational #23b.

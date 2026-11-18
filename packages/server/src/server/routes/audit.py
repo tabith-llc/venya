@@ -111,7 +111,7 @@ async def audit_list(
         return AuditListResponse(events=[], total=0, limit=limit, offset=offset)
 
     # Non-admin: filter to own events only — UNLESS the caller holds an
-    # auditor-tier membership (auditor-role ticket, owner ruling
+    # auditor-tier membership (auditor-role ticket, ruling
     # 2026-09-30: an auditor who can only see their own events is not an
     # auditor — auditor-tier sees the FULL log). The tier map rides the
     # require_role("auditor") gate's fetch (_checker attaches it

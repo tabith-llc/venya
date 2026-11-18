@@ -737,7 +737,7 @@ async def browser_elevate_assert(
         from ..dependencies import auditor_only_permissions
 
         if auditor_only_permissions(RoleManager(db).get_user_permissions(session.user_id)):
-            # Denials are audit-logged (owner ruling 2026-09-30). COMMIT
+            # Denials are audit-logged (ruled 2026-09-30). COMMIT
             # BEFORE the raise; this route's HTTPException path skips
             # rollback (finally only closes), and a committed row survives
             # either way. Value-free: no token material exists yet at this

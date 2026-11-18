@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 """Single writer for admin lifecycle audit events (ticket
-admin-lifecycle-audit-events, owner ruling batch 2026-09-30).
+admin-lifecycle-audit-events, ruled batch 2026-09-30).
 
 Every lifecycle event row is CONSTRUCTED here and nowhere else (pinned by
 tests/test_lifecycle_audit_events.py) — sites pass an event constant, the
@@ -49,7 +49,7 @@ MEMBER_ADDED = "member_added"
 MEMBER_REMOVED = "member_removed"
 CREDENTIAL_ADDED = "credential_added"
 CREDENTIAL_REMOVED = "credential_removed"
-# Ticket adjacent-lifecycle-audit-families #301 (owner rulings Q1-Q7, 2026-10-01)
+# Ticket adjacent-lifecycle-audit-families #301 (rulings Q1-Q7, 2026-10-01)
 KEY_VERSION_ROTATED = "key_version_rotated"
 KEY_VERSION_ROLLED_BACK = "key_version_rolled_back"
 KEY_VERSION_DEACTIVATED = "key_version_deactivated"

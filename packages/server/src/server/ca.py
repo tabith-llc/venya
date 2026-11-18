@@ -86,7 +86,7 @@ def csr_curve_hint() -> str:
 
 # --- #573: the passphrase LENGTH floor, CA plane (carrier features/passphrase-length-floor-n15.md) ---
 #
-# Owner ruling (s85 batch, verbatim): "Deny whitespace-only passphrases and enforce a
+# Ruled wording, verbatim: "Deny whitespace-only passphrases and enforce a
 # proper length passcode." The whitespace half shipped in #554; this is the length half,
 # ruled from the research in wave14-specs-20261009/passphrase-length-flash3-s84.md and
 # counted in Unicode CODE POINTS on the decoded string before any encode (NIST SP
@@ -123,7 +123,7 @@ def _configured_passphrase(env_var: str) -> str | None:
 def _load_passphrase(env_var: str) -> bytes | None:
     """Load the configured CA passphrase from its environment variable.
 
-    #554 (owner ruling 2026-10-09, verbatim: "whitespace-only passphrase should not
+    #554 (ruled 2026-10-09, verbatim: "whitespace-only passphrase should not
     be acceptable"): a value that is empty or made only of whitespace is read as
     UNSET here, exactly like no value at all. A key must not be "protected" by a
     secret that carries no material — one space opened every set-passphrase test in
@@ -163,7 +163,7 @@ def _passphrase_is_below_floor(passphrase: str | None) -> bool:
 
 
 def _short_passphrase_refusal(passphrase_env: str, *, read_path: bool = False) -> str:
-    """Owner-blessed refusal text for a passphrase under the length floor (ticket #573).
+    """Approved refusal text for a passphrase under the length floor (ticket #573).
 
     The wording is the blessed block (a prior worker lane's §6, ruled in as R5(a) of the s87 owner
     ruling set) with only the two authorized corrections applied: the supported maximum
@@ -208,7 +208,7 @@ def _refuse_if_below_floor(passphrase_env: str, *, read_path: bool = False) -> N
 
 
 def _unencrypted_key_refusal(passphrase_env: str) -> str:
-    """Owner-approved refusal text for the write path (ticket #537).
+    """Approved refusal text for the write path (ticket #537).
 
     The wording is final; only the env-var NAME interpolates, because the caller may read a
     different variable (admin CA vs root/executor CA) and the repair step must name the real one.
@@ -780,7 +780,7 @@ class CAManager:
         crl = builder.sign(ca_key, hashes.SHA256())
         return crl.public_bytes(serialization.Encoding.DER)
 
-    # NO purge_expired_revocations on this manager. #685 (owner ruling 2026-10-20):
+    # NO purge_expired_revocations on this manager. #685 (ruled 2026-10-20):
     # ExecutorCertRevocation is exempt from time-based purge — it is the membership
     # population for credential validity, and truth-about-state is not aged out on a
     # timer. The method and its maintenance-loop caller were REMOVED, not neutered, so
@@ -1131,7 +1131,7 @@ class AdminCAManager:
         if not is_encrypted and passphrase:
             # Twin of CAManager.load_ca (#541): a configured passphrase against a plaintext key
             # on disk refuses loudly instead of logging and handing the passphrase to the loader,
-            # which raised TypeError. Owner ruling: REFUSE LOUDLY, NO REWRAP — nothing is loaded,
+            # which raised TypeError. Ruled: REFUSE LOUDLY, NO REWRAP — nothing is loaded,
             # re-encrypted or migrated. Shares #537's approved wording, naming the admin variable.
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 

@@ -1635,7 +1635,7 @@ async def admin_remove_executor(
 ) -> AdminRemoveExecutorResponse:
     """Remove an executor row (admin only) — remove-implies-revoke (#391 arm (b)).
 
-    Ruled design (ticket admin-executor-row-removal-missing #391, owner ruling
+    Ruled design (ticket admin-executor-row-removal-missing #391, ruling
     2026-10-03): one transaction, all guards BEFORE any write —
 
     - unknown id → 404 (row-keyed, mirroring the revoke route's detail shape);
@@ -2260,7 +2260,7 @@ async def admin_reissue_recovery_code(
 ) -> RecoveryCodeReissueResponse:
     """Reissue the caller's own break-glass recovery code (admin-role members).
 
-    Gate ordering (owner rulings Q1/Q2/Q9/Q10, A1 brief record):
+    Gate ordering (rulings Q1/Q2/Q9/Q10, A1 brief record):
       1. Bearer SESSION required. The mTLS admin identity arrives here as a
          caller=admin dict with no user_id and holds no role memberships —
          it can never reach the mint (ruling: cert identities must not pass).

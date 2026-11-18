@@ -164,7 +164,7 @@ class CommandPolicyPayload(BaseModel):
     """Core-side command policy propagated to executors.
 
     ADDITIVE wire field on the registration + heartbeat responses (ticket
-    command-policy-no-server-executor-propagation, owner ruling (a)
+    command-policy-no-server-executor-propagation, ruling (a)
     2026-09-26): old daemons ignore it, old servers never send it (daemons
     keep their toml-built policy). Semantics mirror the executor's local
     build_command_policy: the preset drives trusted_paths (balanced ->
@@ -682,7 +682,7 @@ def _build_relay_ssl_context(
     ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ssl_ctx.load_verify_locations(cafile=ca_cert_path)
     if crl_capath is not None:
-        # #586 Slice 1 (owner ruling 2026-10-13, "if its a stronger connection-time
+        # #586 Slice 1 (ruled 2026-10-13: "if its a stronger connection-time
         # refusal, build it"): consult the CRL at the TLS layer itself, so a revoked
         # executor leaf dies in the handshake, not in application code. LEAF mode, NOT
         # CHAIN — measured at this venue (CPython 3.14.6 / OpenSSL 3.5.7): our one-link
@@ -721,7 +721,7 @@ _STALE_LIST_DETAIL = REVOCATION_UNAVAILABLE_DETAIL
 def _ensure_dial_crl_store(request: Request, db: Session) -> str:
     """Prepare the per-dial CRL capath and return its path (#586 Slice 1).
 
-    Owner's ruled posture (2026-10-13, verbatim: "to me it sounds like the only safe
+    The ruled posture (2026-10-13, verbatim: "to me it sounds like the only safe
     thing to do is refuse everything until a properly refreshed list arrives."):
     ANY failure to produce a freshly minted list raises — the caller refuses the
     dial with the stale-class 503 and never falls back to a CRL-less context. The
@@ -786,7 +786,7 @@ def _ensure_dial_crl_store(request: Request, db: Session) -> str:
     if not links_exist or not marker.is_file() or marker.read_text() != fingerprint:
         # (Re)link the dir. openssl rehash removes its own managed symlinks first,
         # so a rotated CA leaves no stale-name CRL behind. check=True: a failed
-        # link pass raises, and a raise here refuses the dial (owner posture).
+        # link pass raises, and a raise here refuses the dial (the ruled posture).
         subprocess.run(  # nosec B603 B607 — fixed argv, no shell, constant 'openssl' on PATH; same seam as utils/disk_encryption.py
             ["openssl", "rehash", str(store)],
             check=True,
@@ -1393,7 +1393,7 @@ async def get_revocation_list(
     # READ-ONLY (ticket sec-sweep-low-informational #23b): this public GET
     # used to purge expired revocations on every poll (~30s x fleet) — an
     # unauthenticated write-on-read. The purge moved to a maintenance-loop pass
-    # and has since been REMOVED outright (#685, owner ruling 2026-10-20):
+    # and has since been REMOVED outright (#685, ruled 2026-10-20):
     # ExecutorCertRevocation is exempt from time-based purge, so neither this
     # route nor the maintenance loop deletes a revocation row any more.
 
@@ -2098,14 +2098,14 @@ async def execute_command_on_executor(
     mtls_cert = config.mtls_cert if config else None
     mtls_key = config.mtls_key if config else None
 
-    # #586 Slice 1 (owner ruling 2026-10-13): the dial carries a freshly minted CRL
+    # #586 Slice 1 (ruled 2026-10-13): the dial carries a freshly minted CRL
     # and consults it AT THE HANDSHAKE. Preparing the list can fail (no CA manager,
     # DB stall, mint error, missing openssl for the hash-name pass) — under the
     # ruled posture that is a REFUSAL of this new dial, never a silent fallback to
     # the old CRL-less context. The message names the LIST, never a revocation.
     # Scope note (ruled boundary): this refuses the connection; it does not yank
     # work already in flight, and nothing here may be "hardened" into doing that
-    # without a fresh owner ruling.
+    # without a fresh ruling.
     #
     # #603 AC1 (this leg): the mint reads the LOCKABLE executor_cert_revocations table, and the
     # site's own house marker named that as the upgrade trigger. It now runs in a worker thread on its
@@ -2196,7 +2196,7 @@ async def execute_command_on_executor(
                 # configured; see _record_rejection_audit).
                 _record_rejection_audit(request, session.id, id, display_command, auth_user["user_id"], relay_detail)
         elif e.response.status_code == 503:
-            # #697 OPTION 1 (owner ruling 2026-10-23): forward the listener's HONEST
+            # #697 OPTION 1 (ruled 2026-10-23): forward the listener's HONEST
             # operational-fault refusal, so the one component that knew what happened is
             # the sentence the operator reads. Gated by the shared opening, not by an
             # exact-sentence list, because both 503 refusals in relay_listener.py are
@@ -2308,7 +2308,7 @@ async def execute_command_on_executor(
     return RelayResponse(**result)
 
 
-# --- #697 OPTION 1: what a relay error is allowed to SAY (owner ruling 2026-10-23) -------
+# --- #697 OPTION 1: what a relay error is allowed to SAY (ruled 2026-10-23) ------
 #
 # THESE THREE NAMES SIT AT THE FOOT OF THE MODULE ON PURPOSE. `docs/beta-known-limitations.md`
 # is a machine-guarded page: every `file:line` coordinate it prints must still land on the symbol

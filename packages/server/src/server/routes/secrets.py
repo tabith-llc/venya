@@ -519,7 +519,7 @@ async def secrets_get(
                     detail="insufficient role: auditor cannot read secret values",
                 ) from None
         if auditor_only_permissions(permissions):
-            # Denials are audit-logged (owner ruling 2026-09-30 reverses the
+            # Denials are audit-logged (ruled 2026-09-30 reverses the
             # earlier "logging is left as is"). COMMIT BEFORE the raise:
             # get_db rolls back any exception escaping the route, so an
             # add-then-raise without commit would evaporate the compliance
