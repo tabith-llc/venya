@@ -165,7 +165,7 @@ migration) stays unrevocable and completes it exactly as before.** Executor leav
 can present as a client.
 
 **One boundary is settled and is not on the plan: work already in flight is NOT terminated by a
-revocation.** That is the owner's ruling, recorded in the shipped source
+revocation.** That boundary is recorded in the shipped source
 (`packages/server/src/server/routes/executors.py:725-730` and the scope note at
 `packages/server/src/server/routes/executors.py:2106-2108`); fail-closed on a stale list applies
 at the dial, and killing live sessions is ruled AGAINST, not deferred. The accept point already
@@ -202,7 +202,7 @@ produced because no non-terminal trigger is reachable on a served pair, not beca
 not be made. Unit-green is necessary and not
 sufficient, and #586 stays open past beta on that half, not on a missing consult.
 
-One alternative exists and is **the owner's call, not this page's plan, and not a scheduled
+One alternative exists and is **not this page's plan, and not a scheduled
 item**: build the transport consult anyway. It would buy the wording "a CRL is consulted at every
 relay handshake" while delivering, as its only real effect, a **stop clock** — a list lapse makes
 the listener refuse new connections. The clock is an hour, not an abstraction: the minted list
@@ -214,7 +214,7 @@ daemon's rotation arm (`packages/executor/src/executor/daemon.py:2206`) — a 30
 (`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:47`). A list baked in at boot is
 therefore certain to lapse inside an hour, and under the ruled fail-closed posture a lapsed list
 means the executor refusing every new relay connection. That is a fleet-wide availability trade,
-it is the owner's to make, and it is named here as his rather than as a task.
+and it is named here as a trade rather than as a task.
 
 **What is enforced at that door today, because it is enforceable without #597.** Two things, and
 the page should not let the peer-revocation gap hide them. First, the core's own application gate
@@ -383,8 +383,8 @@ value `ADMIN_SHORT_CERT_LIFETIME_SECONDS = 3600` (`packages/server/src/server/ca
 consumed at signing time as `lifetime_seconds` by the admin-cert route
 (`packages/server/src/server/routes/admin_certs.py:317`) and pinned by an interlock test so the
 number cannot drift unremembered (`packages/server/tests/test_clock_skew_fraction_rf7.py:55`,
-`assert ADMIN_SHORT_CERT_LIFETIME_SECONDS == 3600`). Read the number for what it is, in the
-owner's own reframe behind the design: because a revoked role is refused at the next request,
+`assert ADMIN_SHORT_CERT_LIFETIME_SECONDS == 3600`). Read the number for what it is:
+because a revoked role is refused at the next request,
 **certificate lifetime is not the revocation mechanism — it is purely the theft window.** So the
 enforceable claim is this: a stolen or copied administrator credential stops working on its own
 within 60 minutes, because the certificate expires. Enforced by expiry, at the minute scale for
@@ -395,8 +395,8 @@ on a list.
 plane, because it is not true.** Three shipped mechanisms, all tighter than the theft window:
 the core re-mints the revocation list fresh at every relay connection and refuses outright if a
 current list cannot be produced (`_ensure_dial_crl_store`,
-`packages/server/src/server/routes/executors.py:721` — its docstring carries the owner's ruled
-posture, "refuse everything until a properly refreshed list arrives", 2026-10-13); a stale or
+`packages/server/src/server/routes/executors.py:721` — its docstring carries the ruled
+posture, "refuse everything until a properly refreshed list arrives"); a stale or
 missing list is answered as a refusal with 503 that asserts no revocation
 (`_STALE_LIST_DETAIL`, `packages/server/src/server/routes/executors.py:718`, routed by `_dial_crl_verdict_for`, `packages/server/src/server/routes/executors.py:829`
 — of the three handshake codes, only `CERT_REVOKED` (23) is ever reported as revoked; "unable to
@@ -412,7 +412,7 @@ revocation lists this product signs carry a stated validity of one hour
 field is a signature-horizon on the published artifact for whatever consumes it off-box. **No
 shipped verifier reads it as a trust tolerance** — the code above re-mints per dial and refuses
 at staleness — so its one-hour number is a coincidence with the theft window's one hour, not the
-same commitment. A future seat must not anchor the owner's 60 minutes here.
+same commitment. The 60-minute theft window must not be anchored to this field.
 
 **The executor's own stop, which is the operational plane.** A revoked executor
 that is still reporting to its core stops itself on its next heartbeat — the shipped cadence is a
@@ -437,7 +437,7 @@ administrator lookup is immediate. Where an operator wants a copied credential d
 without waiting on expiry, revoke it: the per-request lookup refuses it from the next request,
 and a still-reporting executor self-stops on its next beat.
 
-**What changes at beta+:** shortening the theft window is an owner ruling with its own cost
+**What changes at beta+:** shortening the theft window has its own cost
 (re-issue cadence against long jobs), and is not scheduled here. The entry comes out if the
 shipped lifetime value changes — the interlock test pins it, so a change is a deliberate, checked
 event — and the list-freshness sentences retire with their #586 follow-on, not before.
@@ -494,8 +494,8 @@ as they are renewed — one re-mint per affected credential, not a fleet-wide ac
 ### Bootstrap is trust-on-first-use: whoever completes the key ceremony first on a newly initialized core becomes its administrator
 
 Status: known limitation in beta · Target: none — it is a ruled bootstrap design, disclosed not
-slated · Tracked as: GitLab **#668**, closed on the owner's DOCUMENT ruling (2026-10-19); this entry
-is that ruling's text.
+slated · Tracked as: GitLab **#668**, closed on a DOCUMENT disposition (2026-10-19); this entry
+is that disposition's text.
 
 **Who is affected:** anyone who initializes a core on a network where another party can reach the
 `/init` + ceremony path first.
@@ -552,7 +552,7 @@ Plan against your own install date, not against any date written here.
 
 **What changes at beta+:** the capability filing now exists —
 `features/root-ca-ten-year-expiry-alarm-and-reroot.md` carries the alarm and the rotate-before-the-date
-expectation, with four owner decisions left unruled and no target date. **No GitLab issue row was created for
+expectation, with four decisions still open and no target date. **No GitLab issue row was created for
 that alarm capability, and none is owed**: the board takes defects only, and a decade-horizon maintenance gap is a
 capability item. One adjacent thing *does* have a row, and it is not this limitation: GitLab **#661**
 (`root-ca-validity-duplicated-installer-literal-vs-constant`) tracks the lifetime value being duplicated across
@@ -631,7 +631,7 @@ exemption above changes only when the work that replaces the core-held key lands
 
 ### The database password carries no length rule at all
 
-Status: known limitation in beta · Target: none until the owner rules a number · Tracked as: #675
+Status: known limitation in beta · Target: none until a number is ruled · Tracked as: #675
 
 **Who is affected:** anyone setting `VENYA_DB_PASSWORD` — the PostgreSQL password the core
 database authenticates with — on a served install. It is the only password variable the installer ships.
@@ -647,21 +647,21 @@ enforced by the core at boot governs the **server encryption passphrase**
 variable, and the one prompt in this family — `venya_read_secret_confirm` in `install-venya-core.sh` — bounds nothing.
 
 **What is NOT claimed here:** that a floor is missing by oversight and any number will do.
-The owner ruled the passphrase floor at 15 characters on the passphrase plane and has not
-ruled a number for the password plane. A leg inventing one is a worse defect than the
+The passphrase plane is ruled at a 15-character floor; no number is ruled for the password
+plane. An invented floor is a worse defect than the
 silence it fixes — the documented development-test value for this variable is
 shorter than 15 characters, so an unruled floor would make the installer refuse its own
 documented inputs. The rule is therefore **stated as absent**, in this entry and in the
 prompt text proposed in #675, which is a closed outcome under that row's AC2 rather than
 an open one.
 
-**What changes at beta+:** a floor on this variable lands only with an owner-ruled
+**What changes at beta+:** a floor on this variable lands only with a ruled
 number, applied at the installer prompt and at every reader together, with the documented
 test values re-checked against it in the same change.
 
 ### The secret-length bounds are proven at unit and source level and have never been observed at a real terminal prompt
 
-Status: known limitation in beta · Target: the owner-present fleet window (`AC8`) · Tracked as: #675
+Status: known limitation in beta · Target: not scheduled (`AC8`) · Tracked as: #675
 (open, HIGH — its code half is merged to `dev`; this entry discloses the missing physical half)
 
 **Who is affected:** anyone who types a server encryption passphrase at an installer prompt and
@@ -682,8 +682,8 @@ own floor (`MIN_PASSPHRASE_CODE_POINTS` and `_passphrase_is_below_floor` in
 `packages/cli/tests/test_prompt_length_disclosure_675.py`, the installer blank-entry face by
 `packages/server/tests/test_installer_db_passphrase_blank_570.py`, and the installer floor gate by
 `packages/core/tests/test_installer_db_passphrase_floor_gate_615.py`. The physical confirmation
-cell — an operator-facing served install driven to those prompts by hand — is `#675`'s `AC8`, it is
-gated on an owner-present fleet session, and it has not run.
+cell — an operator-facing served install driven to those prompts by hand — is `#675`'s `AC8`, it needs
+a hand-driven session at a served install's own console, and it has not run.
 
 **What is NOT claimed here:** that the bounds are unproven in code. They are not — the enforcement
 sites above exist and are source-verified, and the shipped cells cover the floor, the per-character
@@ -692,15 +692,15 @@ the at-terminal operator experience has **no physical capture yet**. This entry 
 the separate password-plane rule stated by the entry **"The database password carries no length
 rule at all"** in this document, and it does not revisit the ruling that the ceiling stays a permit.
 
-**What changes at beta+:** the `AC8` run lands in the owner's fleet window and the physical face is
+**What changes at beta+:** the `AC8` run lands and the physical face is
 captured; this entry is **deleted** at that point, not softened.
 
 ### The operator can disable TLS verification by explicit configuration; the product never does it to make a connection succeed
 
 Status: known limitation in beta · Target: none — it is a ruled development hatch, not a defect ·
-Tracked as: no row of its own. The `verify=False` strike against the MCP client was closed on the
-owner's read of the shipped tree (2026-10-19) without becoming a defect row, and he ruled this
-entry as the disclosure for the hatch instead.
+Tracked as: no row of its own. The `verify=False` strike against the MCP client was closed on a
+read of the shipped tree (2026-10-19) without becoming a defect row, and this entry
+is the disclosure for the hatch instead.
 
 **Who is affected:** anyone who has copied `VENYA_TLS_VERIFY=false` out of a development note, and
 anyone auditing a workstation, an executor or an MCP server that dials a core.
@@ -739,7 +739,7 @@ dial takes.
 
 ### The age-out date this product publishes for administrator credentials is computed from shipped constants, and has never been observed on a running guest
 
-Status: known limitation in beta · Target: an owner-present window, no date set · Tracked as: the
+Status: known limitation in beta · Target: not scheduled, no date set · Tracked as: the
 workspace carrier `features/RF-11-rollout-ageout-docs.md`, whose own status line reads *landed in
 part — not proven, not closed*.
 
@@ -757,7 +757,7 @@ than silent acceptance. And not any specific calendar day: the computed date dep
 own authority was first minted, which differs per deployment, so this entry deliberately prints no
 date. The gap is the **observation**, not the mechanism.
 
-**What changes at beta+:** the cell runs in an owner-present window against a served guest, and this
+**What changes at beta+:** the cell runs against a served guest at its own console, and this
 entry is **deleted**, not softened, when it does.
 
 ---
@@ -823,8 +823,8 @@ is deleted rather than softened when it does.
 
 ### Beta1's installers need internet: air-gapped installation is marked "coming soon", and no release is scheduled to carry it
 
-Status: known limitation in beta · Target: not scheduled — the carrying version is the owner's to
-rule, and this entry names no version for it · Tracked as: the workspace feature row
+Status: known limitation in beta · Target: not scheduled — the carrying version is not
+ruled, and this entry names no version for it · Tracked as: the workspace feature row
 `features/air-gapped-installation.md` (class `critical`), with GitLab **#5** as its closed
 predecessor history (the original "Fully offline installation method" row, `status/deferred`).
 
@@ -836,11 +836,11 @@ beta site is the local-mirror procedure behind info@tabith.com, which exists but
 packaged.
 
 **What is NOT claimed here:** not that the capability is abandoned — it is a critical-class
-feature row on the owner's board; and not that any specific release carries it — the ruling of
+feature row of critical class; and not that any specific release carries it — the ruling of
 2026-10-20 says "not beta1" and stopped there, and the version that does carry it has not been
-named by the owner.
+named.
 
-**What changes at beta+:** when the owner schedules the carrying release, this entry is deleted,
+**What changes at beta+:** when a carrying release is scheduled, this entry is deleted,
 not softened — the page's own maintenance rule.
 
 ---
@@ -897,9 +897,10 @@ page claims the served-core recovery proof was run; that ask belongs to the trac
 
 ### Beta publishes no sizing table: the concurrency default is 1, and the load curve that would justify any higher number has not been run
 
-Status: known limitation in beta · Target: not scheduled — the bench needs an owner-present window ·
-Tracked as: the workspace carrier `features/RF-5-capacity-benchmark.md` (`class: REFACTOR — owner-present
-bench`), whose publishable sizing table was declared out of beta scope by the owner on 2026-10-14.
+Status: known limitation in beta · Target: not scheduled — the bench needs a hand-driven run at a
+served guest's console ·
+Tracked as: the workspace carrier `features/RF-5-capacity-benchmark.md` (`class: REFACTOR — console
+bench`), whose publishable sizing table is out of beta scope (2026-10-14).
 
 **What the limitation is:** the shipped default is `max_concurrent_commands = 1` — one relayed command
 at a time per executor, which is the sequential posture beta ships. **The mechanism above that value is
@@ -921,7 +922,7 @@ word; and not that memory is the binding ceiling on a shipping build — today t
 default plus the absence of data, since the admission knob enforces no upper bound at all. What *is*
 measured is the per-sandbox footprint default, and it is not a sizing table.
 
-**What changes at beta+:** the curve runs, the owner rules the default on that data rather than on
+**What changes at beta+:** the curve runs, the default is ruled on that data rather than on
 local observation, and the sizing table becomes a document of its own — at which point this entry
 leaves with it.
 
@@ -932,9 +933,9 @@ leaves with it.
 Status: known limitation in beta · Target: `#696` (a per-command ceiling plus cancel), which does not
 gate this release · Tracked as: `#695` (**closed** 2026-10-22 — read back from the tracker API at
 `state=closed`, `labels=component/executor,severity/medium,status/closed`, having been re-graded from
-HIGH to medium on the owner's word with this entry as the disclosure. **The row closed on
+HIGH to medium with this entry as the disclosure. **The row closed on
 documentation and a corrected severity, not on a measured fix** — which is why the stdin paragraph below
-keeps its unmeasured caveat rather than claiming closure), and the owner ruled it in this form: document
+keeps its unmeasured caveat rather than claiming closure), and it is ruled in this form: document
 the collision, keep the capability, and land `#696` as the real protection. The `#695` AC1 **code** is on
 the line; whether AC1 **holds** is unmeasured — see the stdin note below.)
 
@@ -1025,15 +1026,15 @@ notice is verified over real TLS on loopback, which is not a guest on a network.
 
 **What changes at beta+:** the remaining half is observation, not mechanism — a real unanswered-or-unwired
 daemon on a real network, its sentence read at the operator's screen, and the same driven for the revoked
-class so the asymmetry above is confirmed rather than assumed. If the owner ever rules that a revocation
-may also be spoken on the wire, that is a separate decision with the probe cost this entry names; if the
+class so the asymmetry above is confirmed rather than assumed. If a revocation is ever ruled
+speakable on the wire, that is a separate decision with the probe cost this entry names; if the
 asymmetry is kept, this entry stays and is never softened.
 
 ---
 
 ### A masked count does not say which masking pass produced it, and on one path that pass is the narrower one
 
-Status: known limitation in beta · Target: `#715` (deferred by the owner; this entry is the price of the defer and stays until the leg lands) · Tracked as: `#715`
+Status: known limitation in beta · Target: `#715` (deferred; this entry is the price of the defer and stays until that work lands) · Tracked as: `#715`
 
 **Who is affected:** anyone reading `masked_count` from `run_command` on a deployment where the
 server-side Stage-2 filter is configured — and anyone reading it where it is not.
@@ -1072,7 +1073,7 @@ true after a fix is a different limitation, so it gets its own entry (that is wh
 certificate entry above sits under a closed issue). Where an entry names a merge, it names the
 merge **that carries the change it describes**, and that sha is read from the history rather
 than written from memory — the page's whole value is that a reader can go and look. A document
-that contradicts the product is corrected in the document. Entries marked *pending owner
+that contradicts the product is corrected in the document. Entries marked *pending
 disposition* are the ones where the choice between "fix it" and "disclose it" is still open;
 if the choice comes out as fix, the entry comes out before the release — and it comes out when
 the fix is in a build, not when the ruling is announced.
@@ -1102,7 +1103,7 @@ the shipped tree is a person re-deriving it against behaviour, and a guard that 
 gets switched off inside a week.
 
 **The coordinates on this page were re-pinned by the generator, and they are exact at one named
-face.** The owner's ruling (2026-10-18) was *"claim-truth now, numbers re-pinned at the cut commit
+face.** The rule (2026-10-18) is *"claim-truth now, numbers re-pinned at the cut commit
 with a checked assertion"*, and that recipe has now been carried out: the generator ran with
 `--write` at `25ece37` (commit `d3897ec` — 105 cites re-pinned, 60 manifest keys re-keyed, 3
 duplicate keys dropped, so the manifest went from 96 keys to 93), and `--check` reads rc 0 with
@@ -1119,7 +1120,7 @@ cut face `f1eb83d42a75c3f2bac95a6ae742c33b9bdee40a` the generator was run again:
 with `would change: False` over all 105 coordinates, and `--write` reports the same face and writes
 nothing, so no digit on this page moved between the two strikes. `PINNED_AT` in
 `packages/server/tests/test_beta_terms_cite_interlock.py` now names that cut face, which is what the
-owner's ruling asked for at a cut — the numbers are re-pinned at the commit being released, not
+ruling asks for at a cut — the numbers are re-pinned at the commit being released, not
 inherited from the last one that happened to be re-pinned. The assertion is live at this tree: the
 strict cell diffs that face against `HEAD` over the cited roots, sees the `0.1.0beta2` nameplate
 commit in them, and re-resolves every coordinate here against the tree the release will ship.
@@ -1184,7 +1185,7 @@ why the numbers are re-pinned by generator at the release commit and never by ha
 `_build_relay_ssl_context` `:622`→`:628`; the `VERIFY_X509_STRICT | VERIFY_X509_PARTIAL_CHAIN` line
 `:657`→`:663`; the CRL `load_verify_locations(capath=…)` + `VERIFY_CRL_CHECK_LEAF` pair
 `:669-670`→`:675-676`; `_STALE_LIST_DETAIL` `:687`→`:699`; `_ensure_dial_crl_store` `:690`→`:702`;
-the owner's ruled-posture paragraph `:695-698`→`:705-710`; the revoked-with-403 return
+the ruled-posture paragraph `:695-698`→`:705-710`; the revoked-with-403 return
 `:777`→`:789`; `_dial_crl_verdict_for` `:779`→`:775`; `is_online = 0.0 <= delta.total_seconds() < 60`
 `:1525`→`:1571`; the ruled-boundary scope note `:1926-1928`→`:1975-1977`; the per-dial mint call
 `:1930`→`:1979`; the two `"Server TLS misconfiguration"` raises `:1938`/`:1948`→`:1987`/`:1997`;
@@ -1201,7 +1202,7 @@ the context-build call `:1945`→`:1994`. In the other files: the admin CRL `nex
 **Two entries changed state on this pass, and both are removals of a claim the tree no longer
 makes.** The `#587` re-run entry came **out**: `install-venya-core.sh:1385-1389` now stops
 `venya-core.service` before `Running database migrations...` (the comment at `:1381` records the
-owner's disposition as `LAND — stop before migration`), so the interval the entry disclosed is
+disposition as `LAND — stop before migration`), so the interval the entry disclosed is
 closed, and the page's own rule is that an entry is removed, never softened, when its fix lands —
 the residual (a deliberate seconds-long interruption) is written in [UPGRADE.md](UPGRADE.md) and
 [installation.md](installation.md) §1, where the re-run contract lives. The `#590` entry stays but
