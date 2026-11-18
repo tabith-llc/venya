@@ -63,7 +63,7 @@ SENTINEL_PLAINTEXT: Final[bytes] = b"kek-sentinel-known-plaintext-v1!"
 LEGACY_SAMPLE_LIMIT: Final[int] = 5
 
 # --- #573: the passphrase LENGTH floor, DB-KEK plane -------------------------
-# Owner ruling (s85 batch, item #554, verbatim): "Deny whitespace-only passphrases
+# Ruled wording (item #554, verbatim): "Deny whitespace-only passphrases
 # and enforce a proper length passcode." The whitespace half shipped as #554 and the
 # length half landed on the CA plane in b50bc9e; this is the same ruled number on the
 # Argon2id side, which is the "same number for BOTH KDFs" clause of the ruling
@@ -124,7 +124,7 @@ def is_passphrase_below_floor(passphrase: bytes | str | None) -> bool:
 
 
 def short_passphrase_refusal(subject: str = DB_PASSPHRASE_ENV, *, read_path: bool = False) -> str:
-    """Owner-blessed refusal text for a passphrase under the floor, on the DB-KEK plane.
+    """Approved refusal text for a passphrase under the floor, on the DB-KEK plane.
 
     The block is the one ruled in as R5(a) (a prior worker lane's §6, with the two authorized
     corrections applied) — the same bytes ``server/ca.py`` and ``venya_cli.commands``
