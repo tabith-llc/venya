@@ -45,7 +45,7 @@ re-enrolling, rotating — does **not** stall readers under MVCC and needs no wi
 Up to and including the anchor this runbook was written against, a maintenance-loop pass
 (`maintenance.py` → `CAManager.purge_expired_revocations`, 5-minute schedule) DELETEd
 `executor_cert_revocations` rows older than `crl.crl_retention_days` (default 90). **That pass and
-that method are removed** by the owner's ruling of 2026-10-20 on ticket #685: the table is the
+that method are removed**: the table is the
 membership population for credential validity, so truth about a revoked credential is not aged out
 on a timer. It now matches `ExecutorCert`, which was never purged.
 
