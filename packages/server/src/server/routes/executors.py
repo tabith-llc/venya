@@ -726,7 +726,7 @@ def _ensure_dial_crl_store(request: Request, db: Session) -> str:
     ANY failure to produce a freshly minted list raises — the caller refuses the
     dial with the stale-class 503 and never falls back to a CRL-less context. The
     refusal is at the NEW connection (the dial), never a yank of work already in
-    flight (owner: "agree completely" to the boundary).
+    flight (the boundary agreed in full).
 
     Mechanism: the CRL is minted IN THIS PROCESS (`CAManager.generate_crl`, the same
     capped single-fetch population discipline as the served GET, #337), written
