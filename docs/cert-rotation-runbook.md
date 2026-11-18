@@ -57,7 +57,7 @@ desktop ceremony requires, including on Windows, is covered in `faq.md` and
 | Cut-over — the run of the installer that stopped printing the copy instruction | 2026-10-12 | `2b70210` 11:35:25 -0600, merged into `dev` as `832c11c` 11:36:13 -0600 (RF-10) |
 | Sum | **2027-01-10** | `date -u -d "2026-10-12 + 90 days"` → 2027-01-10 |
 
-**Measured absent, stated as absence and not as presence.** On a re-installed guest of this fleet the 90-day class was **not present to measure**: on `venya-core-3` (read 2026-10-21 16:42–16:46Z, seat a prior lane, leg 316, source `origin/dev = 001e181d`) the served `:443` leaf expired **2027-10-18** (365 d), the root CA **2036-09-29** (3,650 d), and the admin credential in service `CN=venya-adm3` carried a span of **3,600 SECONDS** — **three lifetimes, none of them `2027-01-10`** — with exactly **one** `admin_credentials` row, `source=issue-route`. **A mint was deliberately not performed to manufacture the missing class: minting is the owner's hand.** **So treat the table below as the arithmetic of a bootstrap plane that this guest does not carry, not as a fleet-wide inventory of live 90-day credentials, and do not re-derive a date from `ADMIN_CERT_VALIDITY_DAYS` for any credential a person renewed.**
+**Measured absent, stated as absence and not as presence.** On a re-installed guest of this fleet the 90-day class was **not present to measure**: on `venya-core-3` (read 2026-10-21 16:42–16:46Z, seat a prior lane, leg 316, source `origin/dev = 001e181d`) the served `:443` leaf expired **2027-10-18** (365 d), the root CA **2036-09-29** (3,650 d), and the admin credential in service `CN=venya-adm3` carried a span of **3,600 SECONDS** — **three lifetimes, none of them `2027-01-10`** — with exactly **one** `admin_credentials` row, `source=issue-route`. **A mint was deliberately not performed to manufacture the missing class.** **So treat the table below as the arithmetic of a bootstrap plane that this guest does not carry, not as a fleet-wide inventory of live 90-day credentials, and do not re-derive a date from `ADMIN_CERT_VALIDITY_DAYS` for any credential a person renewed.**
 
 **Which number is enforced where**, because two of these lifetimes are one hour apart
 in name only and a third number nearby is not a lifetime at all:
@@ -81,7 +81,7 @@ not a guarantee, and one fact about the cut-over matters to it: the banner chang
 key") landed on the development branch — that branch has since been rewritten, so read
 it by subject rather than trusting the number — and when this file was written the
 newest published tag (`v0.1.0alpha16`, 2026-09-27) still printed the old copy
-instruction. That alpha line is withdrawn by owner order (2026-10-18), so the sentence
+instruction. That alpha line is withdrawn, so the sentence
 above is a dated reading of a release being retired, and `v0.1.0beta1` is the first
 release to be published that carries the new banner. Until an operator installs from a
 release that carries it, an install still mints an old-shape pair,
@@ -169,7 +169,7 @@ executor door.
 4. **Propagation is not instantaneous.** The executor learns revoked peers from the
    revocation poll it already runs (~30 s, `REVOCATION_LIST_PATH` in `executor/daemon.py`),
    and the refusal lands on **new** connections only — a relay call already in flight is
-   not terminated. That boundary is the owner's ruling and is not a knob.
+   not terminated. That boundary is not a knob.
 
 5. **Where the refusal actually lands, and what that proves.** The peer check runs in the
    listener's connection-accept path (`packages/executor/src/executor/relay_listener.py`, the
@@ -341,7 +341,7 @@ requirement applies to the next write, so set the passphrase once and rotate.
 This is disk protection by a file passphrase, **not** hardware-key custody: the
 passphrase lives on the host, delivered through the service environment. The interim
 exemption and its retirement trigger are written up in
-`docs/design-fido2-keywrap.md` §6 (owner ruling R7-Q3).
+`docs/design-fido2-keywrap.md` §6.
 
 `renew` authenticates with the CURRENT cert — run it while the cert is still valid
 (the same 3-day window the daemon uses). If the cert already expired, re-register
@@ -465,7 +465,7 @@ dies within one poll.
   nothing about the credential, and the refusal it produces is the 503 class
   below, never `403 REVOKED`.
 
-**Relay-listener accept gate (#586, owner-ruled option 3).** The listener on :8443
+**Relay-listener accept gate (#586).** The listener on :8443
 consults the ONE revocation answer this side holds (`DaemonState.revoked`, plus a
 boot-scope "has the core answered?" flag) on every NEW connection, after the TLS
 handshake and before a single request byte is read. It holds no copy of the
@@ -498,7 +498,7 @@ saying one exists.
 
 **Lifecycle:** the identity flag dies only with the Executor row — never via a timer.
 The CRL table (`executor_cert_revocations`) is append-only serial history + advisory
-broadcast, and since #685 (owner ruling 2026-10-20) it is EXEMPT from time-based purge:
+broadcast, and since #685 it is EXEMPT from time-based purge:
 the maintenance-loop pass that used to delete rows older than `crl_retention_days` is
 removed, so a revoked serial stays listed. Purge-dropped serial rows are no longer
 "expected" — if a row disappears, that is an incident, not aging. (`crl_retention_days`
@@ -671,7 +671,7 @@ The marker's OID moved to **Tabith LLC's registered Private Enterprise Number
 reads. The bounded transition window that also read an earlier arc — a
 registration belonging to a different enterprise, recorded on ticket #601 and
 deliberately not printed in this runbook — has been **closed and its read
-branch removed**, on the owner's ruling that nothing alpha-era is supported.
+branch removed**: nothing alpha-era is supported.
 `parse_plane_marker` consults the registered arc only, and new mints write it.
 The constant is `VENYA_PLANE_MARKER_OID`, `packages/server/src/server/ca.py`; a
 certificate whose marker sits anywhere else is refused at the marker leg with
@@ -695,8 +695,8 @@ retiring those copies as part of rotation, not as an optional follow-up.
 **The window is closed — what that costs you.** The legacy read was a loan with
 a named exit: it was to close once every plane-bearing credential path had been
 re-minted per plane (machine = installer/bootstrap mint, human = CSR/login-
-ceremony signer — separate proofs). The owner ruled instead that no alpha-era
-credential is supported, so the read branch came out and the exit is now. A
+ceremony signer — separate proofs). No alpha-era credential is supported, so the read
+branch came out and the exit is now. A
 hand-copied pre-#601 leaf **fails closed** with the named re-issue refusal, not
 a silent plane default. If you hold such a copy, do not refresh it from the
 core — retire it: mint your own short-lived certificate on the workstation
